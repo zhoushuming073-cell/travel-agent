@@ -2,7 +2,6 @@
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
-const OVERPASS = "https://overpass-api.de/api/interpreter";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
 const OSRM = "https://router.project-osrm.org";
 
@@ -263,37 +262,69 @@ function poiFromElement(element: any, requiredByUser = false) {
   };
 }
 
-async function overpassSpots(city: any, limit = 35, requiredNames: string[] = []) {
-  const radius = 24000;
-  const around = `(around:${radius},${city.lat},${city.lng})`;
-  const exactRequired = requiredNames.flatMap(name => {
-    const safeName = cleanText(name).replace(/\\/g, "\\\\").replace(/\"/g, "\\\"");
-    return [`nwr[\"name\"=\"${safeName}\"]${around};`, `nwr[\"name:zh\"=\"${safeName}\"]${around};`];
+function wikiCategory(title: string, extract: string) {
+  const text = `${title} ${extract}`;
+  if (/湖|山|峰|洞|瀑布|湿地|公园|花园|园林|岛|堤|自然保护区|风景区/.test(text)) return "自然景观";
+  if (/博物馆|美术馆|纪念馆|展览馆|科技馆/.test(text)) return "博物展馆";
+  if (/寺|庙|塔|教堂|故居|遗址|古镇|古城|祠|陵|历史|文化遗产|世界遗产/.test(text)) return "历史文化";
+  return "城市景观";
+}
+
+function wikiPageToSpot(page: any, city: any, requiredNames: string[]) {
+  const coordinate = page?.coordinates?.[0];
+  if (!coordinate || !Number.isFinite(Number(coordinate.lat)) || !Number.isFinite(Number(coordinate.lon))) return null;
+  const name = cleanText(page.title);
+  const extract = cleanText(page.extract);
+  const text = `${name} ${extract}`;
+  if (/街道办事处|行政区|市辖区|下辖|地铁|车站|铁路|高速公路|国道|省道|医院|学校|大学|住宅区|写字楼|公司总部|机场/.test(text)) return null;
+  if (/^[\u4e00-\u9fa5]{2,10}(市|区|县|省)$/.test(name)) return null;
+  if (!/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|古村|寺|庙|塔|湖|山|峰|洞|瀑布|湿地|花园|园林|宫|祠|陵|古城|历史文化|世界遗产|风景|自然保护区|教堂|广场|动物园|植物园|水库|岛|堤|桥|街区|宋城/.test(text)) return null;
+  const lat = Number(coordinate.lat), lng = Number(coordinate.lon);
+  if (haversine(city.lat, city.lng, lat, lng) > 80000) return null;
+  const requiredByUser = requiredNames.some(required => {
+    const wanted = normalizeName(required), actual = normalizeName(name);
+    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
   });
-  const query = [
-    "[out:json][timeout:25];(",
-    `nwr[\"tourism\"~\"attraction|museum|viewpoint|gallery|zoo|theme_park\"][\"name\"]${around};`,
-    `nwr[\"historic\"][\"name\"]${around};`,
-    `nwr[\"leisure\"=\"park\"][\"name\"]${around};`,
-    `nwr[\"natural\"~\"peak|waterfall|beach|spring\"][\"name\"]${around};`,
-    `nwr[\"amenity\"~\"place_of_worship|arts_centre\"][\"name\"]${around};`,
-    ...exactRequired,
-    ");out center tags;",
-  ].join("");
-  const requestInit = { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ data: query }) };
-  let raw: any;
-  try {
-    raw = await fetchJson(OVERPASS, requestInit, 30000, "OpenStreetMap Overpass 主节点");
-  } catch (error: any) {
-    if (!/429|超时|5\d\d/.test(cleanText(error?.message))) throw error;
-    raw = await fetchJson("https://overpass.kumi.systems/api/interpreter", requestInit, 30000, "OpenStreetMap Overpass 备用节点");
-  }
-  const seen = new Set<string>();
-  return (raw.elements || []).map((element: any) => poiFromElement(element)).filter((poi: any) => {
-    const key = normalizeName(poi.name);
-    if (!key || !Number.isFinite(poi.lat) || !Number.isFinite(poi.lng) || seen.has(key)) return false;
-    seen.add(key); return true;
-  }).slice(0, limit);
+  return {
+    id: `wikipedia-${page.pageid}`, name, lat, lng, category: requiredByUser ? "用户必选" : wikiCategory(name, extract),
+    durationMin: /博物馆|美术馆|纪念馆|宋城/.test(text) ? 120 : /公园|湖|山|湿地|风景区/.test(text) ? 110 : 90,
+    openingHours: "", website: "", wikipedia: `zh:${name}`, wikidata: cleanText(page?.pageprops?.wikibase_item),
+    wikimediaCommons: "", image: cleanText(page?.thumbnail?.source),
+    staticPoiQuality: "百科坐标已核验", sourceUrl: `https://zh.wikipedia.org/wiki/${encodeURIComponent(name.replace(/ /g, "_"))}`,
+    fetchedAt: new Date().toISOString(), requiredByUser,
+    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
+    openingStatus: { status: "unknown", label: "开放时间未知，出发前请复核" },
+    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过中文维基百科坐标核验"] : ["中文维基百科公开页面及坐标已核验", extract.slice(0, 70) || "公开百科地点"],
+    transitStops: [], extract,
+  };
+}
+
+async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [], preferences: string[] = []) {
+  const queries = [
+    `${city.name} 旅游景点`,
+    `${city.name} 公园 博物馆 古迹`,
+    `${city.name} ${preferences.slice(0, 3).join(" ")}`.trim(),
+    requiredNames.length ? `${city.name} ${requiredNames.join(" ")}` : `${city.name} 风景区 历史文化`,
+  ];
+  const common = {
+    action: "query", prop: "coordinates|pageimages|extracts|pageprops", exintro: "1", explaintext: "1", exsentences: "3",
+    piprop: "thumbnail", pithumbsize: "720", format: "json", formatversion: "2", redirects: "1",
+  };
+  const searchCalls = queries.map(query => {
+    const params = new URLSearchParams({ ...common, generator: "search", gsrsearch: query, gsrnamespace: "0", gsrlimit: "40" });
+    return fetchJson(`https://zh.wikipedia.org/w/api.php?${params}`, {}, 18000, "中文维基百科景点搜索");
+  });
+  const geoPoints = [[city.lat, city.lng], [city.lat + 0.08, city.lng - 0.08], [city.lat - 0.08, city.lng + 0.08]];
+  const geoCalls = geoPoints.map(([lat, lng]) => {
+    const params = new URLSearchParams({ ...common, generator: "geosearch", ggsprimary: "all", ggsnamespace: "0", ggsradius: "10000", ggslimit: "50", ggscoord: `${lat}|${lng}` });
+    return fetchJson(`https://zh.wikipedia.org/w/api.php?${params}`, {}, 18000, "中文维基百科附近地点搜索");
+  });
+  const settled = await Promise.allSettled([...searchCalls, ...geoCalls]);
+  const responses = settled.filter(result => result.status === "fulfilled").map((result: any) => result.value);
+  if (!responses.length) throw new Error("中文维基百科景点检索暂时不可用，请稍后重试");
+  const pages = responses.flatMap(response => response?.query?.pages || []);
+  const spots = uniqueSpots(pages.map(page => wikiPageToSpot(page, city, requiredNames)).filter(Boolean));
+  return rankSpots(spots, { style: preferences.join(" "), preferences }).slice(0, limit);
 }
 
 async function verifyRequired(city: any, names: string[], candidates: any[] = []) {
@@ -305,7 +336,7 @@ async function verifyRequired(city: any, names: string[], candidates: any[] = []
       return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
     });
     if (localMatch) {
-      verified.push({ ...localMatch, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次 Overpass 候选景点中核验"] });
+      verified.push({ ...localMatch, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次中文维基百科候选景点中核验"] });
       continue;
     }
     const params = new URLSearchParams({ q: `${name}, ${city.name}, 中国`, format: "jsonv2", addressdetails: "1", extratags: "1", namedetails: "1", limit: "5", countrycodes: "cn", "accept-language": "zh-CN" });
@@ -416,7 +447,8 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       ok: true,
       ai: { status: env.DEEPSEEK_API_KEY ? "configured" : "unconfigured", model: env.DEEPSEEK_MODEL || "deepseek-chat", note: "两阶段调用：先提取需求，再用已核验工具数据规划" },
       services: [
-        { name: "OpenStreetMap / Overpass", provider: "OSM", status: "live", note: "城市与景点公开数据" },
+        { name: "中文维基百科景点检索", provider: "Wikimedia", status: "live", note: "公开页面、摘要与坐标；不依赖大范围 Overpass 扫描" },
+        { name: "OpenStreetMap / Nominatim", provider: "OSM", status: "live", note: "城市及用户必选景点精确核验" },
         { name: "Open-Meteo", provider: "Open-Meteo", status: "live", note: "最多约 16 天逐日预报" },
         { name: "OSRM", provider: "OSRM", status: "live", note: "道路路线；失败时透明估算" },
         { name: "官方客流与预约", provider: "未接入", status: "offline", note: "保持未知，不由 AI 编造" },
@@ -426,7 +458,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
     if (url.pathname === "/api/providers/status") return json({ providers: {
       weather: { name: "天气", role: "Open-Meteo", status: "ready", fallback: "超出预报范围时明确显示不可用" },
-      spots: { name: "景点", role: "OpenStreetMap / Overpass", status: "ready", fallback: "无数据即报错，不用预制景点" },
+      spots: { name: "景点", role: "中文维基百科 + OSM 精确核验", status: "ready", fallback: "无数据即报错，不用预制景点" },
       route: { name: "道路路由", role: "OSRM", status: "ready", fallback: "坐标距离×1.25 透明估算" },
       transit: { name: "公共交通", role: "暂无免费稳定实时接口", status: "unconfigured", fallback: "显示道路耗时参考，不声称实时公交" },
       crowd: { name: "客流与预约", role: "景区官方来源待接入", status: "unconfigured", fallback: "保持未知" },
@@ -452,11 +484,22 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
     if (url.pathname === "/api/spots") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
-      const spots = await overpassSpots(city, clamp(url.searchParams.get("limit"), 1, 50));
-      return json({ city: city.name, spots, count: spots.length, source: "OpenStreetMap / Overpass", fetchedAt: new Date().toISOString() });
+      const spots = await wikipediaSpots(city, clamp(url.searchParams.get("limit"), 1, 50));
+      return json({ city: city.name, spots, count: spots.length, source: "中文维基百科公开页面与坐标", fetchedAt: new Date().toISOString() });
     }
 
-    if (url.pathname === "/api/image") return json({ found: false, reason: "仅在可核验到与景点精确绑定的图片时展示；当前部署不做关键词图片猜测" });
+    if (url.pathname === "/api/image") {
+      const imageUrl = cleanText(url.searchParams.get("image"));
+      const wikipedia = cleanText(url.searchParams.get("wikipedia"));
+      try {
+        const parsed = new URL(imageUrl);
+        if (parsed.protocol === "https:" && parsed.hostname.endsWith(".wikimedia.org")) {
+          const title = wikipedia.replace(/^zh:/, "");
+          return json({ found: true, url: imageUrl, source: "Wikimedia 精确页面图片", sourceUrl: title ? `https://zh.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}` : "https://commons.wikimedia.org/" });
+        }
+      } catch { /* no verified image */ }
+      return json({ found: false, reason: "没有与该景点页面精确绑定的 Wikimedia 图片；不做关键词猜图" });
+    }
 
     if (url.pathname === "/api/agent" && request.method === "POST") {
       const body = await request.json();
@@ -501,7 +544,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         return json({ status: "working", progress: { phase: "live", title: "正在联网获取实时信息……", items: [
           `✓ 已通过中国范围地图服务核验目的地：${envelope.city.displayName || envelope.city.name}`,
           "● 正在读取 Open-Meteo 对应出行日期的逐日预报",
-          "● 正在从 Overpass 获取候选景点，并逐项核验用户必选项",
+          "● 正在从中文维基百科检索带坐标的候选景点，并用 OSM 精确核验必选项",
           "● 联网数据核验完成后，将调用 DeepSeek 第二阶段生成三套差异化路线",
           "● 客流、预约、开放状态没有可靠来源时将保持未知",
         ], formSync: envelope.profile } }, 200, { "set-cookie": `${cookieKey}=ready; Max-Age=900; Path=/; Secure; SameSite=Lax` });
@@ -518,7 +561,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
 async function buildPlan(profile: any, city: any, env: any) {
   const [weather, rawSpots, hotel] = await Promise.all([
-    weatherFor(city, profile.startDate, profile.days), overpassSpots(city, 45, profile.requiredAttractions), hotelFor(profile, city),
+    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences), hotelFor(profile, city),
   ]);
   const required = await verifyRequired(city, profile.requiredAttractions, rawSpots);
   const spots = rankSpots(uniqueSpots([...required, ...rawSpots]), profile);
@@ -568,14 +611,14 @@ async function buildPlan(profile: any, city: any, env: any) {
       budgetBreakdown: { knownEstimate: transportEstimate, limit: profile.budget, items: [
         { name: "市内交通透明估算", amount: transportEstimate }, { name: "住宿", amount: null }, { name: "门票", amount: null }, { name: "餐饮", amount: null },
       ], note: "只汇总可透明估算的市内交通；实时房价、票价与餐费未核验，保持未知" },
-      dataSources: { weather: "Open-Meteo", spots: "OpenStreetMap / Overpass / Nominatim", hotels: "OpenStreetMap / Nominatim（无实时房价）", routing: "OSRM；失败时坐标距离×1.25透明估算", transit: "道路耗时参考，未接入实时公交班次", crowd: "未接入官方可验证来源，全部保持未知", reservations: "未接入景区官方预约接口" },
+      dataSources: { weather: "Open-Meteo", spots: "中文维基百科公开页面与坐标；必选项由 OSM Nominatim 精确核验", hotels: "用户指定住宿区域（无实时房价）", routing: "OSRM；失败时坐标距离×1.25透明估算", transit: "道路耗时参考，未接入实时公交班次", crowd: "未接入官方可验证来源，全部保持未知", reservations: "未接入景区官方预约接口" },
       generatedAt: new Date().toISOString(),
     });
   }
   const requiredCoverage = alternatives.map(plan => requiredIds.every(id => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => item.id === id)));
   if (requiredCoverage.some(Boolean) && !requiredCoverage.every(Boolean)) throw new Error("必选景点覆盖校验失败，已拒绝返回不完整路线");
   const progress = { phase: "route", title: "正在进行路线优化……", items: [
-    `✓ 获取并去重候选景点 ${spots.length} 个`,
+    `✓ 从中文维基百科获取并去重带坐标候选景点 ${spots.length} 个`,
     `✓ 已核验用户必选景点 ${required.length} 个；3 套方案覆盖校验通过`,
     `✓ 已为 ${profile.days * 3} 个日程计算道路路线或透明估算`,
     `✓ 已按 ${profile.dayStart}—${profile.dayEnd} 安排游玩，并插入午餐休息`,
