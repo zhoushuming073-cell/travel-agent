@@ -414,7 +414,7 @@ async function loadSpots(force = false) {
 function renderSpots() {
   const list = state.spots.slice(0, 8);
   if (!list.length) { $('#spotGrid').innerHTML = '<div class="data-empty">没有获取到可展示的景点。</div>'; return; }
-  $('#spotGrid').innerHTML = list.map(spot => `<article class="spot-card" data-id="${esc(spot.id)}" tabindex="0" role="button" aria-label="查看${esc(spot.name)}详情"><div class="spot-image"><div class="fallback-art">⌖</div><span class="spot-badge">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-body"><strong title="${esc(spot.name)}">${esc(spot.name)}</strong><p>${spot.openingHours ? `开放：${esc(spot.openingHours)}` : '开放时间：公开数据未标注'}</p><div class="spot-score"><span>静态质量 ${spot.staticPoiQuality}</span><span>${esc(seasonalText(spot))}</span></div><a class="source-link" href="${esc(spot.sourceUrl)}" target="_blank" rel="noreferrer">OSM 数据来源</a></div></article>`).join('');
+  $('#spotGrid').innerHTML = list.map(spot => `<article class="spot-card" data-id="${esc(spot.id)}" tabindex="0" role="button" aria-label="查看${esc(spot.name)}详情"><div class="spot-image"><div class="fallback-art">⌖</div><span class="spot-badge">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-body"><strong title="${esc(spot.name)}">${esc(spot.name)}</strong><p>${spot.openingHours ? `开放：${esc(spot.openingHours)}` : '开放时间：公开数据未标注'}</p><div class="spot-score"><span>静态质量 ${spot.staticPoiQuality}</span><span>${esc(seasonalText(spot))}</span></div><a class="source-link" href="${esc(spot.sourceUrl)}" target="_blank" rel="noreferrer">景点资料来源</a></div></article>`).join('');
   $$('.spot-card').forEach(card => {
     const spot = state.spotIndex.get(card.dataset.id);
     card.addEventListener('click', event => { if (!event.target.closest('a')) openSpotDetails(spot); });
@@ -432,7 +432,7 @@ async function loadSpotImage(spot, holder) {
     spot._image = imageData;
     const image = document.createElement('img'); image.loading = 'lazy'; image.alt = spot.name; image.src = imageData.url; image.onerror = () => image.remove(); holder.appendChild(image);
     const link = holder.closest('.spot-card')?.querySelector('.source-link');
-    if (link) { link.href = imageData.sourceUrl || link.href; link.textContent = `${imageData.source || 'Wikimedia'} 图片来源`; }
+    if (link) { link.href = imageData.sourceUrl || link.href; link.textContent = `${imageData.source || '精确页面图片'}来源`; }
   } catch { /* image is optional */ }
 }
 
