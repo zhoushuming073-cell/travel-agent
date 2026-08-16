@@ -133,8 +133,8 @@ function deterministicHints(text: string) {
   const party = text.match(/(\d{1,2})\s*(?:个人|人)(?:出行|旅行|游玩)?/);
   if (party) result.partySize = Number(party[1]);
   const required: string[] = [];
-  const requiredText = text.match(/(?:一定|必须|必选|务必)(?:能)?去\s*([^。；;\n]+)/);
-  if (requiredText) required.push(...requiredText[1].split(/[、，,和与及]/).map(v => v.trim()).filter(v => v.length >= 2 && v.length <= 18));
+  const requiredText = text.match(/(?:一定|必须|必选|务必)(?:能)?去\s*([^，,。；;\n]+)/);
+  if (requiredText) required.push(...requiredText[1].split(/[、和与及]/).map(v => v.trim()).filter(v => v.length >= 2 && v.length <= 18));
   if (required.length) result.requiredAttractions = [...new Set(required)];
   const start = text.match(/(?:上午|每天)?\s*(\d{1,2})\s*点(?:左右)?开始/);
   const end = text.match(/(?:晚上|每天)?\s*(\d{1,2})\s*点(?:前|之前)?结束/);
@@ -502,6 +502,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
           `✓ 已通过中国范围地图服务核验目的地：${envelope.city.displayName || envelope.city.name}`,
           "● 正在读取 Open-Meteo 对应出行日期的逐日预报",
           "● 正在从 Overpass 获取候选景点，并逐项核验用户必选项",
+          "● 联网数据核验完成后，将调用 DeepSeek 第二阶段生成三套差异化路线",
           "● 客流、预约、开放状态没有可靠来源时将保持未知",
         ], formSync: envelope.profile } }, 200, { "set-cookie": `${cookieKey}=ready; Max-Age=900; Path=/; Secure; SameSite=Lax` });
       }
