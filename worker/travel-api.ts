@@ -26,17 +26,31 @@ function fetchOptions(init: RequestInit = {}): RequestInit {
   };
 }
 
-async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 18000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, fetchOptions({ ...init, signal: controller.signal }));
-    const text = await response.text();
-    if (!response.ok) throw new Error(`上游服务返回 ${response.status}`);
-    return text ? JSON.parse(text) : {};
-  } finally {
-    clearTimeout(timer);
+async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 18000, source = "上游服务") {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, fetchOptions({ ...init, signal: controller.signal }));
+      const text = await response.text();
+      if (response.ok) return text ? JSON.parse(text) : {};
+      if (response.status === 429 && attempt < 2) {
+        const retryAfter = Number(response.headers.get("retry-after") || 0);
+        await new Promise(resolve => setTimeout(resolve, retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 900 * (attempt + 1)));
+        continue;
+      }
+      let detail = "";
+      try { detail = cleanText(JSON.parse(text)?.error?.message || JSON.parse(text)?.reason); } catch { detail = cleanText(text).slice(0, 160); }
+      if (response.status === 429) throw new Error(`${source}请求过于频繁（429）${detail ? `：${detail}` : "，请稍后重试"}`);
+      throw new Error(`${source}返回 ${response.status}${detail ? `：${detail}` : ""}`);
+    } catch (error: any) {
+      if (error?.name === "AbortError") throw new Error(`${source}响应超时`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw new Error(`${source}请求失败`);
 }
 
 function dateString(value: unknown, fallback = new Date().toISOString().slice(0, 10)) {
@@ -98,7 +112,7 @@ async function deepSeek(env: any, messages: any[], jsonMode = false, maxTokens =
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
     body: JSON.stringify(payload),
-  }, 55000);
+  }, 55000, "DeepSeek");
   const content = result?.choices?.[0]?.message?.content;
   if (!content) throw new Error("DeepSeek 没有返回内容");
   return cleanText(content);
@@ -171,18 +185,25 @@ async function extractProfile(input: any, env: any) {
 
 async function searchCities(query: string, limit = 8) {
   if (cleanText(query).length < 2) return [];
-  const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", addressdetails: "1", limit: String(limit), countrycodes: "cn", "accept-language": "zh-CN" });
-  const data = await fetchJson(`${NOMINATIM}/search?${params}`);
+  const geoParams = new URLSearchParams({ name: cleanText(query), count: String(limit), language: "zh", format: "json", countryCode: "CN" });
+  const geoData = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?${geoParams}`, {}, 15000, "Open-Meteo 城市搜索");
   const seen = new Set<string>();
+  const cities = (geoData?.results || []).map((row: any) => {
+    const name = cleanText(row.name || query).replace(/市$/, "");
+    return {
+      name,
+      displayName: [row.name, row.admin1, row.admin2, row.country].filter(Boolean).join("，"),
+      lat: Number(row.latitude), lng: Number(row.longitude), zoom: 11, countryCode: "cn",
+      geonameId: row.id, source: "Open-Meteo Geocoding",
+    };
+  }).filter((row: any) => row.name && Number.isFinite(row.lat) && !seen.has(row.name) && seen.add(row.name));
+  if (cities.length) return cities;
+  const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", addressdetails: "1", limit: String(Math.min(limit, 5)), countrycodes: "cn", "accept-language": "zh-CN" });
+  const data = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, "OSM 城市搜索");
   return (Array.isArray(data) ? data : []).map((row: any) => {
     const address = row.address || {};
     const name = cleanText(address.city || address.town || address.county || address.state_district || row.name || query).replace(/市$/, "");
-    return {
-      name,
-      displayName: cleanText(row.display_name),
-      lat: Number(row.lat), lng: Number(row.lon), zoom: 11, countryCode: "cn",
-      osmType: row.osm_type, osmId: row.osm_id,
-    };
+    return { name, displayName: cleanText(row.display_name), lat: Number(row.lat), lng: Number(row.lon), zoom: 11, countryCode: "cn", osmType: row.osm_type, osmId: row.osm_id, source: "OSM Nominatim" };
   }).filter((row: any) => row.name && Number.isFinite(row.lat) && !seen.has(row.name) && seen.add(row.name));
 }
 
@@ -200,7 +221,7 @@ async function weatherFor(city: any, startDate: string, days: number) {
     daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
     forecast_days: "16",
   });
-  const raw = await fetchJson(`${OPEN_METEO}?${params}`);
+  const raw = await fetchJson(`${OPEN_METEO}?${params}`, {}, 18000, "Open-Meteo 天气服务");
   const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
   const tripForecast = Array.from({ length: days }, (_, index) => {
     const date = addDays(startDate, index);
@@ -242,9 +263,13 @@ function poiFromElement(element: any, requiredByUser = false) {
   };
 }
 
-async function overpassSpots(city: any, limit = 35) {
+async function overpassSpots(city: any, limit = 35, requiredNames: string[] = []) {
   const radius = 24000;
   const around = `(around:${radius},${city.lat},${city.lng})`;
+  const exactRequired = requiredNames.flatMap(name => {
+    const safeName = cleanText(name).replace(/\\/g, "\\\\").replace(/\"/g, "\\\"");
+    return [`nwr[\"name\"=\"${safeName}\"]${around};`, `nwr[\"name:zh\"=\"${safeName}\"]${around};`];
+  });
   const query = [
     "[out:json][timeout:25];(",
     `nwr[\"tourism\"~\"attraction|museum|viewpoint|gallery|zoo|theme_park\"][\"name\"]${around};`,
@@ -252,9 +277,17 @@ async function overpassSpots(city: any, limit = 35) {
     `nwr[\"leisure\"=\"park\"][\"name\"]${around};`,
     `nwr[\"natural\"~\"peak|waterfall|beach|spring\"][\"name\"]${around};`,
     `nwr[\"amenity\"~\"place_of_worship|arts_centre\"][\"name\"]${around};`,
+    ...exactRequired,
     ");out center tags;",
   ].join("");
-  const raw = await fetchJson(OVERPASS, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ data: query }) }, 30000);
+  const requestInit = { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ data: query }) };
+  let raw: any;
+  try {
+    raw = await fetchJson(OVERPASS, requestInit, 30000, "OpenStreetMap Overpass 主节点");
+  } catch (error: any) {
+    if (!/429|超时|5\d\d/.test(cleanText(error?.message))) throw error;
+    raw = await fetchJson("https://overpass.kumi.systems/api/interpreter", requestInit, 30000, "OpenStreetMap Overpass 备用节点");
+  }
   const seen = new Set<string>();
   return (raw.elements || []).map((element: any) => poiFromElement(element)).filter((poi: any) => {
     const key = normalizeName(poi.name);
@@ -263,11 +296,20 @@ async function overpassSpots(city: any, limit = 35) {
   }).slice(0, limit);
 }
 
-async function verifyRequired(city: any, names: string[]) {
+async function verifyRequired(city: any, names: string[], candidates: any[] = []) {
   const verified: any[] = [];
   for (const name of names) {
+    const wanted = normalizeName(name);
+    const localMatch = candidates.find(item => {
+      const actual = normalizeName(item.name);
+      return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
+    });
+    if (localMatch) {
+      verified.push({ ...localMatch, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次 Overpass 候选景点中核验"] });
+      continue;
+    }
     const params = new URLSearchParams({ q: `${name}, ${city.name}, 中国`, format: "jsonv2", addressdetails: "1", extratags: "1", namedetails: "1", limit: "5", countrycodes: "cn", "accept-language": "zh-CN" });
-    const rows = await fetchJson(`${NOMINATIM}/search?${params}`);
+    const rows = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, `必选景点“${name}”地图核验`);
     const best = (rows || []).find((row: any) => normalizeName(row.name || row.display_name.split(",")[0]).includes(normalizeName(name))) || rows?.[0];
     if (!best) throw new Error(`必选景点“${name}”未能通过地图数据核验，已停止规划以避免遗漏或臆造`);
     const lat = Number(best.lat), lng = Number(best.lon);
@@ -364,14 +406,8 @@ function distribute(candidates: any[], profile: any, variantIndex: number) {
 }
 
 async function hotelFor(profile: any, city: any) {
-  const query = profile.lodgingArea ? `${profile.lodgingArea}, ${city.name}` : `${city.name} 酒店`;
-  try {
-    const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", limit: "5", countrycodes: "cn", "accept-language": "zh-CN" });
-    const rows = await fetchJson(`${NOMINATIM}/search?${params}`);
-    const hotel = (rows || []).find((row: any) => ["hotel", "guest_house", "hostel"].includes(row.type)) || rows?.[0];
-    if (!hotel) throw new Error("none");
-    return { name: cleanText(hotel.name || hotel.display_name.split(",")[0]), reason: profile.lodgingArea ? `用户指定住宿范围：${profile.lodgingArea}` : "公开地图候选住宿点，便于继续比价", note: "地图数据不含可验证实时房价与余房，请在预订平台复核", sourceUrl: `https://www.openstreetmap.org/${hotel.osm_type}/${hotel.osm_id}`, price: null };
-  } catch { return { name: profile.lodgingArea || "未锁定具体酒店", reason: "未取得可靠住宿候选数据", note: "未虚构酒店价格或余房", price: null }; }
+  if (profile.lodgingArea) return { name: `${profile.lodgingArea}住宿区域`, reason: `用户指定住宿范围：${profile.lodgingArea}`, note: "未指定具体酒店；实时房价与余房需在预订平台复核", price: null };
+  return { name: "未锁定具体酒店", reason: `建议在${city.name}行程中心区域筛选`, note: "未取得可靠实时住宿数据，因此不虚构酒店、房价或余房", price: null };
 }
 
 export async function handleTravelApi(request: Request, env: any, url: URL): Promise<Response | null> {
@@ -398,9 +434,13 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
     } });
 
     if (url.pathname === "/api/cities") {
-      const seeds = ["北京", "上海", "广州", "深圳", "杭州", "成都", "重庆", "西安", "南京", "苏州", "厦门", "昆明"];
-      const centers = await Promise.all(seeds.map(async name => (await searchCities(name, 1))[0]).slice(0, 12));
-      return json({ cities: centers.filter(Boolean), scope: "中国" });
+      const centers = [
+        ["北京", 39.9042, 116.4074], ["上海", 31.2304, 121.4737], ["广州", 23.1291, 113.2644],
+        ["深圳", 22.5431, 114.0579], ["杭州", 30.2741, 120.1551], ["成都", 30.5728, 104.0668],
+        ["重庆", 29.563, 106.5516], ["西安", 34.3416, 108.9398], ["南京", 32.0603, 118.7969],
+        ["苏州", 31.2989, 120.5853], ["厦门", 24.4798, 118.0894], ["昆明", 25.0389, 102.7183],
+      ].map(([name, lat, lng]) => ({ name, displayName: `${name}，中国`, lat, lng, zoom: 11, countryCode: "cn", source: "内置城市入口坐标" }));
+      return json({ cities: centers, scope: "中国", note: "仅为常用城市入口；任意中国城市仍通过搜索接口实时查找" });
     }
 
     if (url.pathname === "/api/city-search") return json({ cities: await searchCities(cleanText(url.searchParams.get("q")), 8), scope: "中国" });
@@ -476,9 +516,10 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 }
 
 async function buildPlan(profile: any, city: any, env: any) {
-  const [weather, rawSpots, required, hotel] = await Promise.all([
-    weatherFor(city, profile.startDate, profile.days), overpassSpots(city, 45), verifyRequired(city, profile.requiredAttractions), hotelFor(profile, city),
+  const [weather, rawSpots, hotel] = await Promise.all([
+    weatherFor(city, profile.startDate, profile.days), overpassSpots(city, 45, profile.requiredAttractions), hotelFor(profile, city),
   ]);
+  const required = await verifyRequired(city, profile.requiredAttractions, rawSpots);
   const spots = rankSpots(uniqueSpots([...required, ...rawSpots]), profile);
   if (spots.length < Math.max(4, profile.days * 2)) throw new Error(`仅核验到 ${spots.length} 个可用景点，不足以生成可靠的 ${profile.days} 天行程`);
 
@@ -489,14 +530,12 @@ async function buildPlan(profile: any, city: any, env: any) {
     spots: spots.slice(0, 32).map(spot => ({ id: spot.id, name: spot.name, category: spot.category, lat: spot.lat, lng: spot.lng, openingHours: spot.openingHours || null, requiredByUser: spot.requiredByUser })),
     rules: ["每套方案必须包含全部 requiredByUser 景点", "不得声称未知的实时客流、预约、房价、开放状态", "每天保留午餐和休息时间", "只可引用 spots 列表中的 id"],
   };
-  let aiAdvice: any = {};
-  try {
-    const content = await deepSeek(env, [
-      { role: "system", content: "你是旅行路线排序器。只可使用输入中已核验的景点 ID，不能创建新景点或实时数据。输出 JSON：{variants:[{style,title,strategy,daySpotIds:string[][]}]}，正好 3 套，每套天数与 request.days 一致。" },
-      { role: "user", content: JSON.stringify(toolContext) },
-    ], true, 4200);
-    aiAdvice = parseJsonObject(content);
-  } catch { aiAdvice = {}; }
+  const content = await deepSeek(env, [
+    { role: "system", content: "你是旅行路线排序器。只可使用输入中已核验的景点 ID，不能创建新景点或实时数据。输出 JSON：{variants:[{style,title,strategy,daySpotIds:string[][]}]}，正好 3 套，每套天数与 request.days 一致。" },
+    { role: "user", content: JSON.stringify(toolContext) },
+  ], true, 4200);
+  const aiAdvice: any = parseJsonObject(content);
+  if (!Array.isArray(aiAdvice?.variants) || aiAdvice.variants.length < 3) throw new Error("DeepSeek 第二阶段没有生成完整的三套路线结构，请重试");
 
   const byId = new Map(spots.map(spot => [spot.id, spot]));
   const requiredIds = required.map(spot => spot.id);
