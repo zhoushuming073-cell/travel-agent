@@ -435,7 +435,10 @@ async function loadSpotImage(spot, holder) {
     spot._image = imageData;
     const image = document.createElement('img'); image.loading = 'lazy'; image.alt = spot.name; image.src = imageData.url; image.onerror = () => image.remove(); holder.appendChild(image);
     const link = holder.closest('.spot-card')?.querySelector('.source-link');
-    if (link) { link.href = imageData.sourceUrl || link.href; link.textContent = `${imageData.source || '精确页面图片'}来源`; }
+    if (link) {
+      link.href = imageData.photographerUrl || imageData.sourceUrl || link.href;
+      link.textContent = imageData.source === 'Unsplash' ? `摄影：${imageData.photographer} · Unsplash` : `${imageData.source || '精确页面图片'}来源`;
+    }
   } catch { /* image is optional */ }
 }
 
@@ -445,7 +448,8 @@ function openSpotDetails(spot) {
   const reasons = spot.recommendationReasons || ['公开数据完整度与行程匹配度较优'];
   const stops = spot.transitStops || [];
   const crowd = spot.crowd?.score == null ? '未知，没有可验证客流来源' : `透明预测 ${esc(spot.crowd.label)} ${spot.crowd.score}`;
-  $('#spotDialogBody').innerHTML = `<div class="spot-detail-hero"><div class="spot-detail-image">${image}</div><div class="spot-detail-copy"><span class="section-code">ATTRACTION DETAIL</span><h2>${esc(spot.name)}</h2><p>${esc(spot.requiredByUser ? '用户必选 · ' : '')}${esc(spot.category)} · 建议游玩 ${spot.durationMin} 分钟</p><p>${reasons.map(reason => `✓ ${esc(reason)}`).join('<br>')}</p></div></div><div class="spot-detail-grid"><div class="detail-box"><span>开放时间</span><strong>${esc(spot.openingHours || '未知，出发前请复核')}</strong></div><div class="detail-box"><span>开放校验</span><strong>${esc(spot.openingStatus?.label || '未进入具体行程时段')}</strong></div><div class="detail-box"><span>时令适配</span><strong>${esc(seasonalText(spot))}</strong></div><div class="detail-box"><span>客流</span><strong>${crowd}</strong></div><div class="detail-box"><span>附近交通</span><strong>${stops.length ? stops.slice(0, 2).map(stop => `${esc(stop.name)} ${stop.distanceM}m`).join('<br>') : '未获取到附近已标注站点'}</strong></div><div class="detail-box"><span>数据更新时间</span><strong>${esc((spot.fetchedAt || '未知').replace('T', ' ').slice(0, 19))}</strong></div><div class="detail-box"><span>坐标</span><strong>${Number(spot.lat).toFixed(5)}, ${Number(spot.lng).toFixed(5)}</strong></div></div><div class="spot-detail-links"><a href="${esc(spot.sourceUrl || 'https://www.openstreetmap.org/')}" target="_blank" rel="noreferrer">查看数据来源</a>${spot.website ? `<a href="${esc(spot.website)}" target="_blank" rel="noreferrer">景点网站</a>` : ''}</div>`;
+  const imageCredit = spot._image?.source === 'Unsplash' ? `<a href="${esc(spot._image.photographerUrl)}" target="_blank" rel="noreferrer">摄影：${esc(spot._image.photographer)}</a><a href="${esc(spot._image.unsplashUrl)}" target="_blank" rel="noreferrer">图片来自 Unsplash</a>` : '';
+  $('#spotDialogBody').innerHTML = `<div class="spot-detail-hero"><div class="spot-detail-image">${image}</div><div class="spot-detail-copy"><span class="section-code">ATTRACTION DETAIL</span><h2>${esc(spot.name)}</h2><p>${esc(spot.requiredByUser ? '用户必选 · ' : '')}${esc(spot.category)} · 建议游玩 ${spot.durationMin} 分钟</p><p>${reasons.map(reason => `✓ ${esc(reason)}`).join('<br>')}</p></div></div><div class="spot-detail-grid"><div class="detail-box"><span>开放时间</span><strong>${esc(spot.openingHours || '未知，出发前请复核')}</strong></div><div class="detail-box"><span>开放校验</span><strong>${esc(spot.openingStatus?.label || '未进入具体行程时段')}</strong></div><div class="detail-box"><span>时令适配</span><strong>${esc(seasonalText(spot))}</strong></div><div class="detail-box"><span>客流</span><strong>${crowd}</strong></div><div class="detail-box"><span>附近交通</span><strong>${stops.length ? stops.slice(0, 2).map(stop => `${esc(stop.name)} ${stop.distanceM}m`).join('<br>') : '未获取到附近已标注站点'}</strong></div><div class="detail-box"><span>数据更新时间</span><strong>${esc((spot.fetchedAt || '未知').replace('T', ' ').slice(0, 19))}</strong></div><div class="detail-box"><span>坐标</span><strong>${Number(spot.lat).toFixed(5)}, ${Number(spot.lng).toFixed(5)}</strong></div></div><div class="spot-detail-links"><a href="${esc(spot.sourceUrl || 'https://www.openstreetmap.org/')}" target="_blank" rel="noreferrer">查看景点数据来源</a>${imageCredit}${spot.website ? `<a href="${esc(spot.website)}" target="_blank" rel="noreferrer">景点网站</a>` : ''}</div>`;
   $('#spotDialog').showModal();
 }
 

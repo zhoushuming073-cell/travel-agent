@@ -8,6 +8,7 @@ const WEATHER_MCP = "https://mcpmarket.cn/mcp/a5be23a7cc256930f8f3ccc6";
 const HOTEL_MCP = "https://mcpmarket.cn/mcp/14d52a3200549c758f548f52";
 const AMAP_MCP = "https://mcpmarket.cn/mcp/06cbbceb8f161926894c4584";
 const mcpMemory = new Map<string, { expiresAt: number; value: any }>();
+const unsplashMemory = new Map<string, { expiresAt: number; value: any }>();
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
@@ -539,6 +540,57 @@ async function amapPoiForSpot(name: string, city: string) {
   return { id: cleanText(poi.id), name: cleanText(poi.name), location, photo, raw: detail };
 }
 
+async function amapOfficialImage(env: any, name: string, city: string) {
+  const key = cleanText(env?.AMAP_WEB_KEY);
+  if (!key || !name) return null;
+  const params = new URLSearchParams({ key, keywords: name, city, citylimit: "true", types: "110000", extensions: "all", offset: "5", page: "1" });
+  const raw = await fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, "高德地图官方 Web 服务");
+  if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德地图官方接口未返回成功状态"));
+  const wanted = normalizeName(name);
+  const pois = raw?.pois || [];
+  const poi = pois.find((item: any) => normalizeName(item?.name) === wanted) || pois.find((item: any) => {
+    const actual = normalizeName(item?.name);
+    return actual && wanted && (actual.includes(wanted) || wanted.includes(actual));
+  });
+  const photo = (poi?.photos || []).map((item: any) => cleanText(item?.url)).find((url: string) => /^https:\/\//.test(url));
+  if (!poi || !photo) return null;
+  const id = cleanText(poi.id);
+  return {
+    found: true, url: photo, source: "高德地图官方 POI 精确照片",
+    sourceUrl: id ? `https://www.amap.com/place/${encodeURIComponent(id)}` : "https://www.amap.com/",
+    verifiedName: cleanText(poi.name, name), matchQuality: "amap-official-exact-poi",
+  };
+}
+
+function withUnsplashUtm(value: unknown) {
+  const url = cleanText(value, "https://unsplash.com/");
+  return `${url}${url.includes("?") ? "&" : "?"}utm_source=smart_travel_assistant&utm_medium=referral`;
+}
+
+async function unsplashImage(env: any, name: string, city: string) {
+  const accessKey = cleanText(env?.UNSPLASH_ACCESS_KEY);
+  if (!accessKey || !name) return null;
+  const query = `${name} ${city} China travel landmark`.trim();
+  const cached = unsplashMemory.get(query);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const params = new URLSearchParams({ query, page: "1", per_page: "5", order_by: "relevant", orientation: "landscape", content_filter: "high" });
+  const raw = await fetchJson(`https://api.unsplash.com/search/photos?${params}`, {
+    headers: { Authorization: `Client-ID ${accessKey}`, "Accept-Version": "v1" },
+  }, 15000, "Unsplash 图片服务");
+  const photo = (raw?.results || []).find((item: any) => item?.urls?.regular);
+  if (!photo) return null;
+  const value = {
+    found: true, url: photo.urls.regular, source: "Unsplash",
+    sourceUrl: withUnsplashUtm(photo.links?.html),
+    photographer: cleanText(photo.user?.name || photo.user?.username, "Unsplash 摄影师"),
+    photographerUrl: withUnsplashUtm(photo.user?.links?.html),
+    unsplashUrl: "https://unsplash.com/?utm_source=smart_travel_assistant&utm_medium=referral",
+    verifiedName: name, matchQuality: "unsplash-relevant-search", queryUsed: query,
+  };
+  unsplashMemory.set(query, { expiresAt: Date.now() + 24 * 60 * 60 * 1000, value });
+  return value;
+}
+
 function firstTransit(value: any) {
   const data = mcpData(value) || value || {};
   return data?.route?.transits?.[0] || data?.transits?.[0] || data?.route?.paths?.[0] || data?.paths?.[0] || null;
@@ -772,6 +824,8 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       services: [
         { name: "天气查询 MCP", provider: "MCPMarket", status: "live", note: "Open-Meteo 逐小时预报；MCP 失败时使用 Open-Meteo 直连兜底" },
         { name: "高端酒店查询（国内）", provider: "MCPMarket", status: "live", note: "附近高星酒店候选；不返回或未核验时不编造房价、余房" },
+        { name: "高德官方景点图片", provider: "高德 Web 服务 API", status: env?.AMAP_WEB_KEY ? "live" : "unconfigured", note: "使用用户 Key 做景点实体精确搜索，作为图片首选" },
+        { name: "Unsplash 景点图片", provider: "Unsplash API", status: env?.UNSPLASH_ACCESS_KEY ? "live" : "unconfigured", note: "高德无照片时按景点名与城市补图，并显示摄影师与 Unsplash 归因" },
         { name: "高德地图 AMap", provider: "MCPMarket / 高德开放平台", status: "live", note: "POI、精确图片与公交路线；共享免费额度耗尽时透明回退" },
         { name: "中文维基百科景点检索", provider: "Wikimedia", status: "live", note: "公开页面、摘要、坐标与精确页面图片兜底" },
         { name: "OpenStreetMap / Nominatim", provider: "OSM", status: "live", note: "城市和用户必选景点核验兜底" },
@@ -787,7 +841,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       transit: { name: "公共交通", role: "高德地图 MCP", status: "ready", fallback: "无班次或额度不足时显示道路耗时参考" },
       crowd: { name: "客流与预约", role: "景区官方来源待接入", status: "unconfigured", fallback: "保持未知" },
       hotel: { name: "住宿候选", role: "MCPMarket 高端酒店查询（国内）", status: "ready", fallback: "仅保留用户住宿区域，不展示未核验房价和余房" },
-      images: { name: "景点图片", role: "高德 POI 精确照片优先", status: "ready", fallback: "中文维基百科精确页面图片；绝不关键词猜图" },
+      images: { name: "景点图片", role: "高德官方精确 POI + Unsplash + Wikimedia", status: env?.AMAP_WEB_KEY || env?.UNSPLASH_ACCESS_KEY ? "ready" : "unconfigured", fallback: "高德官方无照片时依次使用 Unsplash、高德免费 MCP 和中文维基百科实体图片" },
     } });
 
     if (url.pathname === "/api/cities") {
@@ -826,6 +880,18 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       const wikipedia = cleanText(url.searchParams.get("wikipedia"));
       const name = cleanText(url.searchParams.get("name"));
       const cityName = cleanText(url.searchParams.get("city"));
+      if (name && cityName) {
+        try {
+          const official = await amapOfficialImage(env, name, cityName);
+          if (official) return json(official);
+        } catch { /* 高德官方接口不可用时继续使用 Unsplash 与其他精确实体图片 */ }
+      }
+      if (name && cityName) {
+        try {
+          const unsplash = await unsplashImage(env, name, cityName);
+          if (unsplash) return json(unsplash);
+        } catch { /* Unsplash 限流或不可用时继续使用精确实体图片 */ }
+      }
       if (name && cityName) {
         try {
           const amap = await amapPoiForSpot(name, cityName);
@@ -987,7 +1053,7 @@ async function buildPlan(profile: any, city: any, env: any) {
       hotels: hotel.mcpStatus === "ready" ? "MCPMarket 高端酒店查询（国内）" : "酒店 MCP 已调用但无可核验结果，保留用户住宿区域",
       routing: "OSRM 路线几何；失败时坐标距离×1.25 透明估算",
       transit: "高德地图 MCP 公交/地铁方案；共享免费额度不足时透明回退",
-      images: "高德 POI 精确照片优先；中文维基百科精确页面图片兜底",
+      images: "高德官方 POI 精确照片优先；Unsplash 相关性补图；高德免费 MCP 与中文维基百科实体图片兜底",
       dining: "高德地图 MCP 路线附近餐饮 POI；无返回时保留自由用餐",
       crowd: "未接入官方可验证来源，全部保持未知",
       reservations: "未接入景区官方预约接口",
