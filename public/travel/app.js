@@ -21,6 +21,7 @@ const state = {
   variant: 'relax',
   plans: {},
   plan: null,
+  previousPlan: null,
   spots: [],
   spotIndex: new Map(),
   cityCenters: {},
@@ -293,13 +294,14 @@ function bind() {
   $$('#preferenceChips .chip').forEach(button => button.addEventListener('click', () => { button.classList.toggle('active'); state.preferences = $$('#preferenceChips .chip.active').map(item => item.dataset.value); }));
   $$('#paceGroup button').forEach(button => button.addEventListener('click', () => { state.pace = button.dataset.value; syncControls(); }));
   $('#resetButton').addEventListener('click', () => {
-    Object.assign(state, { city: '杭州', cityRef: state.cityCenters['杭州'] || null, startDate: dateAfter(3), days: 3, budget: 1500, style: '自然风景', preferences: ['自然'], pace: 'medium', transport: '公共交通优先', hotelPreference: '交通方便', variant: 'relax', plans: {}, plan: null, spots: [], partySize: null, requiredAttractions: [], dayStart: null, dayEnd: null, lodgingArea: null });
+    Object.assign(state, { city: '杭州', cityRef: state.cityCenters['杭州'] || null, startDate: dateAfter(3), days: 3, budget: 1500, style: '自然风景', preferences: ['自然'], pace: 'medium', transport: '公共交通优先', hotelPreference: '交通方便', variant: 'relax', plans: {}, plan: null, previousPlan: null, spots: [], partySize: null, requiredAttractions: [], dayStart: null, dayEnd: null, lodgingArea: null });
     $('#requestText').value = '';
     $('#daysContainer').hidden = true; $('#planFooter').hidden = true; $('#refreshSpots').disabled = true;
     $('#loadingState').hidden = false; $('#loadingState').className = 'loading-state idle';
     $('#loadingState').innerHTML = '<div class="plan-empty-mark" aria-hidden="true">✦</div><div><strong>行程将在你确认需求后生成</strong><span>先填写城市、日期与偏好，再点击“生成智能行程”。页面不会在打开时自动调用 AI。</span></div>';
     $('#spotGrid').innerHTML = '<div class="data-empty">生成行程后，这里会展示本次规划中经过地图核验的景点；没有可靠匹配的图片将保持占位。</div>';
     $('#aiSyncCard').hidden = true; lastFormSyncSignature = '';
+    $('#planInsights').hidden = true; $('#planComparison').hidden = true; $('#replanText').value = '';
     syncControls(); mapView.setCity('杭州'); updateCityLabels(); loadWeather();
   });
   $('#generateButton').addEventListener('click', () => generatePlan());
@@ -308,6 +310,7 @@ function bind() {
   $('#zoomOut').addEventListener('click', () => mapView.zoomBy(-1));
   $('#refreshSpots').addEventListener('click', () => loadSpots(true));
   $('#exportButton').addEventListener('click', exportPlan);
+  $('#replanButton').addEventListener('click', replanWithAdjustment);
   $$('.nav-link[data-scroll]').forEach(button => button.addEventListener('click', () => $(button.dataset.scroll)?.scrollIntoView({ behavior: 'smooth' })));
   $('#openSources').addEventListener('click', openSourceDialog);
   $('#openSourcesInline').addEventListener('click', openSourceDialog);
@@ -414,7 +417,7 @@ async function loadSpots(force = false) {
 function renderSpots() {
   const list = state.spots.slice(0, 8);
   if (!list.length) { $('#spotGrid').innerHTML = '<div class="data-empty">没有获取到可展示的景点。</div>'; return; }
-  $('#spotGrid').innerHTML = list.map(spot => `<article class="spot-card" data-id="${esc(spot.id)}" tabindex="0" role="button" aria-label="查看${esc(spot.name)}详情"><div class="spot-image"><div class="fallback-art">⌖</div><span class="spot-badge">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-body"><strong title="${esc(spot.name)}">${esc(spot.name)}</strong><p>${spot.openingHours ? `开放：${esc(spot.openingHours)}` : '开放时间：公开数据未标注'}</p><div class="spot-score"><span>静态质量 ${spot.staticPoiQuality}</span><span>${esc(seasonalText(spot))}</span></div><a class="source-link" href="${esc(spot.sourceUrl)}" target="_blank" rel="noreferrer">景点资料来源</a></div></article>`).join('');
+  $('#spotGrid').innerHTML = list.map(spot => `<article class="spot-card" data-id="${esc(spot.id)}" tabindex="0" role="button" aria-label="查看${esc(spot.name)}详情"><div class="spot-image"><div class="fallback-art">⌖</div><span class="spot-badge">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-body"><strong title="${esc(spot.name)}">${esc(spot.name)}</strong><p>${spot.openingHours ? `开放：${esc(spot.openingHours)}` : '开放时间：公开数据未标注'}</p><div class="spot-score"><span>${spot.plannerScore != null ? `可解释评分 ${spot.plannerScore}` : `静态质量 ${spot.staticPoiQuality}`}</span><span>${esc(seasonalText(spot))}</span></div><a class="source-link" href="${esc(spot.sourceUrl)}" target="_blank" rel="noreferrer">景点资料来源</a></div></article>`).join('');
   $$('.spot-card').forEach(card => {
     const spot = state.spotIndex.get(card.dataset.id);
     card.addEventListener('click', event => { if (!event.target.closest('a')) openSpotDetails(spot); });
@@ -529,7 +532,7 @@ function renderPlanningProgress(entry) {
   $('#loadingState').innerHTML = `<div class="planning-progress"><div class="progress-head"><div class="loader"></div><div><strong>智能体正在规划</strong><span>实时读取后端工具执行状态</span></div></div><div class="progress-phases">${sections}</div><small class="progress-note">仅展示可验证的输入解析、工具调用与校验结果，不展示或伪造模型内部思维链。</small></div>`;
 }
 
-function startPlanningProgress(payload) {
+function startPlanningProgress() {
   planningLogHistory = {};
   lastFormSyncSignature = '';
   $('#aiSyncCard').hidden = true;
@@ -558,7 +561,9 @@ async function waitForPlanJob(jobId) {
 async function generatePlan(scroll = true) {
   const button = $('#generateButton');
   button.disabled = true; $('span', button).textContent = '正在计算';
+  if (state.plan) state.previousPlan = state.plan;
   state.plan = null; state.plans = {}; state.spots = []; state.spotIndex = new Map();
+  $('#planInsights').hidden = true; $('#planComparison').hidden = true;
   $('#planTitle').textContent = '正在根据新需求规划'; $('#planMeta').textContent = '旧行程已清除';
   $('#spotGrid').innerHTML = '<div class="data-empty">正在等待本次规划的已验证景点，不显示上一次行程数据。</div>';
   $('#refreshSpots').disabled = true;
@@ -575,7 +580,7 @@ async function generatePlan(scroll = true) {
     $('#weatherRange').textContent = '不会沿用上一次日期的天气';
     $('#tipsList').innerHTML = '<li>正在解析本次需求中的日期与数据可用范围。</li><li>未接入官方来源时，客流和预约状态会保持未知。</li>';
     const payload = { city: state.city, cityRef: state.cityRef, startDate: state.startDate, days: state.days, budget: state.budget, style: state.style, preferences: state.preferences, pace: state.pace, variant: state.variant, transport: state.transport, hotelPreference: state.hotelPreference, freeText: $('#requestText').value };
-    startPlanningProgress(payload);
+    startPlanningProgress();
     const started = await api('/api/plan/start', { method: 'POST', body: JSON.stringify(payload) });
     if (started.progress?.phase !== 'queued') renderPlanningProgress(started.progress);
     const result = await waitForPlanJob(started.jobId);
@@ -625,7 +630,7 @@ function renderPlan(plan) {
   const variantName = plan.variant === 'relax' ? '轻松版' : plan.variant === 'hot' ? '热门版' : '小众版';
   $('#planTitle').textContent = `${plan.title} · ${variantName}`;
   $('#planMeta').textContent = `${plan.startDate} 出发 · ${plan.generatedAt.slice(0, 19).replace('T', ' ')} · DeepSeek 两阶段 + 已验证工具`;
-  $('#daysContainer').innerHTML = plan.daysPlan.map((day, index) => renderDay(day, index)).join('');
+  $('#daysContainer').innerHTML = plan.daysPlan.map(day => renderDay(day)).join('');
   $$('.detail-trigger', $('#daysContainer')).forEach(button => button.addEventListener('click', () => openSpotDetails(state.spotIndex.get(button.dataset.id))));
   const source = plan.dataSources;
   $('#sourceCaption').textContent = `天气：${source.weather}；景点：${source.spots}；酒店：${source.hotels || '未知'}；路线：${source.routing}；交通：${source.transit}；客流：${source.crowd}`;
@@ -633,10 +638,68 @@ function renderPlan(plan) {
   renderHotel(plan.hotelPlan);
   renderWeather(plan.weather);
   renderMapFromPlan(plan);
+  renderPlanInsights(plan);
+  renderPlanComparison(state.previousPlan, plan);
+  loadDiningForPlan(plan);
   toast('三套差异化行程已一次生成');
 }
 
-function renderDay(day, index) {
+function renderPlanInsights(plan) {
+  const root = $('#planInsights');
+  const evaluation = plan.evaluation;
+  if (!evaluation) { root.hidden = true; return; }
+  const metrics = [
+    ['偏好匹配', evaluation.preferenceMatch],
+    ['路线效率', evaluation.routeEfficiency],
+    ['舒适程度', evaluation.comfort],
+    ['数据完整', evaluation.dataConfidence],
+    ['硬约束', evaluation.constraintSatisfaction],
+  ];
+  const candidates = plan.candidatePool || [];
+  root.innerHTML = `<section class="score-panel"><div class="insight-head"><div><span>Computed evaluation</span><strong>本次方案质量评分</strong></div><div class="overall-score" title="${esc(evaluation.formula)}">${evaluation.overall}</div></div><div class="score-bars">${metrics.map(([label, value]) => `<div class="score-row"><span>${label}</span><div class="score-track"><i style="width:${Math.max(0, Math.min(100, Number(value) || 0))}%"></i></div><b>${value}</b></div>`).join('')}</div><p class="score-evidence">${esc(evaluation.formula)}<br>候选 ${evaluation.evidence.candidateCount} 个 · 入选 ${evaluation.evidence.selectedCount} 个 · 交通 ${evaluation.evidence.transportMinutes} 分钟 · 最长单段 ${evaluation.evidence.longestLegMinutes} 分钟。分数由本次工具数据计算，不是 AI 自报。</p></section><section class="candidate-panel"><div class="insight-head"><div><span>Verified candidate pool</span><strong>候选景点与入选依据</strong></div><small>${esc(plan.optimization?.algorithm || '')}</small></div><div class="candidate-list">${candidates.map(item => `<div class="candidate-chip${item.selected ? ' selected' : ''}${item.requiredByUser ? ' required' : ''}" title="${esc(item.scoreBasis || '')}"><b>${esc(item.name)}</b>${item.score}分 · ${item.selected ? '已入选' : '候选'}${item.requiredByUser ? ' · 必选' : ''}</div>`).join('')}</div></section>`;
+  root.hidden = false;
+}
+
+function renderPlanComparison(before, after) {
+  const root = $('#planComparison');
+  if (!before?.evaluation || !after?.evaluation || before.generatedAt === after.generatedAt) { root.hidden = true; return; }
+  const rows = [
+    ['综合评分', before.evaluation.overall, after.evaluation.overall],
+    ['交通分钟', before.evaluation.evidence.transportMinutes, after.evaluation.evidence.transportMinutes],
+    ['入选景点', before.evaluation.evidence.selectedCount, after.evaluation.evidence.selectedCount],
+    ['硬约束', `${before.evaluation.constraintSatisfaction}%`, `${after.evaluation.constraintSatisfaction}%`],
+  ];
+  root.innerHTML = `<strong>已按新要求完成真实重新规划</strong><div class="comparison-grid">${rows.map(([label, oldValue, newValue]) => `<div>${esc(label)}<b>${esc(oldValue)} → ${esc(newValue)}</b></div>`).join('')}</div>`;
+  root.hidden = false;
+}
+
+async function loadDiningForPlan(plan) {
+  if (plan._diningLoading || plan._diningLoaded) return;
+  const meals = plan.daysPlan.flatMap(day => day.blocks || []).filter(block => block.type === 'rest' && block.mealType && block.anchor);
+  if (!meals.length) { plan._diningLoaded = true; return; }
+  plan._diningLoading = true;
+  await Promise.all(meals.map(async block => {
+    const params = new URLSearchParams({ city: plan.city, lat: String(block.anchor.lat), lng: String(block.anchor.lng), meal: block.mealType });
+    try { block.dining = await api(`/api/dining?${params}`); }
+    catch (error) { block.dining = { status: 'fallback', candidates: [], message: `餐饮查询暂不可用：${error.message}` }; }
+  }));
+  plan._diningLoading = false; plan._diningLoaded = true;
+  if (state.plan === plan) {
+    $('#daysContainer').innerHTML = plan.daysPlan.map(day => renderDay(day)).join('');
+    $$('.detail-trigger', $('#daysContainer')).forEach(button => button.addEventListener('click', () => openSpotDetails(state.spotIndex.get(button.dataset.id))));
+  }
+}
+
+function replanWithAdjustment() {
+  const adjustment = $('#replanText').value.trim();
+  if (!state.plan) { toast('请先生成一份行程'); return; }
+  if (!adjustment) { $('#replanText').focus(); toast('请先输入希望调整的内容'); return; }
+  const base = $('#requestText').value.trim();
+  $('#requestText').value = `${base}${base ? '\n\n' : ''}在上一版需求基础上重新规划，并严格执行以下调整：${adjustment}`;
+  generatePlan(false);
+}
+
+function renderDay(day) {
   const weather = day.weather || {};
   const forecast = weather.quality === 'forecast' ? `${weatherText(weather.weatherCode)} ${Math.round(weather.temperatureMin)}°~${Math.round(weather.temperatureMax)}° · 降水 ${Math.round(weather.precipitationProbability || 0)}%` : weather.note || '预报未覆盖';
   const blocks = day.blocks.map(block => renderTimelineBlock(block)).join('');
@@ -651,7 +714,12 @@ function renderTimelineBlock(block) {
     return `<div class="timeline-row leg"><div class="timeline-time">${esc(block.startTime)}</div><div class="timeline-node"></div><div class="timeline-content"><div class="leg-card"><span><b>${esc(block.from)} → ${esc(block.to)}</b> · ${formatDistance(block.distanceM)}</span><span>${block.durationMin} 分钟 · ${esc(routeLabel)}</span></div></div></div>`;
   }
   if (block.type === 'rest') {
-    return `<div class="timeline-row rest"><div class="timeline-time">${esc(block.startTime)}</div><div class="timeline-node"></div><div class="timeline-content"><div class="rest-card">${esc(block.label)} · ${block.durationMin} 分钟</div></div></div>`;
+    const dining = block.dining;
+    const candidate = dining?.candidates?.[0];
+    const diningHtml = candidate
+      ? `<span class="dining-candidate">候选：${esc(candidate.name)}${candidate.distanceM ? ` · 距路线锚点约 ${candidate.distanceM}m` : ''}</span><span class="dining-source">${esc(candidate.source)} · 仅为路线附近候选，营业状态与排队情况请复核</span>`
+      : block.mealType && dining ? `<span class="dining-source">${esc(dining.message)}</span>` : '';
+    return `<div class="timeline-row rest"><div class="timeline-time">${esc(block.startTime)}</div><div class="timeline-node"></div><div class="timeline-content"><div class="rest-card">${esc(block.label)} · ${block.durationMin} 分钟${diningHtml}</div></div></div>`;
   }
   const spot = block.item;
   const stops = spot.transitStops || [];

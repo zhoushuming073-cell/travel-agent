@@ -227,12 +227,14 @@ function mergeProfile(input: any, ai: any) {
     dayEnd: cleanText(merged.dayEnd, "21:00"),
     mealPreference: cleanText(merged.mealPreference, "每天 1—2 个当地特色美食，顺路安排"),
     requestedVariants: list(merged.requestedVariants).length ? list(merged.requestedVariants).slice(0, 3) : ["经典景点覆盖率高", "偏自然和摄影", "避开人流、行程轻松"],
+    clarificationNeeded: Boolean(ai.clarificationNeeded),
+    clarificationQuestion: cleanText(ai.clarificationQuestion),
     freeText: text.slice(0, 5000),
   };
 }
 
 async function extractProfile(input: any, env: any) {
-  const prompt = `请把用户的中国旅行需求整理成结构化 JSON。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。字段：city,startDate(YYYY-MM-DD),days,nights,partySize,budget,style,preferences(string[]),avoid(string[]),requiredAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,requestedVariants(string[])。\n当前表单：${JSON.stringify(input)}\n用户原文：${cleanText(input.freeText)}`;
+  const prompt = `请把用户的中国旅行需求整理成结构化 JSON。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。字段：city,startDate(YYYY-MM-DD),days,nights,partySize,budget,style,preferences(string[]),avoid(string[]),requiredAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,requestedVariants(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。当前规划器一次只支持一个明确城市或区县；如果原文只给省份/大区、给出多个目的地但没说明主城市，clarificationNeeded=true，并提出一个简短具体的问题；否则必须为 false。\n当前表单：${JSON.stringify(input)}\n用户原文：${cleanText(input.freeText)}`;
   const content = await deepSeek(env, [
     { role: "system", content: "你是旅行需求结构化助手。输出一个 JSON 对象，不要输出解释。" },
     { role: "user", content: prompt },
@@ -462,12 +464,49 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number) {
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function rankSpots(spots: any[], profile: any) {
-  const prefs = `${profile.style} ${profile.preferences.join(" ")}`;
-  return [...spots].sort((a, b) => {
-    const score = (spot: any) => (spot.requiredByUser ? 1000 : 0) + (prefs.includes("自然") && spot.category === "自然景观" ? 15 : 0) + (prefs.includes("摄影") && ["自然景观", "景点"].includes(spot.category) ? 8 : 0) + (spot.staticPoiQuality === "较高" ? 3 : 0);
-    return score(b) - score(a);
+const PREFERENCE_TERMS: Record<string, string[]> = {
+  "自然": ["自然", "山", "湖", "江", "海", "湿地", "森林", "公园", "植物", "风景"],
+  "摄影": ["自然", "山", "湖", "江", "海", "古镇", "建筑", "夜景", "观景", "风景"],
+  "人文": ["文化", "历史", "博物", "古城", "古镇", "遗址", "寺", "故居", "建筑"],
+  "文化": ["文化", "历史", "博物", "非遗", "遗址", "寺", "古建"],
+  "亲子": ["动物", "植物", "科技", "海洋", "乐园", "公园", "博物"],
+  "夜景": ["夜景", "广场", "滨水", "步行街", "古城", "塔", "地标"],
+};
+
+function spotSearchText(spot: any) {
+  return `${cleanText(spot.name)} ${cleanText(spot.category)} ${cleanText(spot.extract)} ${cleanText(spot.address)}`;
+}
+
+function scoreSpot(spot: any, profile: any) {
+  const text = spotSearchText(spot);
+  const preferences = [...new Set([profile.style, ...profile.preferences].filter(Boolean))];
+  const matched = preferences.filter((preference: string) => {
+    const terms = PREFERENCE_TERMS[preference] || [preference];
+    return terms.some(term => text.includes(term));
   });
+  const preference = preferences.length ? Math.round(45 + 55 * matched.length / preferences.length) : 60;
+  const quality = spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
+  const completeness = Math.min(100, 45 + (spot.sourceUrl ? 15 : 0) + (spot.lat && spot.lng ? 20 : 0) + (spot.extract ? 12 : 0) + (spot.openingHours ? 8 : 0));
+  const required = Boolean(spot.requiredByUser);
+  const final = required ? 100 : Math.round(preference * 0.5 + quality * 0.3 + completeness * 0.2);
+  return {
+    final, required, matched,
+    breakdown: { preference, poiQuality: quality, dataCompleteness: completeness },
+    basis: "偏好 50% · 静态 POI 质量 30% · 公开数据完整度 20%",
+  };
+}
+
+function rankSpots(spots: any[], profile: any) {
+  return [...spots]
+    .map(spot => {
+      const score = scoreSpot(spot, profile);
+      const recommendationReasons = [...(spot.recommendationReasons || [])];
+      if (score.required) recommendationReasons.unshift("用户明确指定的必选项");
+      else if (score.matched.length) recommendationReasons.unshift(`匹配偏好：${score.matched.join(" / ")}`);
+      recommendationReasons.push(`本地可解释评分 ${score.final} 分`);
+      return { ...spot, plannerScore: score.final, scoreBreakdown: score.breakdown, scoreBasis: score.basis, matchedPreferences: score.matched, recommendationReasons: [...new Set(recommendationReasons)].slice(0, 4) };
+    })
+    .sort((a, b) => Number(b.requiredByUser) - Number(a.requiredByUser) || b.plannerScore - a.plannerScore || a.name.localeCompare(b.name, "zh-CN"));
 }
 
 function uniqueSpots(spots: any[]) {
@@ -538,6 +577,23 @@ async function enrichDayTransit(day: any, city: any) {
   }));
 }
 
+function nearestOrder(items: any[]) {
+  if (items.length < 3) return [...items];
+  const remaining = items.slice(1);
+  const ordered = [items[0]];
+  while (remaining.length) {
+    const previous = ordered[ordered.length - 1];
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    remaining.forEach((candidate, index) => {
+      const distance = haversine(previous.lat, previous.lng, candidate.lat, candidate.lng);
+      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+    });
+    ordered.push(remaining.splice(bestIndex, 1)[0]);
+  }
+  return ordered;
+}
+
 function routeFallback(items: any[]) {
   let distance = 0;
   for (let i = 1; i < items.length; i += 1) distance += haversine(items[i - 1].lat, items[i - 1].lng, items[i].lat, items[i].lng);
@@ -560,9 +616,9 @@ function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any)
   const endLimit = timeToMinutes(profile.dayEnd, 1260);
   const blocks: any[] = [];
   const scheduled: any[] = [];
-  items.forEach((original, index) => {
+  nearestOrder(items).forEach((original, index, orderedItems) => {
     if (index > 0) {
-      const previous = items[index - 1];
+      const previous = orderedItems[index - 1];
       const distanceM = haversine(previous.lat, previous.lng, original.lat, original.lng) * 1.25;
       const durationMin = Math.max(12, Math.round(distanceM / 260 / 60));
       blocks.push({ type: "leg", from: previous.name, to: original.name, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + durationMin), durationMin, distanceM: Math.round(distanceM), source: "OSRM/透明估算", quality: "estimated" });
@@ -570,7 +626,7 @@ function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any)
     }
     if (cursor < 12 * 60 + 30 && cursor + original.durationMin > 12 * 60 + 30) {
       const restStart = Math.max(cursor, 12 * 60);
-      blocks.push({ type: "rest", label: "午餐与休息（就近安排，不跨区追店）", startTime: minutesToTime(restStart), endTime: minutesToTime(restStart + 75), durationMin: 75 });
+      blocks.push({ type: "rest", mealType: "lunch", anchor: { lat: original.lat, lng: original.lng }, label: "午餐与休息（就近安排，不跨区追店）", startTime: minutesToTime(restStart), endTime: minutesToTime(restStart + 75), durationMin: 75 });
       cursor = restStart + 75;
     }
     const durationMin = clamp(original.durationMin, 60, 180);
@@ -578,6 +634,12 @@ function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any)
     const spot = { ...original, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + durationMin), durationMin };
     scheduled.push(spot); blocks.push({ type: "attraction", item: spot }); cursor += durationMin;
   });
+  if (cursor >= 17 * 60 && cursor + 60 <= endLimit) {
+    const last = scheduled[scheduled.length - 1];
+    blocks.push({ type: "rest", mealType: "dinner", anchor: last ? { lat: last.lat, lng: last.lng } : null, label: "晚餐（优先选择路线附近的当地风味）", startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + 60), durationMin: 60 });
+    cursor += 60;
+  }
+  if (cursor + 20 < endLimit) blocks.push({ type: "rest", label: "弹性时间 / 返回住宿地", startTime: minutesToTime(cursor), endTime: minutesToTime(Math.min(endLimit, cursor + 30)), durationMin: Math.min(30, endLimit - cursor) });
   return { day: dayIndex + 1, date: weather.date, weekday: weekday(weather.date), theme: scheduled.map(item => item.category).filter((v, i, a) => a.indexOf(v) === i).slice(0, 2).join(" · ") || "城市探索", items: scheduled, blocks, conflicts: [], weather };
 }
 
@@ -592,7 +654,32 @@ function distribute(candidates: any[], profile: any, variantIndex: number) {
     const day = days.reduce((best, current) => current.length < best.length ? current : best, days[0]);
     if (day.length < targetPerDay) day.push(spot);
   });
-  return days;
+  return days.map(day => nearestOrder(day));
+}
+
+function planEvaluation(plan: any, profile: any, candidateCount: number) {
+  const items = plan.daysPlan.flatMap((day: any) => day.items || []);
+  const legs = plan.daysPlan.flatMap((day: any) => day.blocks || []).filter((block: any) => block.type === "leg");
+  const required = profile.requiredAttractions || [];
+  const requiredMatched = required.filter((name: string) => items.some((item: any) => {
+    const expected = normalizeName(name), actual = normalizeName(item.name);
+    return actual.includes(expected) || expected.includes(actual);
+  }));
+  const preferenceMatch = items.length ? Math.round(items.reduce((sum: number, item: any) => sum + Number(item.scoreBreakdown?.preference || 50), 0) / items.length) : 0;
+  const transportMinutes = legs.reduce((sum: number, leg: any) => sum + Number(leg.durationMin || 0), 0);
+  const longestLeg = legs.reduce((max: number, leg: any) => Math.max(max, Number(leg.durationMin || 0)), 0);
+  const routeEfficiency = Math.max(0, Math.round(100 - transportMinutes / Math.max(1, profile.days) * 0.35 - Math.max(0, longestLeg - 45) * 0.5));
+  const dailyCounts = plan.daysPlan.map((day: any) => day.items?.length || 0);
+  const target = profile.pace === "slow" ? 2 : profile.pace === "tight" ? 4 : 3;
+  const comfort = Math.max(0, Math.round(100 - dailyCounts.reduce((sum: number, count: number) => sum + Math.abs(count - target) * 8, 0) / Math.max(1, profile.days) - Math.max(0, longestLeg - 60) * 0.4));
+  const dataConfidence = items.length ? Math.round(items.reduce((sum: number, item: any) => sum + Number(item.scoreBreakdown?.dataCompleteness || 50), 0) / items.length) : 0;
+  const constraintSatisfaction = required.length ? Math.round(requiredMatched.length / required.length * 100) : 100;
+  const overall = Math.round(preferenceMatch * 0.35 + routeEfficiency * 0.25 + comfort * 0.2 + dataConfidence * 0.1 + constraintSatisfaction * 0.1);
+  return {
+    overall, preferenceMatch, routeEfficiency, comfort, dataConfidence, constraintSatisfaction,
+    evidence: { candidateCount, selectedCount: items.length, transportMinutes, longestLegMinutes: longestLeg, dailyVisitCounts: dailyCounts, requiredMatched, requiredTotal: required.length },
+    formula: "偏好匹配 35% · 路线效率 25% · 舒适度 20% · 数据完整度 10% · 硬约束 10%",
+  };
 }
 
 async function hotelFallback(profile: any, city: any) {
@@ -645,6 +732,38 @@ async function hotelFor(profile: any, city: any) {
   }
 }
 
+function diningRecord(row: any) {
+  if (!row || typeof row !== "object") return null;
+  const name = cleanText(row.name || row.title);
+  const location = cleanText(row.location);
+  if (!name) return null;
+  const photos = Array.isArray(row.photos) ? row.photos : [];
+  return {
+    id: cleanText(row.id), name, address: cleanText(row.address), location,
+    type: cleanText(row.type), distanceM: Number(row.distance) || null,
+    photo: photos.map((item: any) => cleanText(typeof item === "string" ? item : item?.url)).find((value: string) => /^https:\/\//.test(value)) || null,
+    source: "高德地图 MCP 实时 POI 查询",
+  };
+}
+
+async function diningFor(city: string, lat: number, lng: number, mealType: string) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { status: "unavailable", candidates: [], message: "缺少路线锚点坐标" };
+  try {
+    const keyword = mealType === "dinner" ? "本地特色 晚餐" : "本地特色 午餐";
+    const raw: any = await callMcp(AMAP_MCP, "maps_around_search", {
+      location: `${lng},${lat}`, keywords: keyword, types: "餐饮服务", radius: "1500", city,
+    }, { timeoutMs: 10000, cacheMs: 30 * 60 * 1000 });
+    const rows = amapPoiRows(raw).map(diningRecord).filter(Boolean)
+      .filter((row: any) => !/茶|咖啡|甜品|饮品/.test(`${row.name} ${row.type}`))
+      .sort((a: any, b: any) => Number(a.distanceM ?? 999999) - Number(b.distanceM ?? 999999))
+      .slice(0, 3);
+    if (!rows.length) return { status: "empty", candidates: [], message: "路线附近未返回可核验餐饮 POI，保留自由用餐时间" };
+    return { status: "ready", candidates: rows, message: `在路线锚点 1.5 公里内返回 ${rows.length} 个可核验候选`, fetchedAt: new Date().toISOString() };
+  } catch (error: any) {
+    return { status: "fallback", candidates: [], message: `高德餐饮查询暂不可用：${cleanText(error?.message)}；保留自由用餐时间` };
+  }
+}
+
 export async function handleTravelApi(request: Request, env: any, url: URL): Promise<Response | null> {
   try {
     if (url.pathname === "/api/health") return json({
@@ -686,6 +805,14 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
     if (url.pathname === "/api/weather") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
       return json(await weatherFor(city, dateString(url.searchParams.get("startDate")), clamp(url.searchParams.get("days"), 1, 7)));
+    }
+
+    if (url.pathname === "/api/dining") {
+      const city = cleanText(url.searchParams.get("city"));
+      const lat = Number(url.searchParams.get("lat"));
+      const lng = Number(url.searchParams.get("lng"));
+      const mealType = cleanText(url.searchParams.get("meal"), "lunch");
+      return json(await diningFor(city, lat, lng, mealType));
     }
 
     if (url.pathname === "/api/spots") {
@@ -731,6 +858,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
     if (url.pathname === "/api/plan/start" && request.method === "POST") {
       const input = await request.json();
       const profile = await extractProfile(input, env);
+      if (profile.clarificationNeeded) return json({ error: { message: profile.clarificationQuestion || "请先明确一个主要目的城市或区县，再生成行程。" }, profile }, 409);
       const city = await resolveCity(profile.city);
       profile.city = city.name;
       const envelope = { version: 1, createdAt: Date.now(), profile, city };
@@ -839,6 +967,20 @@ async function buildPlan(profile: any, city: any, env: any) {
     });
   }
   for (const plan of alternatives) {
+    plan.evaluation = planEvaluation(plan, profile, spots.length);
+    plan.optimization = {
+      algorithm: "DeepSeek 白名单排序 + 空间最近邻重排",
+      candidateCount: spots.length,
+      selectedCount: plan.evaluation.evidence.selectedCount,
+      requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`,
+      note: "分数由本次已核验景点、实际日程与交通段计算，不是模型自报分数。",
+    };
+    plan.candidatePool = spots.slice(0, 12).map(spot => ({
+      id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore,
+      scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis,
+      requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences,
+      selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)),
+    }));
     plan.dataSources = {
       weather: weather.source || "MCPMarket 天气查询",
       spots: "中文维基百科公开页面与坐标；必选项由 OSM Nominatim 核验；高德 POI 用于精确图片补充",
@@ -846,6 +988,7 @@ async function buildPlan(profile: any, city: any, env: any) {
       routing: "OSRM 路线几何；失败时坐标距离×1.25 透明估算",
       transit: "高德地图 MCP 公交/地铁方案；共享免费额度不足时透明回退",
       images: "高德 POI 精确照片优先；中文维基百科精确页面图片兜底",
+      dining: "高德地图 MCP 路线附近餐饮 POI；无返回时保留自由用餐",
       crowd: "未接入官方可验证来源，全部保持未知",
       reservations: "未接入景区官方预约接口",
     };
@@ -859,7 +1002,8 @@ async function buildPlan(profile: any, city: any, env: any) {
     `✓ 核验用户必选景点 ${required.length} 个；3 套方案覆盖校验全部通过`,
     `✓ 酒店 MCP 状态：${hotel.mcpStatus === "ready" ? `返回 ${hotel.candidates?.length || 1} 个可核验候选` : hotel.mcpStatus === "empty" ? "已查询但暂无候选" : "已透明回退，不虚构酒店"}`,
     `✓ 为 ${profile.days * 3} 个日程计算路线；高德 MCP 已校验 ${amapVerifiedLegs}/${transitLegs.length} 个交通段`,
-    `✓ 已按 ${profile.dayStart}—${profile.dayEnd} 安排游玩，并插入午餐休息`,
+    `✓ 已按 ${profile.dayStart}—${profile.dayEnd} 安排游玩，并插入午餐、晚餐与弹性休息节点`,
+    `✓ 已计算候选景点可解释评分，并对每天路线执行空间最近邻重排以减少折返`,
     `✓ 已生成 3 套差异化方案，并再次检查必选项`,
     weather.tripForecast.some((day: any) => day.quality === "unavailable") ? "● 部分日期超出天气预报范围，保持不可用而非套用今日天气" : `✓ 天气已由 ${weather.source} 覆盖`,
     "● 官方实时客流、景区预约、实时房价与余房仍未接入，结果中保持未知",
