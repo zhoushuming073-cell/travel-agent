@@ -435,7 +435,9 @@ async function loadSpotImage(spot, holder) {
       const imageData = await api(`/api/image?${params}`);
       if (!imageData.found || !imageData.url) return;
       const image = document.createElement('img');
-      image.loading = 'lazy'; image.decoding = 'async'; image.referrerPolicy = 'no-referrer'; image.alt = spot.name;
+      // The image is preloaded before it is inserted. A detached lazy image may
+      // never start downloading, so it must be eager during this verification.
+      image.loading = 'eager'; image.decoding = 'async'; image.referrerPolicy = 'no-referrer'; image.alt = spot.name;
       const loaded = await new Promise(resolve => {
         let settled = false;
         const finish = value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
