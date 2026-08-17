@@ -840,34 +840,161 @@ function hotelRecord(row: any) {
     distance: Number(row.distance || row.distance_km),
     rating: cleanText(row.star || row.star_level || row.rating),
     hotelId: Number(row.hotel_id || row.id) || null,
+    lat: Number(row.lat) || null,
+    lng: Number(row.lng) || null,
+    price: null,
+    priceType: "酒店 MCP 暂未返回价格",
+    priceVerifiedForDates: false,
+    source: "MCPMarket 高端酒店查询（国内）",
+    sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd",
   };
 }
 
-async function hotelFor(profile: any, city: any) {
+function hotelMoney(value: any) {
+  const number = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number * 100) / 100 : null;
+}
+
+function amapHotelRecord(row: any, fetchedAt: string) {
+  if (!row || typeof row !== "object") return null;
+  const name = cleanText(row.name);
+  if (!name || !/住宿服务/.test(cleanText(row.type))) return null;
+  const price = hotelMoney(row?.biz_ext?.lowest_price || row?.lowest_price);
+  return {
+    id: cleanText(row.id), name, address: cleanText(row.address), location: cleanText(row.location),
+    distanceM: hotelMoney(row.distance), rating: cleanText(row?.biz_ext?.rating || row.rating),
+    star: cleanText(row?.biz_ext?.star), price,
+    priceType: price ? "高德 POI 最低参考价（非指定入住日期）" : "高德 POI 暂未返回参考价",
+    priceVerifiedForDates: false, availability: "unknown", fetchedAt,
+    source: "高德地图官方 Web 服务",
+    sourceUrl: row.id ? `https://www.amap.com/place/${encodeURIComponent(row.id)}` : "https://www.amap.com/",
+  };
+}
+
+function hotelProductSummary(value: any) {
+  const text = cleanText(mcpData(value));
+  if (!text) return { products: [], queryAvailability: "unknown", rawNote: "" };
+  const products = text.split(/\r?\n/).map(line => {
+    const price = hotelMoney(line.match(/(\d+(?:\.\d+)?)\s*元起/)?.[1]);
+    const url = line.match(/https?:\/\/[^\s，。]+/)?.[0] || "";
+    if (!price) return null;
+    const title = cleanText(line.replace(/[:：]?https?:\/\/\S+/, "")).slice(0, 180);
+    return { title, price, url };
+  }).filter(Boolean).slice(0, 3);
+  return {
+    products,
+    queryAvailability: /日期范围内.*不可用|套餐不可用|没有可用/.test(text) ? "unavailable" : "unknown",
+    rawNote: /日期范围内.*不可用|套餐不可用|没有可用/.test(text) ? "指定日期套餐未确认可用；以下仅为当前在售产品参考" : "在售产品仅作参考，指定日期房态仍需复核",
+  };
+}
+
+async function amapHotelsFor(env: any, city: any, location: string) {
+  const key = cleanText(env?.AMAP_WEB_KEY);
+  if (!key) return [];
+  const fetchedAt = new Date().toISOString();
+  const center = /^-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$/.test(location) ? location : `${city.lng},${city.lat}`;
+  const pages = await Promise.allSettled(["1", "2"].map(async page => {
+    const params = new URLSearchParams({
+      key, location: center, keywords: "酒店", types: "100000", radius: "10000",
+      sortrule: "distance", extensions: "all", offset: "25", page,
+    });
+    const raw = await fetchJson(`https://restapi.amap.com/v3/place/around?${params}`, {}, 15000, "高德酒店 POI");
+    if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德酒店 POI 未返回成功状态"));
+    return raw?.pois || [];
+  }));
+  const seen = new Set<string>();
+  const rows = pages.flatMap(page => page.status === "fulfilled" ? page.value : []);
+  if (!rows.length && pages.every(page => page.status === "rejected")) throw (pages[0] as PromiseRejectedResult).reason;
+  return rows.map((row: any) => amapHotelRecord(row, fetchedAt)).filter((row: any) => {
+    const key = normalizeName(row?.name);
+    return key && !seen.has(key) && seen.add(key);
+  }).sort((a: any, b: any) => {
+    if (Boolean(a.price) !== Boolean(b.price)) return a.price ? -1 : 1;
+    const ratingDelta = Number(b.rating || 0) - Number(a.rating || 0);
+    return Math.abs(ratingDelta) > 0.2 ? ratingDelta : Number(a.distanceM || 999999) - Number(b.distanceM || 999999);
+  });
+}
+
+async function hotelFor(profile: any, city: any, env: any) {
   const area = cleanText(profile.lodgingArea, `${city.name}市中心`);
+  const checkIn = profile.startDate;
+  const checkOut = addDays(profile.startDate, Math.max(1, Number(profile.nights || profile.days - 1)));
+  let location = `${city.lng},${city.lat}`;
+  let mcpCandidates: any[] = [];
+  let mcpError = "";
   try {
     const geocoded: any = await callMcp(HOTEL_MCP, "geocode", { address: `${city.name}${area}`, city: city.name }, { timeoutMs: 12000, cacheMs: 30 * 60 * 1000 });
     const geoRows = mcpData(geocoded)?.geocodes || mcpData(geocoded) || [];
-    const location = cleanText(Array.isArray(geoRows) ? geoRows[0]?.location : geoRows?.location);
-    if (!location) throw new Error("酒店 MCP 未能定位住宿区域");
+    location = cleanText(Array.isArray(geoRows) ? geoRows[0]?.location : geoRows?.location, location);
     const nearby: any = await callMcp(HOTEL_MCP, "nearby_hotel", { location, distance: 10 }, { timeoutMs: 12000, cacheMs: 15 * 60 * 1000 });
     const rows = mcpData(nearby);
-    const candidates = (Array.isArray(rows) ? rows : rows?.hotels || []).map(hotelRecord).filter(Boolean).slice(0, 5);
-    if (!candidates.length) {
-      const fallback = await hotelFallback(profile, city);
-      return { ...fallback, mcpStatus: "empty", source: "MCPMarket 高端酒店查询（国内）", sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd", note: `酒店 MCP 已查询“${area}”周边 10 公里，但当前未返回可核验候选；不虚构酒店、房价或余房。` };
-    }
-    const best = candidates[0];
-    return {
-      name: best.name, reason: `${area}附近的酒店 MCP 可核验候选${best.distance ? `，距离约 ${best.distance}` : ""}`,
-      note: `共返回 ${candidates.length} 个候选；该接口未提供指定日期的实时房价和余房，预订前仍需复核。`,
-      price: null, candidates, mcpStatus: "ready", source: "MCPMarket 高端酒店查询（国内）",
-      sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd",
-    };
+    mcpCandidates = (Array.isArray(rows) ? rows : rows?.hotels || []).map(hotelRecord).filter(Boolean).slice(0, 3);
+    await Promise.all(mcpCandidates.filter(row => row.hotelId).map(async row => {
+      try {
+        const raw = await callMcp(HOTEL_MCP, "hotel_product", {
+          hotel_id: row.hotelId,
+          query: `${checkIn}入住，${checkOut}离店，${profile.partySize}位住客，查询当前在售住宿产品及价格`,
+        }, { timeoutMs: 16000, cacheMs: 15 * 60 * 1000 });
+        const summary: any = hotelProductSummary(raw);
+        row.products = summary.products;
+        row.availability = summary.queryAvailability;
+        row.productNote = summary.rawNote;
+        if (summary.products.length) {
+          row.price = Math.min(...summary.products.map((item: any) => item.price));
+          row.priceType = "酒店 MCP 在售套餐参考价（指定日期未确认）";
+        }
+      } catch (error: any) { row.productNote = `在售产品查询暂不可用：${cleanText(error?.message)}`; }
+    }));
   } catch (error: any) {
-    const fallback = await hotelFallback(profile, city);
-    return { ...fallback, mcpStatus: "fallback", source: "住宿区域兜底", sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd", note: `酒店 MCP 暂不可用：${cleanText(error?.message)}。未虚构酒店、房价或余房。` };
+    mcpError = cleanText(error?.message, "酒店 MCP 暂不可用");
   }
+
+  let amapCandidates: any[] = [];
+  let amapError = "";
+  try { amapCandidates = await amapHotelsFor(env, city, location); }
+  catch (error: any) { amapError = cleanText(error?.message, "高德酒店 POI 暂不可用"); }
+
+  const mergedByName = new Map<string, any>();
+  for (const row of [...amapCandidates, ...mcpCandidates]) {
+    const key = normalizeName(row.name);
+    if (!key) continue;
+    const existing = mergedByName.get(key);
+    if (!existing) { mergedByName.set(key, row); continue; }
+    const useExistingPrice = Boolean(existing.price);
+    mergedByName.set(key, {
+      ...row, ...existing,
+      price: existing.price || row.price || null,
+      priceType: useExistingPrice ? existing.priceType : row.priceType,
+      products: existing.products?.length ? existing.products : row.products,
+      productNote: existing.productNote || row.productNote,
+      source: `${existing.source} + ${row.source}`,
+    });
+  }
+  const merged = [...mergedByName.values()];
+  const priced = merged.filter((row: any) => row.price);
+  const unpriced = merged.filter((row: any) => !row.price);
+  const candidates = [...priced.slice(0, 5), ...unpriced.slice(0, Math.max(0, 5 - Math.min(5, priced.length)))].slice(0, 5);
+  if (!candidates.length) {
+    const fallback = await hotelFallback(profile, city);
+    return {
+      ...fallback, candidates: [], mcpStatus: mcpError ? "fallback" : "empty", source: "酒店 MCP + 高德酒店 POI",
+      sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd", checkIn, checkOut, area,
+      note: `已查询“${area}”附近酒店，但没有返回可核验候选。${[mcpError, amapError].filter(Boolean).join("；")}`,
+    };
+  }
+  const pricedCount = candidates.filter((row: any) => row.price).length;
+  return {
+    name: `${candidates.length} 家附近真实住宿候选`,
+    reason: `${area} · ${checkIn} 入住 / ${checkOut} 离店 · ${profile.partySize} 人`,
+    note: pricedCount
+      ? `${pricedCount} 家返回了可展示的最低/套餐参考价；均未核验为指定日期最终成交价，房态与税费请在下单页复核。`
+      : "候选酒店已由地图核验，但数据源暂未返回可展示价格；不补写固定假价。",
+    price: priced[0]?.price || null, pricedCount, candidates, checkIn, checkOut, area,
+    mcpStatus: mcpCandidates.length ? "ready" : "partial",
+    source: "高德地图官方酒店 POI + MCPMarket 酒店在售产品",
+    sourceUrl: "https://mcpmarket.cn/server/68ef4df83e8621b27597dafd",
+    fetchedAt: new Date().toISOString(), warnings: [mcpError, amapError].filter(Boolean),
+  };
 }
 
 function diningRecord(row: any) {
@@ -909,7 +1036,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       ai: { status: env?.DEEPSEEK_API_KEY ? "configured" : "unconfigured", model: env?.DEEPSEEK_MODEL || "deepseek-chat", note: "两阶段调用：先提取需求，再把 MCP 与公开数据交给 DeepSeek 排序" },
       services: [
         { name: "天气查询 MCP", provider: "MCPMarket", status: "live", note: "Open-Meteo 逐小时预报；MCP 失败时使用 Open-Meteo 直连兜底" },
-        { name: "高端酒店查询（国内）", provider: "MCPMarket", status: "live", note: "附近高星酒店候选；不返回或未核验时不编造房价、余房" },
+        { name: "酒店与参考价", provider: "高德地图官方 + MCPMarket", status: env?.AMAP_WEB_KEY ? "live" : "partial", note: "地图 POI 保证候选真实性；展示高德最低参考价或酒店 MCP 在售套餐参考价，并明确非指定日期成交价" },
         { name: "高德官方景点图片", provider: "高德 Web 服务 API", status: env?.AMAP_WEB_KEY ? "live" : "unconfigured", note: "使用用户 Key 做景点实体精确搜索，作为图片首选" },
         { name: "Unsplash 景点图片", provider: "Unsplash API", status: env?.UNSPLASH_ACCESS_KEY ? "live" : "unconfigured", note: "高德无照片时按景点名与城市补图，并显示摄影师与 Unsplash 归因" },
         { name: "高德地图 AMap", provider: "MCPMarket / 高德开放平台", status: "live", note: "POI、精确图片与公交路线；共享免费额度耗尽时透明回退" },
@@ -926,7 +1053,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       route: { name: "道路路线", role: "OSRM 地图几何 + 高德 MCP", status: "ready", fallback: "坐标距离×1.25 透明估算" },
       transit: { name: "公共交通", role: "高德地图 MCP", status: "ready", fallback: "无班次或额度不足时显示道路耗时参考" },
       crowd: { name: "客流与预约", role: "景区官方来源待接入", status: "unconfigured", fallback: "保持未知" },
-      hotel: { name: "住宿候选", role: "MCPMarket 高端酒店查询（国内）", status: "ready", fallback: "仅保留用户住宿区域，不展示未核验房价和余房" },
+      hotel: { name: "住宿候选", role: "高德地图官方酒店 POI + MCPMarket 在售产品", status: env?.AMAP_WEB_KEY ? "ready" : "partial", fallback: "仅保留用户住宿区域；没有来源价格时不补写假价" },
       images: { name: "景点图片", role: "高德官方精确 POI + Unsplash + Wikimedia", status: env?.AMAP_WEB_KEY || env?.UNSPLASH_ACCESS_KEY ? "ready" : "unconfigured", fallback: "高德官方无照片时依次使用 Unsplash、高德免费 MCP 和中文维基百科实体图片" },
     } });
 
@@ -945,6 +1072,16 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
     if (url.pathname === "/api/weather") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
       return json(await weatherFor(city, dateString(url.searchParams.get("startDate")), clamp(url.searchParams.get("days"), 1, 7)));
+    }
+
+    if (url.pathname === "/api/hotels") {
+      const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
+      const startDate = dateString(url.searchParams.get("startDate"), addDays(new Date().toISOString().slice(0, 10), 3));
+      const nights = clamp(url.searchParams.get("nights"), 1, 7);
+      return json(await hotelFor({
+        startDate, nights, days: nights + 1, partySize: clamp(url.searchParams.get("partySize"), 1, 20),
+        lodgingArea: cleanText(url.searchParams.get("area")), hotelPreference: cleanText(url.searchParams.get("preference"), "交通方便"),
+      }, city, env));
     }
 
     if (url.pathname === "/api/dining") {
@@ -1076,7 +1213,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
 async function buildPlan(profile: any, city: any, env: any) {
   const [weather, rawSpots, hotel] = await Promise.all([
-    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences), hotelFor(profile, city),
+    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences), hotelFor(profile, city, env),
   ]);
   const required = await verifyRequired(city, profile.requiredAttractions, rawSpots);
   const spots = rankSpots(uniqueSpots([...required, ...rawSpots]), profile);
@@ -1151,7 +1288,7 @@ async function buildPlan(profile: any, city: any, env: any) {
     plan.dataSources = {
       weather: weather.source || "MCPMarket 天气查询",
       spots: "中文维基百科公开页面与坐标；必选项由 OSM Nominatim 核验；高德 POI 用于精确图片补充",
-      hotels: hotel.mcpStatus === "ready" ? "MCPMarket 高端酒店查询（国内）" : "酒店 MCP 已调用但无可核验结果，保留用户住宿区域",
+      hotels: hotel.candidates?.length ? "高德地图官方酒店 POI + MCPMarket 酒店在售产品" : "酒店服务已调用但无可核验结果，保留用户住宿区域",
       routing: "OSRM 路线几何；失败时坐标距离×1.25 透明估算",
       transit: "高德地图 MCP 公交/地铁方案；共享免费额度不足时透明回退",
       images: "高德官方 POI 精确照片优先；Unsplash 相关性补图；高德免费 MCP 与中文维基百科实体图片兜底",
@@ -1167,13 +1304,13 @@ async function buildPlan(profile: any, city: any, env: any) {
   const progress = { phase: "route", title: "路线规划与工具校验已完成", items: [
     `✓ 获取并去重带坐标候选景点 ${spots.length} 个`,
     `✓ 核验用户必选景点 ${required.length} 个；3 套方案覆盖校验全部通过`,
-    `✓ 酒店 MCP 状态：${hotel.mcpStatus === "ready" ? `返回 ${hotel.candidates?.length || 1} 个可核验候选` : hotel.mcpStatus === "empty" ? "已查询但暂无候选" : "已透明回退，不虚构酒店"}`,
+    `✓ 酒店查询状态：${hotel.candidates?.length ? `返回 ${hotel.candidates.length} 个地图可核验候选，其中 ${hotel.pricedCount || 0} 个带来源参考价` : hotel.mcpStatus === "empty" ? "已查询但暂无候选" : "已透明回退，不虚构酒店"}`,
     `✓ 为 ${profile.days * 3} 个日程计算路线；高德 MCP 已校验 ${amapVerifiedLegs}/${transitLegs.length} 个交通段`,
     `✓ 已按 ${profile.dayStart}—${profile.dayEnd} 安排游玩，并插入午餐、晚餐与弹性休息节点`,
     `✓ 已计算候选景点可解释评分，并对每天路线执行空间最近邻重排以减少折返`,
     `✓ 已生成 3 套差异化方案，并再次检查必选项`,
     weather.tripForecast.some((day: any) => day.quality === "unavailable") ? "● 部分日期超出天气预报范围，保持不可用而非套用今日天气" : `✓ 天气已由 ${weather.source} 覆盖`,
-    "● 官方实时客流、景区预约、实时房价与余房仍未接入，结果中保持未知",
+    "● 酒店价格只展示高德最低参考价或 MCP 在售套餐参考价；指定日期最终房价与余房仍需下单前复核",
   ], formSync: profile };
   return { request: profile, alternatives, activeId: "relax", generatedAt: new Date().toISOString(), planner: { type: "two-stage-deepseek-with-mcp-tools", stages: ["DeepSeek 需求结构化", "天气 / 酒店 / 高德 MCP 与公开数据核验", "DeepSeek 景点排序", "路线工具补全", "硬约束与必选项校验"] }, progress };
 }

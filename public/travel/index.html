@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light" />
   <meta name="description" content="基于 DeepSeek 与真实地图、天气、路线及住宿工具的中国智能旅游助手。" />
   <title>智能旅游助手 · 本地智能规划台</title>
-  <link rel="stylesheet" href="styles.css?v=6" />
+  <link rel="stylesheet" href="styles.css?v=11" />
 </head>
 <body>
   <div class="app-shell">
@@ -96,7 +96,7 @@
         <div class="select-wrap muted-select"><span class="field-icon">宿</span><select id="hotelPreference">
           <option selected>交通方便</option><option>景区附近</option><option>预算优先</option><option>品质优先</option><option>不指定</option>
         </select></div>
-        <p class="field-note">仅推荐地图中真实存在的住宿 POI；未接入预订平台时不显示房价和房态。</p>
+        <p class="field-note">优先显示附近真实酒店；价格来自高德最低参考价或酒店 MCP 在售套餐，指定日期房态与成交价仍需复核。</p>
 
         <button class="secondary-button full" id="resetButton" type="button">恢复默认条件</button>
       </aside>
@@ -194,9 +194,10 @@
         </section>
 
         <section class="hotel-panel panel" id="hotelPanel">
-          <div class="mini-title"><span>住宿规划</span><i>真实 POI</i></div>
+          <div class="mini-title"><span>住宿规划</span><i>真实 POI + 来源价格</i></div>
           <strong id="hotelName">生成行程后推荐</strong>
-          <p id="hotelReason">房价与房态缺失时保持未知，不由 AI 补写。</p>
+          <p id="hotelReason">酒店与价格均需有来源；缺失时保持未知，不由 AI 补写。</p>
+          <div class="hotel-list" id="hotelCandidates"></div>
           <a id="hotelSourceLink" href="#" target="_blank" rel="noreferrer" hidden>查看地图来源</a>
         </section>
 
@@ -235,6 +236,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

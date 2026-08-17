@@ -757,6 +757,24 @@ function renderHotel(hotel) {
   const value = hotel || {};
   $('#hotelName').textContent = value.name || '未锁定具体酒店';
   $('#hotelReason').textContent = [value.reason, value.note].filter(Boolean).join(' · ') || '没有可靠住宿数据，保持未知。';
+  const candidates = Array.isArray(value.candidates) ? value.candidates : [];
+  const container = $('#hotelCandidates');
+  container.innerHTML = candidates.length ? candidates.map((candidate, index) => {
+    const distance = Number(candidate.distanceM) > 0
+      ? `距住宿锚点约 ${Number(candidate.distanceM) >= 1000 ? `${(Number(candidate.distanceM) / 1000).toFixed(1)}km` : `${Math.round(Number(candidate.distanceM))}m`}`
+      : Number(candidate.distance) > 0 ? `距住宿锚点约 ${Number(candidate.distance).toFixed(1)}km` : '';
+    const meta = [candidate.rating ? `评分 ${candidate.rating}` : '', candidate.star ? `${candidate.star} 星` : '', distance, candidate.address].filter(Boolean);
+    const price = Number(candidate.price) > 0 ? `<b class="hotel-price">¥${Math.round(Number(candidate.price))}<small>起</small></b>` : '<b class="hotel-price unknown">价格待源返回</b>';
+    const source = candidate.sourceUrl
+      ? `<a href="${esc(candidate.sourceUrl)}" target="_blank" rel="noreferrer">${esc(candidate.source || '查看来源')}</a>`
+      : `<span>${esc(candidate.source || '来源未提供链接')}</span>`;
+    const products = Array.isArray(candidate.products) && candidate.products.length
+      ? `<div class="hotel-products">${candidate.products.slice(0, 2).map(product => product.url
+          ? `<a href="${esc(product.url)}" target="_blank" rel="noreferrer">套餐参考 ¥${Math.round(Number(product.price))}起</a>`
+          : `<span>套餐参考 ¥${Math.round(Number(product.price))}起</span>`).join('')}</div>`
+      : '';
+    return `<article class="hotel-candidate"><div class="hotel-candidate-head"><span class="hotel-rank">${index + 1}</span><strong>${esc(candidate.name)}</strong>${price}</div><p>${meta.map(esc).join(' · ') || '地图已核验，暂无更多详情'}</p><div class="hotel-price-note">${esc(candidate.priceType || '价格来源未知')}${candidate.availability === 'unavailable' ? ' · 指定日期套餐未确认可用' : ''}</div><div class="hotel-source">${source}</div>${products}</article>`;
+  }).join('') : '<div class="hotel-empty">本次查询暂未返回可核验酒店候选，请稍后重试或换一个住宿区域。</div>';
   const link = $('#hotelSourceLink');
   if (value.sourceUrl) { link.href = value.sourceUrl; link.hidden = false; }
   else { link.hidden = true; link.removeAttribute('href'); }
