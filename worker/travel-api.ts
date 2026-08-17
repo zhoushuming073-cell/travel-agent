@@ -148,6 +148,51 @@ function normalizeName(name: unknown) {
   return cleanText(name).replace(/[\s·•—－()（）景区风景名胜区旅游区]+/g, "").toLowerCase();
 }
 
+function secureImageUrl(value: unknown) {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === "https:") return parsed.href;
+    if (parsed.protocol === "http:" && /(^|\.)(autonavi|amap)\.com$/i.test(parsed.hostname)) {
+      parsed.protocol = "https:";
+      return parsed.href;
+    }
+  } catch { /* invalid image URL */ }
+  return "";
+}
+
+function imageLookupNames(name: string, city = "") {
+  const values = [cleanText(name)];
+  const withoutSuffix = cleanText(name).replace(/(?:风景名胜区|旅游景区|景区|公园)$/g, "");
+  if (withoutSuffix && withoutSuffix !== name) values.push(withoutSuffix);
+  if (/江滩.*水上乐园/.test(name)) values.push(name.replace(/水上乐园.*$/, ""));
+  if (/铁路轮渡船/.test(name)) values.push(`${city || "武汉"}轮渡`);
+  return [...new Set(values.map(cleanText).filter(Boolean))];
+}
+
+function poiMatchScore(actualName: unknown, wantedNames: string[]) {
+  const actual = normalizeName(actualName);
+  if (!actual) return 0;
+  return wantedNames.reduce((best, wantedName) => {
+    const wanted = normalizeName(wantedName);
+    if (!wanted) return best;
+    if (actual === wanted) return Math.max(best, 100);
+    if (actual.startsWith(wanted) || wanted.startsWith(actual)) return Math.max(best, 85);
+    if (actual.includes(wanted) || wanted.includes(actual)) return Math.max(best, 70);
+    return best;
+  }, 0);
+}
+
+function poiImageScore(poi: any, wantedNames: string[]) {
+  const match = poiMatchScore(poi?.name, wantedNames);
+  if (!match) return 0;
+  const type = cleanText(poi?.type || poi?.typeName || poi?.category);
+  if (/商务住宅|公司企业|餐饮服务|政府机构|医疗保健|汽车服务|生活服务/.test(type)) return 0;
+  if (/风景名胜|公园广场|科教文化服务|特色商业街|自然地名|文物古迹/.test(type)) return match + 25;
+  return match === 100 ? match : 0;
+}
+
 function parseJsonObject(text: string) {
   const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
   try { return JSON.parse(stripped); } catch { /* continue */ }
@@ -369,21 +414,24 @@ function wikiCategory(title: string, extract: string) {
   return "城市景观";
 }
 
-function wikiPageToSpot(page: any, city: any, requiredNames: string[]) {
+function wikiPageToSpot(page: any, city: any, requiredNames: string[], preferences: string[] = []) {
   const coordinate = page?.coordinates?.[0];
   if (!coordinate || !Number.isFinite(Number(coordinate.lat)) || !Number.isFinite(Number(coordinate.lon))) return null;
   const name = cleanText(page.title);
   const extract = cleanText(page.extract);
   const text = `${name} ${extract}`;
-  if (/街道办事处|行政区|市辖区|下辖|地铁|车站|铁路|高速公路|国道|省道|医院|学校|大学|住宅区|写字楼|公司总部|机场/.test(text)) return null;
-  if (/^[\u4e00-\u9fa5]{2,10}(市|区|县|省)$/.test(name)) return null;
-  if (!/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|古村|寺|庙|塔|湖|山|峰|洞|瀑布|湿地|花园|园林|宫|祠|陵|古城|历史文化|世界遗产|风景|自然保护区|教堂|广场|动物园|植物园|水库|岛|堤|桥|街区|宋城/.test(text)) return null;
-  const lat = Number(coordinate.lat), lng = Number(coordinate.lon);
-  if (haversine(city.lat, city.lng, lat, lng) > 80000) return null;
   const requiredByUser = requiredNames.some(required => {
     const wanted = normalizeName(required), actual = normalizeName(name);
     return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
   });
+  const familyEntertainmentWanted = preferences.some(item => /亲子|乐园|游乐|水上/.test(item));
+  if (/街道办事处|行政区|市辖区|下辖|地铁|车站|铁路|高速公路|国道|省道|医院|学校|大学|住宅区|写字楼|公司总部|机场/.test(text)) return null;
+  if (!requiredByUser && /铁路轮渡船/.test(text)) return null;
+  if (!requiredByUser && !familyEntertainmentWanted && /水上乐园|游乐园/.test(text)) return null;
+  if (/^[\u4e00-\u9fa5]{2,10}(市|区|县|省)$/.test(name)) return null;
+  if (!/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|古村|寺|庙|塔|湖|山|峰|洞|瀑布|湿地|花园|园林|宫|祠|陵|古城|历史文化|世界遗产|风景|自然保护区|教堂|广场|动物园|植物园|水库|岛|堤|桥|街区|宋城/.test(text)) return null;
+  const lat = Number(coordinate.lat), lng = Number(coordinate.lon);
+  if (haversine(city.lat, city.lng, lat, lng) > 80000) return null;
   return {
     id: `wikipedia-${page.pageid}`, name, lat, lng, category: requiredByUser ? "用户必选" : wikiCategory(name, extract),
     durationMin: /博物馆|美术馆|纪念馆|宋城/.test(text) ? 120 : /公园|湖|山|湿地|风景区/.test(text) ? 110 : 90,
@@ -422,7 +470,7 @@ async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [
   const responses = settled.filter(result => result.status === "fulfilled").map((result: any) => result.value);
   if (!responses.length) throw new Error("中文维基百科景点检索暂时不可用，请稍后重试");
   const pages = responses.flatMap(response => response?.query?.pages || []);
-  const spots = uniqueSpots(pages.map(page => wikiPageToSpot(page, city, requiredNames)).filter(Boolean));
+  const spots = uniqueSpots(pages.map(page => wikiPageToSpot(page, city, requiredNames, preferences)).filter(Boolean));
   return rankSpots(spots, { style: preferences.join(" "), preferences }).slice(0, limit);
 }
 
@@ -521,21 +569,18 @@ function amapPoiRows(value: any) {
 }
 
 async function amapPoiForSpot(name: string, city: string) {
-  const searched: any = await callMcp(AMAP_MCP, "maps_text_search", { keywords: name, city, types: "风景名胜" }, { timeoutMs: 9000, cacheMs: 30 * 60 * 1000 });
-  const wanted = normalizeName(name);
+  const lookupNames = imageLookupNames(name, city);
+  const searched: any = await callMcp(AMAP_MCP, "maps_text_search", { keywords: lookupNames[0], city, types: "风景名胜" }, { timeoutMs: 9000, cacheMs: 30 * 60 * 1000 });
   const rows = amapPoiRows(searched);
-  const poi = rows.find((row: any) => normalizeName(row.name) === wanted) || rows.find((row: any) => {
-    const actual = normalizeName(row.name);
-    return actual.includes(wanted) || wanted.includes(actual);
-  });
-  if (!poi) return null;
+  const poi = [...rows].sort((a: any, b: any) => poiImageScore(b, lookupNames) - poiImageScore(a, lookupNames))[0];
+  if (!poi || !poiImageScore(poi, lookupNames)) return null;
   let detail: any = poi;
   if (poi.id) {
     try { detail = mcpData(await callMcp(AMAP_MCP, "maps_search_detail", { id: cleanText(poi.id) }, { timeoutMs: 9000, cacheMs: 60 * 60 * 1000 })) || poi; } catch { detail = poi; }
   }
   if (Array.isArray(detail?.pois)) detail = detail.pois[0] || poi;
   const photos = [...(Array.isArray(poi.photos) ? poi.photos : []), ...(Array.isArray(detail?.photos) ? detail.photos : [])];
-  const photo = photos.map((item: any) => cleanText(typeof item === "string" ? item : item?.url || item?.photo_url)).find((url: string) => /^https:\/\//i.test(url));
+  const photo = photos.map((item: any) => secureImageUrl(typeof item === "string" ? item : item?.url || item?.photo_url)).find(Boolean);
   const location = cleanText(detail?.location || poi.location);
   return { id: cleanText(poi.id), name: cleanText(poi.name), location, photo, raw: detail };
 }
@@ -543,23 +588,25 @@ async function amapPoiForSpot(name: string, city: string) {
 async function amapOfficialImage(env: any, name: string, city: string) {
   const key = cleanText(env?.AMAP_WEB_KEY);
   if (!key || !name) return null;
-  const params = new URLSearchParams({ key, keywords: name, city, citylimit: "true", types: "110000", extensions: "all", offset: "5", page: "1" });
-  const raw = await fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, "高德地图官方 Web 服务");
-  if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德地图官方接口未返回成功状态"));
-  const wanted = normalizeName(name);
-  const pois = raw?.pois || [];
-  const poi = pois.find((item: any) => normalizeName(item?.name) === wanted) || pois.find((item: any) => {
-    const actual = normalizeName(item?.name);
-    return actual && wanted && (actual.includes(wanted) || wanted.includes(actual));
-  });
-  const photo = (poi?.photos || []).map((item: any) => cleanText(item?.url)).find((url: string) => /^https:\/\//.test(url));
-  if (!poi || !photo) return null;
-  const id = cleanText(poi.id);
-  return {
-    found: true, url: photo, source: "高德地图官方 POI 精确照片",
-    sourceUrl: id ? `https://www.amap.com/place/${encodeURIComponent(id)}` : "https://www.amap.com/",
-    verifiedName: cleanText(poi.name, name), matchQuality: "amap-official-exact-poi",
-  };
+  const lookupNames = imageLookupNames(name, city);
+  for (const lookupName of lookupNames) {
+    const params = new URLSearchParams({ key, keywords: lookupName, city, citylimit: "true", extensions: "all", offset: "20", page: "1" });
+    const raw = await fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, "高德地图官方 Web 服务");
+    if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德地图官方接口未返回成功状态"));
+    const ranked = [...(raw?.pois || [])]
+      .map((poi: any) => ({ poi, score: poiImageScore(poi, lookupNames), photo: (poi?.photos || []).map((item: any) => secureImageUrl(item?.url)).find(Boolean) }))
+      .filter((item: any) => item.score > 0 && item.photo)
+      .sort((a: any, b: any) => b.score - a.score);
+    const best = ranked[0];
+    if (!best) continue;
+    const id = cleanText(best.poi.id);
+    return {
+      found: true, url: best.photo, source: "高德地图官方 POI 精确照片", provider: "amap-official",
+      sourceUrl: id ? `https://www.amap.com/place/${encodeURIComponent(id)}` : "https://www.amap.com/",
+      verifiedName: cleanText(best.poi.name, name), matchQuality: poiMatchScore(best.poi.name, lookupNames) === 100 ? "amap-official-exact-poi" : "amap-official-related-poi",
+    };
+  }
+  return null;
 }
 
 function withUnsplashUtm(value: unknown) {
@@ -567,28 +614,67 @@ function withUnsplashUtm(value: unknown) {
   return `${url}${url.includes("?") ? "&" : "?"}utm_source=smart_travel_assistant&utm_medium=referral`;
 }
 
-async function unsplashImage(env: any, name: string, city: string) {
+async function unsplashImage(env: any, name: string, city: string, englishName = "") {
   const accessKey = cleanText(env?.UNSPLASH_ACCESS_KEY);
   if (!accessKey || !name) return null;
-  const query = `${name} ${city} China travel landmark`.trim();
-  const cached = unsplashMemory.get(query);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-  const params = new URLSearchParams({ query, page: "1", per_page: "5", order_by: "relevant", orientation: "landscape", content_filter: "high" });
-  const raw = await fetchJson(`https://api.unsplash.com/search/photos?${params}`, {
-    headers: { Authorization: `Client-ID ${accessKey}`, "Accept-Version": "v1" },
-  }, 15000, "Unsplash 图片服务");
-  const photo = (raw?.results || []).find((item: any) => item?.urls?.regular);
-  if (!photo) return null;
-  const value = {
-    found: true, url: photo.urls.regular, source: "Unsplash",
-    sourceUrl: withUnsplashUtm(photo.links?.html),
-    photographer: cleanText(photo.user?.name || photo.user?.username, "Unsplash 摄影师"),
-    photographerUrl: withUnsplashUtm(photo.user?.links?.html),
-    unsplashUrl: "https://unsplash.com/?utm_source=smart_travel_assistant&utm_medium=referral",
-    verifiedName: name, matchQuality: "unsplash-relevant-search", queryUsed: query,
+  const queries = [...new Set([
+    englishName ? `${englishName} ${city} China` : "",
+    `${name} ${city}`,
+    englishName ? `${englishName} China` : "",
+  ].map(cleanText).filter(Boolean))];
+  for (const query of queries) {
+    const cached = unsplashMemory.get(query);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.value) return cached.value;
+      continue;
+    }
+    const params = new URLSearchParams({ query, page: "1", per_page: "5", order_by: "relevant", orientation: "landscape", content_filter: "high" });
+    const raw = await fetchJson(`https://api.unsplash.com/search/photos?${params}`, {
+      headers: { Authorization: `Client-ID ${accessKey}`, "Accept-Version": "v1" },
+    }, 15000, "Unsplash 图片服务");
+    const photo = (raw?.results || []).find((item: any) => item?.urls?.regular);
+    if (!photo) {
+      unsplashMemory.set(query, { expiresAt: Date.now() + 6 * 60 * 60 * 1000, value: null });
+      continue;
+    }
+    const value = {
+      found: true, url: photo.urls.regular, source: "Unsplash", provider: "unsplash",
+      sourceUrl: withUnsplashUtm(photo.links?.html),
+      photographer: cleanText(photo.user?.name || photo.user?.username, "Unsplash 摄影师"),
+      photographerUrl: withUnsplashUtm(photo.user?.links?.html),
+      unsplashUrl: "https://unsplash.com/?utm_source=smart_travel_assistant&utm_medium=referral",
+      verifiedName: name, matchQuality: "unsplash-relevant-search", queryUsed: query,
+    };
+    unsplashMemory.set(query, { expiresAt: Date.now() + 24 * 60 * 60 * 1000, value });
+    return value;
+  }
+  return null;
+}
+
+async function wikipediaExactEntity(name: string, city: string) {
+  const lookupNames = imageLookupNames(name, city);
+  const titles = [...new Set(lookupNames.flatMap(item => [item, item.startsWith(city) ? "" : `${city}${item}`]).filter(Boolean))].slice(0, 6);
+  const params = new URLSearchParams({
+    action: "query", prop: "pageimages|info|langlinks", titles: titles.join("|"), redirects: "1",
+    piprop: "thumbnail", pithumbsize: "960", inprop: "url", lllang: "en", lllimit: "1",
+    format: "json", formatversion: "2", origin: "*",
+  });
+  const raw = await fetchJson(`https://zh.wikipedia.org/w/api.php?${params}`, {}, 15000, "中文维基百科精确图片");
+  const ranked = (raw?.query?.pages || [])
+    .filter((page: any) => !page?.missing)
+    .map((page: any) => ({ page, score: poiMatchScore(page?.title, lookupNames) }))
+    .filter((item: any) => item.score > 0)
+    .sort((a: any, b: any) => b.score - a.score);
+  const best = ranked[0]?.page;
+  if (!best) return null;
+  return {
+    found: Boolean(secureImageUrl(best?.thumbnail?.source)),
+    url: secureImageUrl(best?.thumbnail?.source),
+    source: "Wikimedia 精确页面图片", provider: "wikimedia",
+    sourceUrl: cleanText(best?.fullurl, `https://zh.wikipedia.org/wiki/${encodeURIComponent(cleanText(best?.title).replace(/ /g, "_"))}`),
+    verifiedName: cleanText(best?.title, name), englishName: cleanText(best?.langlinks?.[0]?.title),
+    matchQuality: "wikipedia-exact-title",
   };
-  unsplashMemory.set(query, { expiresAt: Date.now() + 24 * 60 * 60 * 1000, value });
-  return value;
 }
 
 function firstTransit(value: any) {
@@ -880,36 +966,51 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       const wikipedia = cleanText(url.searchParams.get("wikipedia"));
       const name = cleanText(url.searchParams.get("name"));
       const cityName = cleanText(url.searchParams.get("city"));
-      if (name && cityName) {
+      const excluded = new Set(cleanText(url.searchParams.get("exclude")).split(",").filter(Boolean));
+      const attempts: string[] = [];
+      if (name && cityName && !excluded.has("amap-official")) {
         try {
           const official = await amapOfficialImage(env, name, cityName);
           if (official) return json(official);
-        } catch { /* 高德官方接口不可用时继续使用 Unsplash 与其他精确实体图片 */ }
+          attempts.push("高德官方未找到匹配照片");
+        } catch (error: any) { attempts.push(`高德官方：${cleanText(error?.message, "不可用")}`); }
       }
+      if (!excluded.has("wikimedia")) {
+        try {
+          const parsed = new URL(imageUrl);
+          if (parsed.protocol === "https:" && parsed.hostname.endsWith(".wikimedia.org")) {
+            const title = wikipedia.replace(/^zh:/, "");
+            return json({ found: true, url: imageUrl, source: "Wikimedia 精确页面图片", provider: "wikimedia", sourceUrl: title ? `https://zh.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}` : "https://commons.wikimedia.org/" });
+          }
+        } catch { /* no verified image */ }
+      }
+      let wikiEntity: any = null;
       if (name && cityName) {
         try {
-          const unsplash = await unsplashImage(env, name, cityName);
-          if (unsplash) return json(unsplash);
-        } catch { /* Unsplash 限流或不可用时继续使用精确实体图片 */ }
+          wikiEntity = await wikipediaExactEntity(name, cityName);
+          if (!excluded.has("wikimedia") && wikiEntity?.found) return json(wikiEntity);
+          attempts.push("中文维基百科精确页面无图片");
+        } catch (error: any) { attempts.push(`中文维基百科：${cleanText(error?.message, "不可用")}`); }
       }
-      if (name && cityName) {
+      if (name && cityName && !excluded.has("unsplash")) {
+        try {
+          const unsplash = await unsplashImage(env, name, cityName, wikiEntity?.englishName || "");
+          if (unsplash) return json(unsplash);
+          attempts.push("Unsplash 未找到相关照片");
+        } catch (error: any) { attempts.push(`Unsplash：${cleanText(error?.message, "不可用")}`); }
+      }
+      if (name && cityName && !excluded.has("amap-mcp")) {
         try {
           const amap = await amapPoiForSpot(name, cityName);
           if (amap?.photo) return json({
-            found: true, url: amap.photo, source: "高德地图 POI 精确照片",
+            found: true, url: amap.photo, source: "高德地图 POI 精确照片", provider: "amap-mcp",
             sourceUrl: amap.id ? `https://www.amap.com/place/${encodeURIComponent(amap.id)}` : "https://www.amap.com/",
             verifiedName: amap.name,
           });
-        } catch { /* 高德额度或服务不可用时继续使用精确页面图片 */ }
+          attempts.push("高德 MCP 未找到匹配照片");
+        } catch (error: any) { attempts.push(`高德 MCP：${cleanText(error?.message, "不可用")}`); }
       }
-      try {
-        const parsed = new URL(imageUrl);
-        if (parsed.protocol === "https:" && parsed.hostname.endsWith(".wikimedia.org")) {
-          const title = wikipedia.replace(/^zh:/, "");
-          return json({ found: true, url: imageUrl, source: "Wikimedia 精确页面图片", sourceUrl: title ? `https://zh.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}` : "https://commons.wikimedia.org/" });
-        }
-      } catch { /* no verified image */ }
-      return json({ found: false, reason: "没有与该景点页面精确绑定的 Wikimedia 图片；不做关键词猜图" });
+      return json({ found: false, reason: "高德、中文维基百科与 Unsplash 均未找到可验证图片；不使用无关猜图", attempts });
     }
 
     if (url.pathname === "/api/agent" && request.method === "POST") {

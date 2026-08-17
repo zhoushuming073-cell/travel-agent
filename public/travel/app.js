@@ -428,18 +428,37 @@ function renderSpots() {
 
 async function loadSpotImage(spot, holder) {
   if (!holder || !spot) return;
-  try {
-    const params = new URLSearchParams({ name: spot.name || '', city: state.city || '', wikipedia: spot.wikipedia || '', wikidata: spot.wikidata || '', commons: spot.wikimediaCommons || '', image: spot.image || '' });
-    const imageData = await api(`/api/image?${params}`);
-    if (!imageData.found) return;
-    spot._image = imageData;
-    const image = document.createElement('img'); image.loading = 'lazy'; image.alt = spot.name; image.src = imageData.url; image.onerror = () => image.remove(); holder.appendChild(image);
-    const link = holder.closest('.spot-card')?.querySelector('.source-link');
-    if (link) {
-      link.href = imageData.photographerUrl || imageData.sourceUrl || link.href;
-      link.textContent = imageData.source === 'Unsplash' ? `摄影：${imageData.photographer} · Unsplash` : `${imageData.source || '精确页面图片'}来源`;
-    }
-  } catch { /* image is optional */ }
+  const excluded = new Set();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const params = new URLSearchParams({ name: spot.name || '', city: state.city || '', wikipedia: spot.wikipedia || '', wikidata: spot.wikidata || '', commons: spot.wikimediaCommons || '', image: spot.image || '', exclude: [...excluded].join(',') });
+      const imageData = await api(`/api/image?${params}`);
+      if (!imageData.found || !imageData.url) return;
+      const image = document.createElement('img');
+      image.loading = 'lazy'; image.decoding = 'async'; image.referrerPolicy = 'no-referrer'; image.alt = spot.name;
+      const loaded = await new Promise(resolve => {
+        let settled = false;
+        const finish = value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+        const timer = setTimeout(() => finish(false), 10000);
+        image.onload = () => finish(true);
+        image.onerror = () => finish(false);
+        image.src = imageData.url;
+      });
+      if (!loaded) {
+        if (!imageData.provider || excluded.has(imageData.provider)) return;
+        excluded.add(imageData.provider);
+        continue;
+      }
+      spot._image = imageData;
+      holder.replaceChildren(image);
+      const link = holder.closest('.spot-card')?.querySelector('.source-link');
+      if (link) {
+        link.href = imageData.photographerUrl || imageData.sourceUrl || link.href;
+        link.textContent = imageData.source === 'Unsplash' ? `摄影：${imageData.photographer} · Unsplash` : `${imageData.source || '精确页面图片'}来源`;
+      }
+      return;
+    } catch { return; }
+  }
 }
 
 function openSpotDetails(spot) {
