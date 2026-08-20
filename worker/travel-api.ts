@@ -1447,12 +1447,22 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
         if (preserved.length) buckets[dayIndex] = uniqueSpots(preserved);
       }
     }
-    for (const requiredId of requiredIds) {
-      if (!buckets.flat().some(item => item.id === requiredId)) {
-        const target = buckets.reduce((best, current) => current.length < best.length ? current : best, buckets[0]);
-        target.unshift(byId.get(requiredId));
+    buckets = buckets.map(items => items.filter(item => !requiredIds.includes(item.id)));
+    requiredIds.forEach((requiredId, requiredIndex) => {
+      let targetIndex = requiredIndex % profile.days;
+      if (replanContext && id === replanContext.activeVariant) {
+        const previousIndex = replanContext.days.findIndex((day: any) => (day.spotIds || []).includes(requiredId));
+        if (previousIndex >= 0 && previousIndex < profile.days) targetIndex = previousIndex;
       }
-    }
+      const requiredSpot = byId.get(requiredId);
+      if (requiredSpot) buckets[targetIndex].unshift(requiredSpot);
+    });
+    const targetPerDay = profile.pace === "slow" || variantIndex === 2 ? 2 : 3;
+    buckets = buckets.map(items => {
+      const fixed = items.filter(item => item.requiredByUser);
+      const optional = items.filter(item => !item.requiredByUser);
+      return [...fixed, ...optional.slice(0, Math.max(0, targetPerDay - fixed.length))];
+    });
     const daysPlan = buckets.map((items, index) => scheduleDay(items, profile, index, weather.tripForecast[index]));
     for (const day of daysPlan) {
       day.route = await routeFor(day.items);
@@ -1507,7 +1517,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     Object.assign(plan, analyzePlanTrust(plan, profile));
   }
   const requiredCoverage = alternatives.map(plan => requiredIds.every(id => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => item.id === id)));
-  if (requiredCoverage.some(Boolean) && !requiredCoverage.every(Boolean)) throw new Error("必选景点覆盖校验失败，已拒绝返回不完整路线");
+  if (requiredCoverage.some(covered => !covered)) throw new Error("必选景点覆盖校验失败，已拒绝返回不完整路线");
   const transitLegs = alternatives.flatMap(plan => plan.daysPlan).flatMap((day: any) => day.blocks).filter((block: any) => block.type === "leg");
   const amapVerifiedLegs = transitLegs.filter((block: any) => block.mcpTransport).length;
   const progress = { phase: "route", title: "路线规划与工具校验已完成", items: [
