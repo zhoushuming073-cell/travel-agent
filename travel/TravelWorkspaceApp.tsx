@@ -27,7 +27,9 @@ function dateAfter(days: number): string {
 
 const DEFAULT_FORM: TravelFormState = {
   city: "杭州",
-  startDate: dateAfter(14),
+  // Keep the server and first browser render deterministic. The browser fills a
+  // useful near-future default immediately after hydration.
+  startDate: "",
   days: 3,
   budget: 2000,
   partySize: 2,
@@ -84,6 +86,11 @@ export function TravelWorkspaceApp() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setForm((current) => current.startDate ? current : { ...current, startDate: dateAfter(14) }));
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   const activePlan = useMemo(() => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null, [activePlanId, plans]);
   const stageConfig = WORKSPACE_STAGES[stage];
