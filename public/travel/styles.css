@@ -436,6 +436,7 @@ body { background: #f7fafc; color: #14231f; }
 .sidebar-nav { display: grid; gap: 4px; }
 .sidebar-nav button { min-height: 39px; display: flex; align-items: center; gap: 10px; border: 0; border-radius: 10px; padding: 0 12px; color: #8fa8a0; background: transparent; font-size: 12px; text-align: left; }
 .sidebar-nav button:hover, .sidebar-nav button.active { color: #f2fbf8; background: rgba(255,255,255,.07); }
+.sidebar-nav .nav-link::after { display: none; }
 .sidebar-nav button span { width: 18px; color: #6fae9b; font-size: 15px; text-align: center; }
 .sidebar-label { margin: 22px 10px 9px; color: #58736b; font-size: 8px; font-weight: 850; letter-spacing: 1.35px; text-transform: uppercase; }
 .sidebar-history p { margin: 0 10px; color: #657c75; font-size: 10px; }
