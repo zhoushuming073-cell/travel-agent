@@ -14,6 +14,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "worker/travel-api.ts",
   ]),
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -34,6 +35,11 @@ const eslintConfig = defineConfig([
       react: {
         version: "detect",
       },
+    },
+    rules: {
+      "@next/next/no-img-element": "off",
+      "@next/next/no-css-tags": "off",
+      "@next/next/no-html-link-for-pages": "off",
     },
   },
 ]);

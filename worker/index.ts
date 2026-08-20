@@ -7,6 +7,8 @@ interface Env {
   ASSETS: Fetcher;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
+  AMAP_WEB_KEY?: string;
+  UNSPLASH_ACCESS_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -14,6 +16,10 @@ interface Env {
       };
     };
   };
+}
+
+interface Fetcher {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }
 
 interface ExecutionContext {
@@ -32,7 +38,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/") {
-      return Response.redirect(new URL("/travel/index.html", request.url), 302);
+      return Response.redirect(new URL("/travel/", request.url), 302);
     }
 
     if (url.pathname.startsWith("/api/")) {

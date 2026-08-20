@@ -1,5 +1,10 @@
 // @ts-nocheck
 
+import { assertPlanContract } from "./domain/contract.ts";
+import { buildPlanningEvents } from "./domain/agent.ts";
+import { computeChangeSet } from "./domain/replan.ts";
+import { analyzePlanTrustV2 } from "./domain/trust.ts";
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
@@ -450,7 +455,89 @@ function wikiPageToSpot(page: any, city: any, requiredNames: string[], preferenc
   };
 }
 
-async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [], preferences: string[] = []) {
+function fallbackPoiCategory(value: string) {
+  if (/公园|湖|山|湿地|自然|风景|植物/.test(value)) return "自然景观";
+  if (/博物馆|美术馆|展览|纪念馆/.test(value)) return "博物展馆";
+  if (/寺|庙|塔|古迹|遗址|故居|历史|文化/.test(value)) return "历史文化";
+  return "城市景观";
+}
+
+function amapCandidateRecord(row: any, city: any, requiredNames: string[]) {
+  const name = cleanText(row?.name || row?.title);
+  const poiType = cleanText(row?.type || row?.typeName || row?.category);
+  const location = cleanText(row?.location);
+  const [lng, lat] = location.split(",").map(Number);
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || haversine(city.lat, city.lng, lat, lng) > 80000) return null;
+  if (/生活服务|摄影冲印|购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType) && !/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|寺|庙|塔|湖|山|湿地|街区/.test(name)) return null;
+  if (/照相馆|摄影工作室|眼镜|密室|剧本杀|购物城.*店|商场.*店|公司$|医院$|诊所$/.test(name)) return null;
+  const requiredByUser = requiredNames.some(required => {
+    const wanted = normalizeName(required), actual = normalizeName(name);
+    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
+  });
+  return {
+    id: `amap-${cleanText(row.id, `${lat}-${lng}`)}`, name, lat, lng,
+    category: requiredByUser ? "用户必选" : fallbackPoiCategory(`${name} ${poiType}`), poiType,
+    durationMin: /博物馆|美术馆|纪念馆/.test(name) ? 120 : /公园|湖|山|湿地|风景/.test(name) ? 110 : 90,
+    openingHours: cleanText(row.business?.opentime_today || row.opentime || row.opening_hours),
+    website: cleanText(row.website), staticPoiQuality: "高德 POI 坐标已核验",
+    sourceUrl: row.id ? `https://www.amap.com/place/${encodeURIComponent(row.id)}` : "https://www.amap.com/",
+    fetchedAt: new Date().toISOString(), requiredByUser,
+    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
+    openingStatus: { status: "unknown", label: "开放时间需在出发前通过官方来源复核" },
+    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过高德地图 POI 坐标核验"] : ["中文维基不可用时由高德地图 POI 真实兜底"],
+    transitStops: [], address: cleanText(row.address), image: "",
+  };
+}
+
+function nominatimCandidateRecord(row: any, city: any, requiredNames: string[]) {
+  const name = cleanText(row?.name || row?.display_name?.split(",")?.[0]);
+  const lat = Number(row?.lat), lng = Number(row?.lon);
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || haversine(city.lat, city.lng, lat, lng) > 80000) return null;
+  const requiredByUser = requiredNames.some(required => {
+    const wanted = normalizeName(required), actual = normalizeName(name);
+    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
+  });
+  return {
+    id: `nominatim-${cleanText(row.osm_type)}-${cleanText(row.osm_id, `${lat}-${lng}`)}`, name, lat, lng,
+    category: requiredByUser ? "用户必选" : fallbackPoiCategory(`${name} ${cleanText(row.type)} ${cleanText(row.category)}`),
+    durationMin: /博物馆|美术馆|纪念馆/.test(name) ? 120 : /公园|湖|山|湿地|风景/.test(name) ? 110 : 90,
+    openingHours: cleanText(row.extratags?.opening_hours), website: cleanText(row.extratags?.website),
+    wikipedia: cleanText(row.extratags?.wikipedia), wikidata: cleanText(row.extratags?.wikidata),
+    staticPoiQuality: "OSM/Nominatim 坐标已核验",
+    sourceUrl: row.osm_type && row.osm_id ? `https://www.openstreetmap.org/${row.osm_type}/${row.osm_id}` : "https://nominatim.openstreetmap.org/",
+    fetchedAt: new Date().toISOString(), requiredByUser,
+    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
+    openingStatus: { status: "unknown", label: "开放时间需在出发前通过官方来源复核" },
+    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过 OSM/Nominatim 坐标核验"] : ["中文维基不可用时由 OSM/Nominatim 真实兜底"],
+    transitStops: [], address: cleanText(row.display_name), image: "",
+  };
+}
+
+async function fallbackCandidateSpots(city: any, requiredNames: string[], preferences: string[], env: any = null) {
+  const keywords = [...requiredNames, "旅游景点", "公园", "博物馆", "历史文化", ...preferences.slice(0, 2)].filter(Boolean);
+  const officialKey = cleanText(env?.AMAP_WEB_KEY);
+  const officialCalls = officialKey ? keywords.map(keyword => {
+    const params = new URLSearchParams({ key: officialKey, keywords: `${city.name} ${keyword}`, city: city.name, citylimit: "true", types: "风景名胜|公园广场|科教文化服务", extensions: "all", offset: "20", page: "1" });
+    return fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, `高德官方景点兜底“${keyword}”`);
+  }) : [];
+  const amapCalls = keywords.map(keyword => callMcp(AMAP_MCP, "maps_text_search", {
+    keywords: `${city.name} ${keyword}`, city: city.name, types: "风景名胜|公园广场|科教文化服务",
+  }, { timeoutMs: 10000, cacheMs: 30 * 60 * 1000 }));
+  const nominatimQueries = [...requiredNames, `${city.name} 旅游景点`, `${city.name} 公园`, `${city.name} 博物馆`, `${city.name} 古迹`];
+  const nominatimCalls = nominatimQueries.map(query => {
+    const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", addressdetails: "1", extratags: "1", namedetails: "1", limit: "10", countrycodes: "cn", "accept-language": "zh-CN" });
+    return fetchJson(`${NOMINATIM}/search?${params}`, {}, 16000, `OSM/Nominatim 景点兜底“${query}”`);
+  });
+  const [officialResults, amapResults, nominatimResults] = await Promise.all([
+    Promise.allSettled(officialCalls), Promise.allSettled(amapCalls), Promise.allSettled(nominatimCalls),
+  ]);
+  const officialSpots = officialResults.flatMap(result => result.status === "fulfilled" && String(result.value?.status) === "1" ? amapPoiRows(result.value) : []).map(row => amapCandidateRecord(row, city, requiredNames)).filter(Boolean);
+  const amapSpots = amapResults.flatMap(result => result.status === "fulfilled" ? amapPoiRows(result.value) : []).map(row => amapCandidateRecord(row, city, requiredNames)).filter(Boolean);
+  const nominatimSpots = nominatimResults.flatMap(result => result.status === "fulfilled" && Array.isArray(result.value) ? result.value : []).map(row => nominatimCandidateRecord(row, city, requiredNames)).filter(Boolean);
+  return uniqueSpots([...officialSpots, ...amapSpots, ...nominatimSpots]);
+}
+
+async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [], preferences: string[] = [], env: any = null) {
   const queries = [
     `${city.name} 旅游景点`,
     `${city.name} 公园 博物馆 古迹`,
@@ -472,33 +559,69 @@ async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [
   });
   const settled = await Promise.allSettled([...searchCalls, ...geoCalls]);
   const responses = settled.filter(result => result.status === "fulfilled").map((result: any) => result.value);
-  if (!responses.length) throw new Error("中文维基百科景点检索暂时不可用，请稍后重试");
+  if (!responses.length) {
+    const fallback = await fallbackCandidateSpots(city, requiredNames, preferences, env);
+    if (!fallback.length) throw new Error("中文维基、高德 POI 与 OSM/Nominatim 均未返回可核验景点，已停止规划以避免虚构数据");
+    const neutralFallback = fallback.map(spot => ({ ...spot, requiredByUser: false, category: spot.category === "用户必选" ? fallbackPoiCategory(spotSearchText(spot)) : spot.category }));
+    return rankSpots(neutralFallback, { style: preferences.join(" "), preferences }).slice(0, limit);
+  }
   const pages = responses.flatMap(response => response?.query?.pages || []);
   const spots = uniqueSpots(pages.map(page => wikiPageToSpot(page, city, requiredNames, preferences)).filter(Boolean));
-  return rankSpots(spots, { style: preferences.join(" "), preferences }).slice(0, limit);
+  // Wikipedia is useful for entity context but its search results often cluster around
+  // one famous scenic area. Always merge a broad official-map pool so a multi-day plan
+  // has geographically diverse, currently resolvable POIs instead of repeated sub-sites.
+  const fallback = await fallbackCandidateSpots(city, requiredNames, preferences, env);
+  const neutralCandidates = uniqueSpots([...fallback, ...spots]).map(spot => ({
+    ...spot,
+    requiredByUser: false,
+    category: spot.category === "用户必选" ? fallbackPoiCategory(spotSearchText(spot)) : spot.category,
+  }));
+  return rankSpots(neutralCandidates, { style: preferences.join(" "), preferences }).slice(0, limit);
 }
 
-async function verifyRequired(city: any, names: string[], candidates: any[] = []) {
+async function verifyRequired(city: any, names: string[], candidates: any[] = [], env: any = null) {
   const verified: any[] = [];
   for (const name of names) {
-    const wanted = normalizeName(name);
-    const localMatch = candidates.find(item => {
-      const actual = normalizeName(item.name);
-      return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
-    });
+    const localMatch = candidates
+      .map(item => ({ item, score: poiMatchScore(item.name, [name, `${city.name}${name}`]) }))
+      .filter(entry => entry.score >= 70)
+      .sort((left, right) => right.score - left.score || haversine(city.lat, city.lng, left.item.lat, left.item.lng) - haversine(city.lat, city.lng, right.item.lat, right.item.lng))[0]?.item;
     if (localMatch) {
-      verified.push({ ...localMatch, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次中文维基百科候选景点中核验"] });
+      verified.push({ ...localMatch, name, officialName: localMatch.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次公开地图候选景点中完成实体消歧"] });
       continue;
     }
+    const officialKey = cleanText(env?.AMAP_WEB_KEY);
+    if (officialKey) {
+      try {
+        const amapParams = new URLSearchParams({ key: officialKey, keywords: name, city: city.name, citylimit: "true", extensions: "all", offset: "10", page: "1" });
+        const amapRaw = await fetchJson(`https://restapi.amap.com/v3/place/text?${amapParams}`, {}, 15000, `必选景点“${name}”高德官方核验`);
+        const exact = (amapRaw?.pois || []).map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= 80).sort((a: any, b: any) => b.score - a.score)[0]?.row;
+        const amapSpot = exact ? amapCandidateRecord(exact, city, [name]) : null;
+        if (amapSpot) {
+          verified.push({ ...amapSpot, name, officialName: amapSpot.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已通过高德官方 Web POI 精确核验"] });
+          continue;
+        }
+      } catch { /* 继续使用共享 MCP 与 OSM 兜底 */ }
+    }
+    try {
+      const mcpRows = amapPoiRows(await callMcp(AMAP_MCP, "maps_text_search", { keywords: name, city: city.name, types: "风景名胜" }, { timeoutMs: 10000, cacheMs: 30 * 60 * 1000 }));
+      const exact = mcpRows.map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= 80).sort((a: any, b: any) => b.score - a.score)[0]?.row;
+      const amapSpot = exact ? amapCandidateRecord(exact, city, [name]) : null;
+      if (amapSpot) {
+        verified.push({ ...amapSpot, name, officialName: amapSpot.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已通过高德地图 MCP 精确核验"] });
+        continue;
+      }
+    } catch { /* 继续使用 OSM 兜底 */ }
     const params = new URLSearchParams({ q: `${name}, ${city.name}, 中国`, format: "jsonv2", addressdetails: "1", extratags: "1", namedetails: "1", limit: "5", countrycodes: "cn", "accept-language": "zh-CN" });
-    const rows = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, `必选景点“${name}”地图核验`);
+    let rows: any[] = [];
+    try { rows = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, `必选景点“${name}”地图核验`); } catch { rows = []; }
     const best = (rows || []).find((row: any) => normalizeName(row.name || row.display_name.split(",")[0]).includes(normalizeName(name))) || rows?.[0];
-    if (!best) throw new Error(`必选景点“${name}”未能通过地图数据核验，已停止规划以避免遗漏或臆造`);
+    if (!best) throw new Error(`必选景点“${name}”未能通过高德官方、高德 MCP 或 OSM 地图数据核验，已停止规划以避免遗漏或臆造`);
     const lat = Number(best.lat), lng = Number(best.lon);
     const distance = haversine(city.lat, city.lng, lat, lng);
     if (distance > 80000) throw new Error(`必选景点“${name}”与目的地距离异常，已停止规划等待核验`);
     verified.push({
-      id: `nominatim-${best.osm_type}-${best.osm_id}`, name: cleanText(best.name || name), lat, lng,
+      id: `nominatim-${best.osm_type}-${best.osm_id}`, name, officialName: cleanText(best.name || name), lat, lng,
       category: "用户必选", durationMin: 120, openingHours: "", website: cleanText(best.extratags?.website),
       wikipedia: cleanText(best.extratags?.wikipedia), wikidata: cleanText(best.extratags?.wikidata),
       staticPoiQuality: "已核验", sourceUrl: `https://www.openstreetmap.org/${best.osm_type}/${best.osm_id}`,
@@ -1271,7 +1394,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
     if (url.pathname === "/api/spots") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
-      const spots = await wikipediaSpots(city, clamp(url.searchParams.get("limit"), 1, 50));
+      const spots = await wikipediaSpots(city, clamp(url.searchParams.get("limit"), 1, 50), [], [], env);
       return json({ city: city.name, spots, count: spots.length, source: "中文维基百科公开页面与坐标", fetchedAt: new Date().toISOString() });
     }
 
@@ -1349,6 +1472,15 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         days: replanInput.days.slice(0, 7).map((day: any, index: number) => ({
           day: Number(day?.day || index + 1),
           spotIds: Array.isArray(day?.spotIds) ? day.spotIds.map((value: any) => cleanText(value)).filter(Boolean).slice(0, 5) : [],
+          items: Array.isArray(day?.items) ? day.items.slice(0, 5).map((item: any) => ({
+            id: cleanText(item?.id), name: cleanText(item?.name),
+            lat: Number.isFinite(Number(item?.lat)) ? Number(item.lat) : undefined,
+            lng: Number.isFinite(Number(item?.lng)) ? Number(item.lng) : undefined,
+            category: cleanText(item?.category), startTime: cleanText(item?.startTime), endTime: cleanText(item?.endTime),
+            durationMin: clamp(item?.durationMin, 20, 360), openingHours: cleanText(item?.openingHours) || null,
+            sourceName: cleanText(item?.sourceName), sourceUrl: cleanText(item?.sourceUrl) || null,
+            fetchedAt: cleanText(item?.fetchedAt), requiredByUser: Boolean(item?.requiredByUser),
+          })).filter((item: any) => item.id && item.name) : [],
         })),
       } : null;
       const envelope = { version: 2, createdAt: Date.now(), profile, city, replanContext };
@@ -1399,10 +1531,30 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 
 async function buildPlan(profile: any, city: any, env: any, replanContext: any = null) {
   const [weather, rawSpots, hotel] = await Promise.all([
-    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences), hotelFor(profile, city, env),
+    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences, env), hotelFor(profile, city, env),
   ]);
-  const required = await verifyRequired(city, profile.requiredAttractions, rawSpots);
-  const spots = rankSpots(uniqueSpots([...required, ...rawSpots]), profile);
+  const required = await verifyRequired(city, profile.requiredAttractions, rawSpots, env);
+  const requiredNames = profile.requiredAttractions.map((name: string) => normalizeName(name));
+  // A large scenic area often exposes gates, halls and branch POIs whose names contain
+  // the required attraction. Treating all of them as separate required stops caused
+  // duplicate itineraries (for example several different “灵隐寺” POIs on one day).
+  // Keep the single verified canonical entity and leave unrelated real POIs as options.
+  const relatedToName = (spot: any, wanted: string) => {
+    const actual = normalizeName(spot.name);
+    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
+  };
+  const relatedToRequired = (spot: any) => requiredNames.some((wanted: string) => relatedToName(spot, wanted));
+  const unrelatedSpots = rawSpots.filter(spot => !relatedToRequired(spot));
+  const nearbySubSpots = required.flatMap(requiredSpot => rawSpots
+    .filter(spot => spot.id !== requiredSpot.id && relatedToName(spot, normalizeName(requiredSpot.name)))
+    .map(spot => ({ spot, distance: haversine(requiredSpot.lat, requiredSpot.lng, spot.lat, spot.lng) }))
+    .filter(entry => entry.distance <= 6000)
+    .sort((left, right) => left.distance - right.distance)
+    .slice(0, 2)
+    .map(entry => entry.spot));
+  const optionalSpots = uniqueSpots([...unrelatedSpots, ...nearbySubSpots])
+    .map(spot => ({ ...spot, requiredByUser: false, category: spot.category === "用户必选" ? fallbackPoiCategory(spotSearchText(spot)) : spot.category }));
+  const spots = rankSpots(uniqueSpots([...required, ...optionalSpots]), profile);
   if (spots.length < Math.max(4, profile.days * 2)) throw new Error(`仅核验到 ${spots.length} 个可用景点，不足以生成可靠的 ${profile.days} 天行程`);
 
   const toolContext = {
@@ -1417,6 +1569,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     } : null,
     rules: [
       "每套方案必须包含全部 requiredByUser 景点",
+      "同一大型景区只安排主实体一次，不要把入口、殿堂、支线 POI 当成多个独立景点重复堆叠",
       "不得声称未知的实时客流、预约、房价、开放状态",
       "每天保留午餐和休息时间",
       "只可引用 spots 列表中的 id",
@@ -1447,7 +1600,9 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       for (let dayIndex = 0; dayIndex < profile.days; dayIndex += 1) {
         if (affectedDayIndexes.includes(dayIndex)) continue;
         const previous = replanContext.days.find((day: any) => Number(day.day) === dayIndex + 1);
-        const preserved = (previous?.spotIds || []).map((spotId: string) => byId.get(spotId)).filter(Boolean);
+        const preserved = Array.isArray(previous?.items) && previous.items.length
+          ? previous.items.map((item: any) => byId.get(item.id) || item).filter((item: any) => item.id && item.name && Number.isFinite(item.lat) && Number.isFinite(item.lng))
+          : (previous?.spotIds || []).map((spotId: string) => byId.get(spotId)).filter(Boolean);
         if (preserved.length) buckets[dayIndex] = uniqueSpots(preserved);
       }
     }
@@ -1462,6 +1617,21 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       if (requiredSpot) buckets[targetIndex].unshift(requiredSpot);
     });
     const targetPerDay = ["slow", "relax", "轻松"].includes(profile.pace) || variantIndex === 2 ? 2 : 3;
+    const usedIds = new Set(buckets.flat().map(item => item.id));
+    buckets = buckets.map(items => {
+      const filled = [...items];
+      while (filled.length < targetPerDay) {
+        const anchor = filled.at(-1);
+        const next = spots
+          .filter(candidate => !usedIds.has(candidate.id) && !candidate.requiredByUser)
+          .map(candidate => ({ candidate, distance: anchor ? haversine(anchor.lat, anchor.lng, candidate.lat, candidate.lng) : 0 }))
+          .sort((left, right) => left.distance - right.distance || Number(right.candidate.plannerScore || 0) - Number(left.candidate.plannerScore || 0))[0]?.candidate;
+        if (!next) break;
+        filled.push(next);
+        usedIds.add(next.id);
+      }
+      return filled;
+    });
     buckets = buckets.map(items => {
       const fixed = items.filter(item => item.requiredByUser);
       const optional = items.filter(item => !item.requiredByUser);
@@ -1518,7 +1688,24 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       crowd: "未接入官方可验证来源，全部保持未知",
       reservations: "未接入景区官方预约接口",
     };
-    Object.assign(plan, analyzePlanTrust(plan, profile));
+    Object.assign(plan, analyzePlanTrustV2(plan, profile));
+    plan.changeSet = null;
+    if (replanContext && plan.id === replanContext.activeVariant) {
+      const previousDaysPlan = replanContext.days.map((previousDay: any) => {
+        const currentDay = plan.daysPlan.find((day: any) => Number(day.day) === Number(previousDay.day));
+        const previousItems = Array.isArray(previousDay.items) && previousDay.items.length
+          ? previousDay.items
+          : (previousDay.spotIds || []).map((spotId: string) => byId.get(spotId)).filter(Boolean);
+        return {
+          day: Number(previousDay.day),
+          date: currentDay?.date || plan.startDate,
+          items: previousItems.map((spot: any) => ({ ...spot })),
+          blocks: [],
+        };
+      });
+      const previousPlan = { ...plan, daysPlan: previousDaysPlan, changeSet: null };
+      plan.changeSet = computeChangeSet(previousPlan, plan, affectedDayIndexes.map((index: number) => index + 1));
+    }
   }
   const requiredCoverage = alternatives.map(plan => requiredIds.every(id => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => item.id === id)));
   if (requiredCoverage.some(covered => !covered)) throw new Error("必选景点覆盖校验失败，已拒绝返回不完整路线");
@@ -1546,5 +1733,23 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     verificationCount: plan.minimumVerification?.length,
     stressResilientCount: plan.stressTest?.resilientCount,
   }));
-  return { request: profile, alternatives, alternativeComparison, activeId: replanContext?.activeVariant || "relax", generatedAt: new Date().toISOString(), planner: { type: "two-stage-deepseek-with-mcp-tools", stages: ["DeepSeek 需求结构化", "天气 / 酒店 / 高德 MCP 与公开数据核验", "DeepSeek 景点排序", "路线工具补全", "硬约束、证据、脆弱性与压力测试"] }, progress };
+  const activeId = replanContext?.activeVariant || "relax";
+  const generatedAt = new Date().toISOString();
+  const activePlan = alternatives.find(plan => plan.id === activeId) || alternatives[0];
+  const workspaceId = `travel-${cleanText(city.name).replace(/\s+/g, "-")}-${profile.startDate}`;
+  const result = {
+    request: profile,
+    alternatives,
+    alternativeComparison,
+    activeId,
+    generatedAt,
+    agentEvents: buildPlanningEvents(workspaceId, profile, activePlan),
+    planner: {
+      type: "two-stage-deepseek-with-mcp-tools",
+      stages: ["DeepSeek 需求结构化", "天气 / 酒店 / 高德 MCP 与公开数据核验", "DeepSeek 景点排序", "路线工具补全", "证据图、Travel Compiler、未知项、脆弱性与节点级情景模拟"],
+    },
+    progress,
+  };
+  assertPlanContract(result);
+  return result;
 }
