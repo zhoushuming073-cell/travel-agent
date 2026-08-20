@@ -373,6 +373,19 @@ function syncControls() {
   $('#hotelPreference').value = state.hotelPreference;
   $$('#preferenceChips .chip').forEach(button => button.classList.toggle('active', state.preferences.includes(button.dataset.value)));
   $$('#paceGroup button').forEach(button => button.classList.toggle('active', button.dataset.value === state.pace));
+  renderQuickParameters();
+}
+
+function renderQuickParameters() {
+  if (!$('#quickBudgetValue')) return;
+  $('#quickBudgetValue').textContent = state.budget ? `¥${state.budget}` : '不限';
+  $('#quickDateValue').textContent = state.startDate || '未设置';
+  $('#quickDaysValue').textContent = `${state.days}天`;
+  $('#quickPartyValue').textContent = state.partySize ? `${state.partySize}人` : '未设置';
+  $('#quickCityValue').textContent = state.city || '未设置';
+  $('#quickPreferenceValue').textContent = state.preferences.length ? state.preferences.join('/') : state.style;
+  $('#quickPaceValue').textContent = paceText(state.pace);
+  $('#quickTransportValue').textContent = state.transport.replace('优先', '').slice(0, 6);
 }
 
 function bind() {
@@ -406,6 +419,11 @@ function bind() {
     $('#requestText').value = button.dataset.prompt || '';
     $('#requestText').focus();
   }));
+  $$('[data-quick-setting]').forEach(button => button.addEventListener('click', () => {
+    openSettingsDrawer();
+    const target = ({ budget: '#budgetSelect', date: '#startDate', days: '#minusDay', city: '#citySelect', preference: '#preferenceChips', pace: '#paceGroup', transport: '#transportSelect' })[button.dataset.quickSetting];
+    if (target) setTimeout(() => $(target)?.focus(), 320);
+  }));
   $$('[data-workspace-tab]').forEach(button => button.addEventListener('click', () => switchWorkspaceTab(button.dataset.workspaceTab)));
   $('#citySelect').addEventListener('input', event => {
     clearTimeout(citySearchTimer);
@@ -438,6 +456,10 @@ function bind() {
   $('#newTripButton').addEventListener('click', () => { $('.travel-sidebar').classList.remove('mobile-open'); $('#resetButton').click(); });
   $('#generateButton').addEventListener('click', () => generatePlan());
   $('#dataStageSourcesButton').addEventListener('click', openSourceDialog);
+  $('#dataStageContinueButton').addEventListener('click', () => {
+    if (!state.pendingReadyResult) return;
+    presentValidationResult(state.pendingReadyResult, true);
+  });
   $('#openFinalWorkspace').addEventListener('click', () => {
     if (!state.pendingReadyResult) return;
     const result = state.pendingReadyResult;
@@ -458,7 +480,13 @@ function bind() {
     event.currentTarget.textContent = active ? '★ 已收藏' : '☆ 收藏';
     toast(active ? '已保存在当前浏览器' : '已取消收藏');
   });
-  $$('#variantTabs button').forEach(button => button.addEventListener('click', () => selectVariant(button.dataset.variant)));
+  $$('#variantTabs button[data-variant]').forEach(button => button.addEventListener('click', () => selectVariant(button.dataset.variant)));
+  $('#compareVariantsButton').addEventListener('click', () => {
+    const matrix = $('#alternativeMatrix');
+    const expanded = matrix.classList.toggle('expanded');
+    matrix.hidden = !expanded;
+    $('#compareVariantsButton').textContent = expanded ? '收起对比' : '方案对比';
+  });
   $('#zoomIn').addEventListener('click', () => mapView.zoomBy(1));
   $('#zoomOut').addEventListener('click', () => mapView.zoomBy(-1));
   $('#refreshSpots').addEventListener('click', () => loadSpots(true));
@@ -580,6 +608,15 @@ function renderWeather(weather) {
   tips.push('未接入官方客流来源，客流保持未知，不由 AI 补写。');
   tips.push('开放时间缺失时显示未知，不进行猜测。');
   $('#tipsList').innerHTML = tips.map(item => `<li>${esc(item)}</li>`).join('');
+  renderReadyWeatherSummary(weather);
+}
+
+function renderReadyWeatherSummary(weather = {}) {
+  const root = $('#readyWeatherSummary');
+  if (!root) return;
+  const forecasts = (weather.tripForecast || []).slice(0, 4);
+  const source = weather.source || '天气来源未知';
+  root.innerHTML = `<div class="ready-companion-title"><strong>行程天气</strong><span>${esc(source)}</span></div><div class="ready-weather-days">${forecasts.length ? forecasts.map(day => `<div><i>${weatherIconSvg(day.quality === 'forecast' ? day.weatherCode : null)}</i><span>${esc((day.date || '').slice(5) || '未定')}</span><b>${day.quality === 'forecast' ? `${Math.round(day.temperatureMin)}°–${Math.round(day.temperatureMax)}°` : '未覆盖'}</b></div>`).join('') : '<p>本次没有取得出行日期天气。</p>'}</div>`;
 }
 
 async function loadSpots(force = false) {
@@ -754,11 +791,17 @@ function renderProfileSummary(data) {
     ['规划约束', [`预算：${data.budget ? `¥${data.budget}` : `¥${state.budget}`}`, `交通：${data.transport || state.transport}`, '缺失事实：保持未知']],
   ];
   $('#profileDetailGrid').innerHTML = groups.map(([title, rows]) => `<article><span>${esc(title)}</span>${rows.map(row => `<p>${esc(row)}</p>`).join('')}</article>`).join('');
+  $('#profileCompletion').innerHTML = '<span>✓</span><div><strong>用户画像建立完成</strong><small>硬约束已经锁定，正在连接真实资料工具</small></div><b>下一步：资料搜集 →</b>';
 }
 
 function renderLiveEvidenceStage(entry) {
   const items = entry?.items || [];
   const isRoute = entry?.phase === 'route';
+  $('#dataStageHeadline').textContent = isRoute ? '正在计算景点之间的真实路线' : '正在联网搜集本次旅行资料';
+  $('#dataStageSubline').textContent = '每个来源只显示真实连接状态；没有取得的开放、客流与价格信息会保持未知。';
+  $('#dataStageContinueButton').hidden = true;
+  $('#liveCandidateStrip').classList.remove('completed');
+  $('#dataMiniRouteMap').innerHTML = '<span>路线数据返回后显示景点分布</span>';
   $('#liveDiscoveryState').textContent = isRoute ? '候选已返回，正在计算顺路程度' : '正在等待本次地图候选';
   $('#liveCandidateStrip').innerHTML = items.length
     ? items.slice(0, 6).map(item => `<div class="live-candidate-row"><span>${item.startsWith('✓') ? '✓' : item.startsWith('○') ? '○' : '…'}</span><b>${esc(item.replace(/^[✓●○…]\s*/, ''))}</b></div>`).join('')
@@ -775,6 +818,67 @@ function renderLiveEvidenceStage(entry) {
     ? '相关工具已返回状态，具体值将在候选方案校验页按来源标注。'
     : '尚未取得可核验的客流或预约结果；此处不显示固定曲线。';
   renderEvidenceSourceGrid([{ name: '景点与地图', provider: '本次任务', status: entry?.phase === 'live' || isRoute ? 'live' : 'unknown' }, { name: '天气预报', provider: '本次任务', status: entry?.phase === 'live' || isRoute ? 'live' : 'unknown' }, { name: '酒店与交通', provider: '本次任务', status: isRoute ? 'live' : 'unknown' }]);
+}
+
+function sourceStatusFromLabel(label = '') {
+  const value = String(label);
+  if (!value || /未知|未返回|不可用|未配置|超时|fallback/i.test(value)) return 'unknown';
+  return 'live';
+}
+
+function completedSourceRows(plan) {
+  const labels = [
+    ['景点与地图', plan.dataSources?.spots],
+    ['路线与道路', plan.dataSources?.routing],
+    ['公共交通', plan.dataSources?.transit],
+    ['天气预报', plan.dataSources?.weather],
+    ['酒店查询', plan.dataSources?.hotels],
+    ['客流与开放', plan.dataSources?.crowd],
+  ];
+  return labels.map(([name, provider]) => ({ name, provider: provider || '本次未取得来源', status: sourceStatusFromLabel(provider) }));
+}
+
+function renderCompletedEvidenceRisk(plan) {
+  const facts = (plan.travelFacts || []).filter(fact => fact.field === '拥挤风险');
+  const known = facts.filter(fact => ['predicted', 'verified'].includes(fact.status) && Number.isFinite(Number(fact.value?.score))).slice(0, 4);
+  const chart = $('#liveRiskChart');
+  chart.classList.toggle('empty', !known.length);
+  chart.innerHTML = known.length
+    ? known.map(fact => `<i style="height:${Math.max(6, Math.min(94, Number(fact.value.score)))}%"><b>${Math.round(Number(fact.value.score))}</b></i>`).join('')
+    : '<i></i><i></i><i></i><i></i><span>没有来源时保持未知</span>';
+  $('#liveRiskCopy').textContent = known.length
+    ? `${known.length} 个候选节点取得可追溯的拥挤预测；预测不等于实时人数。`
+    : '本次没有取得可追溯的拥挤数值，因此不显示固定曲线。';
+}
+
+function renderCompletedEvidenceStage(result) {
+  const plan = state.plans[state.variant] || result.alternatives[0];
+  const spots = [...new Map((plan.daysPlan || []).flatMap(day => day.items || []).map(spot => [spot.id, spot])).values()];
+  const facts = plan.travelFacts || [];
+  const knownFacts = facts.filter(fact => fact.status !== 'unknown').length;
+  $('#dataStageHeadline').textContent = '资料搜集完成，候选路线已经形成';
+  $('#dataStageSubline').textContent = `取得 ${spots.length} 个入选景点、${facts.length} 条旅行事实，其中 ${knownFacts} 条有来源或估算状态。`;
+  $('#dataStageContinueButton').hidden = false;
+  renderEvidenceSourceGrid(completedSourceRows(plan));
+  $('#liveDiscoveryState').textContent = `${spots.length} 个点位进入当前候选方案`;
+  $('#liveCandidateStrip').classList.add('completed');
+  $('#liveCandidateStrip').innerHTML = spots.slice(0, 5).map((spot, index) => `<article class="completed-spot-card"><div class="completed-spot-thumb" data-completed-spot="${esc(spot.id)}"><span>${index + 1}</span></div><div><b title="${esc(spot.name)}">${esc(spot.name)}</b><small>${esc(spot.requiredByUser ? '用户必选' : spot.category || '已核验点位')}</small></div></article>`).join('') || '<div class="stage-empty">本次没有形成可展示的景点候选。</div>';
+  $$('[data-completed-spot]').forEach(holder => loadSpotImage(state.spotIndex.get(holder.dataset.completedSpot), holder));
+  renderCompletedEvidenceRisk(plan);
+  const routeNodes = spots.slice(0, 4);
+  $('#dataMiniRouteMap').innerHTML = routeNodes.length
+    ? `<div class="data-mini-nodes" aria-label="候选景点路线示意；最终地图使用真实坐标">${routeNodes.map((spot, index) => `<i class="data-mini-node" title="${esc(spot.name)}">${index + 1}</i>`).join('')}</div><span>${plan.days} 天路线分区草图</span>`
+    : '<span>尚无可展示点位</span>';
+  $('#liveRouteDraft').innerHTML = (plan.daysPlan || []).map(day => `<span class="data-route-day"><b>Day ${day.day}</b>${day.items.map(item => esc(item.name)).join(' → ') || '未生成景点'}<small>${formatDistance(day.route?.distance || 0)} · ${formatDuration(day.route?.duration || 0)}</small></span>`).join('');
+  $('#liveCompilerState').innerHTML = `<b>${esc(plan.compiler?.status || '已完成初检')}</b><span>硬约束满足 ${plan.evaluation?.constraintSatisfaction ?? '—'}% · 路线可靠性 ${plan.compiler?.reliability ?? '—'} · 关键未知 ${plan.uncertainty?.importantCount ?? '—'} 项</span>`;
+}
+
+function presentCompletedEvidenceResult(result, scroll = true) {
+  preparePlanResult(result);
+  state.pendingReadyResult = result;
+  setWorkspaceStage('FETCHING_DATA');
+  renderCompletedEvidenceStage(result);
+  if (scroll) $('#activeStage').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function renderPlanningProgress(entry) {
@@ -801,6 +905,7 @@ function startPlanningProgress() {
   $('#profileSummary').innerHTML = '<div class="data-empty">DeepSeek 正在把原始文案整理为目的地、日期、人数、偏好与硬约束。</div>';
   ['profileNodeCity', 'profileNodeDuration', 'profileNodeParty', 'profileNodePreference', 'profileNodePace', 'profileNodeRequired'].forEach(id => { $(`#${id}`).textContent = '识别中'; });
   $('#profileDetailGrid').innerHTML = '<div class="stage-empty">DeepSeek 正在把原始文字整理为结构化画像，尚未返回的字段保持“识别中”。</div>';
+  $('#profileCompletion').innerHTML = '<span>…</span><div><strong>正在建立用户画像</strong><small>画像完成后将自动进入资料搜集</small></div><b>等待 DeepSeek</b>';
   setWorkspaceStage('BUILDING_PROFILE');
   renderPlanningProgress({ phase: 'analysis', title: '正在分析您的需求……', items: ['… DeepSeek 第 1 阶段正在整理目的地、日期、人数、必选景点和限制条件'] });
 }
@@ -873,7 +978,7 @@ async function generatePlan(scroll = true, options = {}) {
       renderChangePreview(previousPlan, after, options.previewAdjustment);
       setWorkspaceStage('READY');
       $('#changePreviewDialog').showModal();
-    } else presentValidationResult(result, scroll);
+    } else presentCompletedEvidenceResult(result, scroll);
   } catch (error) {
     stopPlanningProgress();
     if (isPreview && previousPlan) setWorkspaceStage('READY'); else setWorkspaceStage('ERROR');
@@ -982,6 +1087,7 @@ function renderPlan(plan) {
   $('#planMeta').textContent = `${plan.startDate} 出发 · ${plan.days} 天 · ${plan.generatedAt.slice(0, 19).replace('T', ' ')} 更新`;
   $('#daysContainer').innerHTML = plan.daysPlan.map(day => renderDay(day)).join('');
   bindRenderedPlanInteractions();
+  loadTimelineImages(plan);
   const source = plan.dataSources;
   $('#sourceCaption').textContent = `天气：${source.weather}；景点：${source.spots}；酒店：${source.hotels || '未知'}；路线：${source.routing}；交通：${source.transit}；客流：${source.crowd}`;
   renderBudget(plan.budgetBreakdown);
@@ -1005,14 +1111,18 @@ function renderAlternativeMatrix(rows) {
   }));
   if (!data.length) { root.hidden = true; return; }
   root.innerHTML = data.map(item => `<article class="alternative-card${item.id === state.variant ? ' active' : ''}"><strong>${esc(item.id === 'relax' ? '舒适版' : item.id === 'hot' ? '精华版' : '错峰版')} · ${esc(item.title)}</strong><small>${esc(item.strategy || '同一组真实候选数据下的差异化排序')}</small><div class="alternative-metrics"><span>可靠性 <b>${item.reliability ?? '—'}</b></span><span>脆弱性 <b>${item.fragility ?? '—'}</b></span><span>交通 <b>${item.transportMinutes ?? '—'} 分</b></span><span>最小缓冲 <b>${item.minBufferMinutes ?? '—'} 分</b></span></div></article>`).join('');
-  root.hidden = false;
+  root.hidden = !root.classList.contains('expanded');
 }
 
 function renderTripHealth(plan) {
   const compiler = plan.compiler || {};
-  const fragility = plan.fragility || {};
-  const unknown = plan.uncertainty || {};
-  $('#tripHealth').innerHTML = `<article class="health-summary"><span>TRAVEL COMPILER 2.0</span><strong>${esc(compiler.status || '等待验证')}</strong><small>${esc(compiler.note || '基于工具事实与约束计算')}</small></article><article class="health-metric${Number(compiler.reliability || 0) < 60 ? ' danger' : ''}"><span>路线可靠性</span><strong>${compiler.reliability ?? '—'}</strong><small>非模型自评分</small></article><article class="health-metric${Number(fragility.score || 0) >= 70 ? ' danger' : Number(fragility.score || 0) >= 42 ? ' warning' : ''}"><span>脆弱性</span><strong>${fragility.score ?? '—'}</strong><small>越高越脆弱</small></article><article class="health-metric${Number(unknown.importantCount || 0) ? ' warning' : ''}"><span>关键未知</span><strong>${unknown.importantCount ?? '—'}</strong><small>优先核验</small></article><article class="health-metric"><span>最小缓冲</span><strong>${compiler.minBufferMinutes ?? '—'}<small>分钟</small></strong><small>显式弹性时间</small></article>`;
+  const facts = plan.travelFacts || [];
+  const crowdFacts = facts.filter(fact => fact.field === '拥挤风险');
+  const crowdKnown = crowdFacts.filter(fact => fact.status !== 'unknown').length;
+  const distance = (plan.daysPlan || []).reduce((sum, day) => sum + Number(day.route?.distance || 0), 0);
+  const knownBudget = plan.budgetBreakdown?.knownEstimate;
+  const satisfaction = plan.evaluation?.constraintSatisfaction;
+  $('#tripHealth').innerHTML = `<article class="health-metric"><span>需求匹配</span><strong>${satisfaction ?? '—'}${satisfaction == null ? '' : '%'}</strong><small>硬约束覆盖</small></article><article class="health-metric"><span>已知花费</span><strong>${knownBudget == null ? '—' : `¥${knownBudget}`}</strong><small>未取到的价格不计入</small></article><article class="health-metric"><span>道路里程</span><strong>${distance ? formatDistance(distance) : '—'}</strong><small>真实路线累计</small></article><article class="health-metric${crowdFacts.length && !crowdKnown ? ' warning' : ''}"><span>客流风险</span><strong>${crowdKnown ? `${crowdKnown}点` : '未知'}</strong><small>不冒充实时人数</small></article><article class="health-metric"><span>行程节奏</span><strong>${esc(paceText(state.pace))}</strong><small>${compiler.minBufferMinutes ?? '—'} 分钟最小缓冲</small></article><article class="health-metric${Number(compiler.reliability || 0) < 60 ? ' danger' : ''}"><span>路线可靠性</span><strong>${compiler.reliability ?? '—'}</strong><small>Travel Compiler</small></article>`;
 }
 
 function renderPlanInsights(plan) {
@@ -1061,6 +1171,7 @@ function renderDecisionEvidence(plan) {
     crowdChart = `<div class="crowd-chart-wrap"><svg class="crowd-risk-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="可追溯拥挤风险分数曲线"><path class="risk-grid" d="M${pad} ${height - pad}H${width - pad}M${pad} ${height / 2}H${width - pad}"/><polyline points="${points.map(point => `${point.x},${point.y}`).join(' ')}"/><g>${points.map(point => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${esc(point.label)}：${point.score}</title></circle>`).join('')}</g></svg><div class="risk-plot-labels">${points.map(point => `<span title="${esc(point.label)}">${esc(point.label)}</span>`).join('')}</div></div>`;
   }
   $('#crowdRiskPanel').innerHTML = `<div class="crowd-summary"><strong>拥挤风险，不冒充实时客流</strong><span>${knownCrowdFacts.length ? `${knownCrowdFacts.length} 个节点有可追溯预测，其余保持未知。预测不等于实时人数。` : '本次没有取得可验证的实时客流或可靠预测输入，因此全部显示未知；系统不会用固定数字填充。'}</span></div>${crowdChart}${crowdFacts.map(fact => `<div class="crowd-fact"><div><b>${esc(fact.subject)}</b><br>${esc(fact.uncertaintyReason || fact.sourceName)}</div><span class="fact-state ${esc(fact.status)}">${factStatusLabel(fact.status)}</span></div>`).join('')}`;
+  $('#readyCrowdSummary').innerHTML = `<div class="ready-companion-title"><strong>客流风险趋势</strong><span>${knownCrowdFacts.length ? `${knownCrowdFacts.length} 个可追溯节点` : '本次保持未知'}</span></div>${crowdChart}<p>预测不等于实时人数，出发前请按来源复核。</p>`;
   const sorted = [...facts].sort((a, b) => ({ high: 3, medium: 2, low: 1 }[b.importance] || 0) - ({ high: 3, medium: 2, low: 1 }[a.importance] || 0));
   const verification = plan.minimumVerification || [];
   const stress = plan.stressTest?.scenarios || [];
@@ -1081,6 +1192,7 @@ async function loadDiningForPlan(plan) {
   if (state.plan === plan) {
     $('#daysContainer').innerHTML = plan.daysPlan.map(day => renderDay(day)).join('');
     bindRenderedPlanInteractions();
+    loadTimelineImages(plan);
   }
 }
 
@@ -1133,6 +1245,13 @@ function bindRenderedPlanInteractions() {
   }));
 }
 
+function loadTimelineImages(plan) {
+  $$('[data-timeline-thumb]', $('#daysContainer')).forEach(holder => {
+    const spot = state.spotIndex.get(holder.dataset.timelineThumb) || (plan.daysPlan || []).flatMap(day => day.items || []).find(item => item.id === holder.dataset.timelineThumb);
+    loadSpotImage(spot, holder);
+  });
+}
+
 function renderTimelineBlock(block) {
   if (block.type === 'leg') {
     const mcp = block.mcpTransport;
@@ -1151,7 +1270,7 @@ function renderTimelineBlock(block) {
   const stops = spot.transitStops || [];
   const openingClass = spot.openingStatus?.status === 'open' ? 'open' : spot.openingStatus?.status === 'closed' ? 'closed' : '';
   const crowdText = spot.crowd?.score == null ? '客流未知' : `客流预测 ${esc(spot.crowd.label)} ${spot.crowd.score}`;
-  return `<div class="timeline-row attraction"><div class="timeline-time">${esc(spot.startTime)}<br><small>${esc(spot.endTime)}</small></div><div class="timeline-node"></div><div class="timeline-content"><div class="item-head"><button class="detail-trigger" data-id="${esc(spot.id)}" type="button">${esc(spot.name)}</button><span class="source-link">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-meta"><span>游玩 ${spot.durationMin} 分钟</span><span>${esc(seasonalText(spot))}</span><span class="estimated">${crowdText}</span><span class="${openingClass}">${esc(spot.openingStatus?.label || '开放未知')}</span></div><div class="reason-row">${(spot.recommendationReasons || []).map(reason => `<span>${esc(reason)}</span>`).join('')}</div><div class="transit-reference">${stops.length ? `附近站点参考：${stops.slice(0, 2).map(stop => `${esc(stop.name)} ${stop.distanceM}m`).join(' / ')}` : '附近 850m 内未获取到已标注站点'}</div></div></div>`;
+  return `<div class="timeline-row attraction"><div class="timeline-time">${esc(spot.startTime)}<br><small>${esc(spot.endTime)}</small></div><div class="timeline-node"></div><div class="timeline-content"><div class="timeline-attraction-grid"><div class="timeline-thumb" data-timeline-thumb="${esc(spot.id)}"><span>⌖</span></div><div class="timeline-attraction-copy"><div class="item-head"><button class="detail-trigger" data-id="${esc(spot.id)}" type="button">${esc(spot.name)}</button><span class="source-link">${esc(spot.requiredByUser ? '用户必选' : spot.category)}</span></div><div class="spot-meta"><span>游玩 ${spot.durationMin} 分钟</span><span>${esc(seasonalText(spot))}</span><span class="estimated">${crowdText}</span><span class="${openingClass}">${esc(spot.openingStatus?.label || '开放未知')}</span></div><div class="reason-row">${(spot.recommendationReasons || []).map(reason => `<span>${esc(reason)}</span>`).join('')}</div><div class="transit-reference">${stops.length ? `附近站点参考：${stops.slice(0, 2).map(stop => `${esc(stop.name)} ${stop.distanceM}m`).join(' / ')}` : '附近 850m 内未获取到已标注站点'}</div></div></div></div></div>`;
 }
 
 function renderHotel(hotel) {

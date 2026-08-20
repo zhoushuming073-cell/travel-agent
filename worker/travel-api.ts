@@ -1440,7 +1440,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     const id = variantIndex === 0 ? "hot" : variantIndex === 1 ? "niche" : "relax";
     let buckets: any[][] = [];
     if (Array.isArray(advised?.daySpotIds) && advised.daySpotIds.length === profile.days) {
-      buckets = advised.daySpotIds.map((ids: any[]) => uniqueSpots((ids || []).map(id => byId.get(cleanText(id))).filter(Boolean)).slice(0, profile.pace === "slow" ? 2 : 3));
+      buckets = advised.daySpotIds.map((ids: any[]) => uniqueSpots((ids || []).map(id => byId.get(cleanText(id))).filter(Boolean)).slice(0, ["slow", "relax", "轻松"].includes(profile.pace) ? 2 : 3));
     }
     if (buckets.length !== profile.days || buckets.some(items => !items.length)) buckets = distribute(spots, profile, variantIndex);
     if (replanContext && id === replanContext.activeVariant && affectedDayIndexes.length) {
