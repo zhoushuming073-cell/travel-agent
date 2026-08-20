@@ -6,32 +6,24 @@
   <meta name="color-scheme" content="light" />
   <meta name="description" content="基于 DeepSeek 与真实地图、天气、路线及住宿工具的中国可信智能旅游助手。" />
   <title>智能旅游助手 · Travel Agent Workspace</title>
-  <link rel="stylesheet" href="styles.css?v=14" />
+  <link rel="stylesheet" href="styles.css?v=17" />
 </head>
 <body data-stage="EMPTY">
   <div class="app-shell v2-shell">
     <aside class="travel-sidebar" aria-label="旅行工作区导航">
       <a class="brand sidebar-brand" href="#planner" aria-label="智能旅游助手首页">
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M8.7 26.8 40 9.2 32 40l-8.6-10-11 8.1 3.1-14.2-6.8 2.9Z"/><path class="brand-path" d="m20 22.5 9.2 7.4"/></svg></span>
-        <span><b>智能旅游助手</b><small>TRAVEL AGENT WORKSPACE</small></span>
+        <span><b>智能旅游助手</b><small>AI TRAVEL ASSISTANT</small></span>
       </a>
+      <button class="sidebar-collapse" id="sidebarCollapseButton" type="button" aria-label="收起侧边栏">‹</button>
       <button class="sidebar-new-trip" id="newTripButton" type="button"><span>＋</span> 新建旅行</button>
-      <nav class="sidebar-nav" aria-label="工作区">
-        <button class="active nav-link" type="button" data-scroll="#planner"><span>⌁</span> 当前规划</button>
-        <button class="nav-link" type="button" data-scroll="#discoverSection"><span>◇</span> 景点发现</button>
-        <button id="openSources" type="button"><span>◉</span> 数据与工具</button>
-      </nav>
-      <section class="sidebar-history" aria-label="最近旅行"><div class="sidebar-label">最近旅行</div><div id="tripHistory"><p>还没有已保存的旅行</p></div></section>
-      <section class="sidebar-workflow" aria-label="智能体流程">
-        <div class="sidebar-label">智能体流程</div>
-        <ol id="agentWorkflow">
-          <li data-workflow="profile"><i>1</i><span>理解需求<small>等待输入</small></span></li>
-          <li data-workflow="data"><i>2</i><span>获取证据<small>天气 · 地图 · 酒店</small></span></li>
-          <li data-workflow="plan"><i>3</i><span>生成路线<small>三套候选</small></span></li>
-          <li data-workflow="validate"><i>4</i><span>验证与压测<small>约束 · 风险 · 缓冲</small></span></li>
-        </ol>
-      </section>
-      <div class="sidebar-footer"><div class="model-status"><span class="status-dot" id="topModelDot"></span><div><b id="topModelStatus">检测 DeepSeek</b><small>模型不补写缺失事实</small></div></div><button id="sidebarSettingsButton" type="button">偏好与参数 <span>⌘</span></button></div>
+      <label class="sidebar-search"><span aria-hidden="true">⌕</span><input id="tripSearchInput" type="search" placeholder="搜索旅行" aria-label="搜索旅行"/><kbd>⌘K</kbd></label>
+      <section class="sidebar-history" aria-label="旅行列表"><div id="tripHistory" class="trip-history-groups"><p>还没有已保存的旅行</p></div></section>
+      <div class="sidebar-footer">
+        <div class="sidebar-user"><span class="user-avatar">周</span><div><b>周树铭 <em>PRO</em></b><small id="topModelStatus">检测 DeepSeek</small></div><span class="status-dot" id="topModelDot"></span></div>
+        <button id="sidebarSettingsButton" type="button"><span>⚙</span> 设置 <b>›</b></button>
+        <button id="openSources" type="button" hidden>数据与工具</button>
+      </div>
     </aside>
 
     <main class="workspace-canvas" id="planner">
@@ -52,18 +44,56 @@
             <div class="prompt-suggestions" aria-label="输入建议"><button type="button" data-prompt="第一次去西安，想看历史古迹和当地生活，3 天，节奏不要太赶。">历史文化</button><button type="button" data-prompt="计划去云南看自然风景和拍照，希望路线顺路，住宿交通方便。">自然摄影</button><button type="button" data-prompt="带父母旅行，希望少走路、留足休息时间，并明确哪些信息需要出发前核验。">轻松陪伴</button></div>
             <div class="hero-source-row" aria-label="当前核心数据源"><span><i class="dot weather"></i>天气预报</span><span><i class="dot osm"></i>地图与景点</span><span><i class="dot route"></i>道路路线</span><span><i class="dot estimate"></i>未知项保持未知</span></div>
           </div>
-          <div class="city-illustration" aria-hidden="true"><div class="sun-disc"></div><div class="mountain mountain-a"></div><div class="mountain mountain-b"></div><div class="city-line"><i></i><i></i><i></i><i></i><i></i></div><div class="route-line"></div><span>可信规划，从承认未知开始</span></div>
+          <div class="city-illustration" aria-hidden="true"><img class="jiangnan-hero-art" src="assets/jiangnan-hero-v1.png" alt="" /></div>
         </div>
       </section>
 
       <section class="active-stage" id="activeStage" hidden>
         <div class="stage-context-grid">
           <article class="conversation-rail panel"><div class="rail-head"><span>你的需求</span><small>原始输入保留</small></div><p id="requestEcho">等待输入</p><div id="profileSummary" class="profile-summary"><div class="data-empty">DeepSeek 完成第一阶段后，这里会显示结构化用户画像。</div></div></article>
-          <article class="agent-stage-panel panel"><div class="agent-stage-head"><div><span class="section-code">AGENT PROCESS</span><h2 id="agentStageTitle">正在准备规划</h2></div><span class="live-chip"><i></i> 真实任务状态</span></div><div class="loading-state idle" id="loadingState"><div class="plan-empty-mark" aria-hidden="true">✦</div><div><strong>行程将在你确认需求后生成</strong><span>页面不会在打开时自动调用 AI。</span></div></div><div class="agent-log" id="agentLog" aria-live="polite"></div></article>
+          <article class="agent-stage-panel panel">
+            <div class="agent-stage-head"><div><span class="section-code">AGENT PROCESS</span><h2 id="agentStageTitle">正在准备规划</h2></div><span class="live-chip"><i></i> 真实任务状态</span></div>
+            <ol class="stage-flow" aria-label="行程规划进度"><li data-flow-step="profile"><i>1</i><span>用户画像</span></li><li data-flow-step="data"><i>2</i><span>资料搜集</span></li><li data-flow-step="route"><i>3</i><span>路线生成</span></li><li data-flow-step="validate"><i>4</i><span>行程校验</span></li></ol>
+
+            <section class="agent-state-view profile-stage-view" id="profileStageView" data-agent-stage="BUILDING_PROFILE">
+              <div class="profile-visual">
+                <div class="profile-core" aria-hidden="true"><span>AI</span><i></i></div>
+                <div class="profile-node node-city"><small>目的地</small><strong id="profileNodeCity">识别中</strong></div>
+                <div class="profile-node node-duration"><small>日期与时长</small><strong id="profileNodeDuration">识别中</strong></div>
+                <div class="profile-node node-party"><small>同行者</small><strong id="profileNodeParty">识别中</strong></div>
+                <div class="profile-node node-preference"><small>旅行偏好</small><strong id="profileNodePreference">识别中</strong></div>
+                <div class="profile-node node-pace"><small>节奏与交通</small><strong id="profileNodePace">识别中</strong></div>
+                <div class="profile-node node-required"><small>不可遗漏</small><strong id="profileNodeRequired">识别中</strong></div>
+              </div>
+              <div class="profile-detail-grid" id="profileDetailGrid"><div class="stage-empty">DeepSeek 正在把原始文字整理为结构化画像，尚未返回的字段保持“识别中”。</div></div>
+            </section>
+
+            <section class="agent-state-view data-stage-view" id="dataStageView" data-agent-stage="FETCHING_DATA" hidden>
+              <div class="data-stage-heading"><div><b>联网资料正在进入同一证据链</b><span>每个来源只显示真实连接状态；候选数量要等工具返回后才会出现。</span></div><button type="button" id="dataStageSourcesButton">查看数据源</button></div>
+              <div class="evidence-source-grid" id="evidenceSourceGrid"></div>
+              <div class="data-stage-lower">
+                <section class="live-discovery-card"><div class="stage-card-title"><strong>景点候选</strong><span id="liveDiscoveryState">等待地图工具返回</span></div><div class="live-candidate-strip" id="liveCandidateStrip"><div class="stage-empty">不会填入固定景点或沿用上一次城市。</div></div></section>
+                <section class="live-risk-card"><div class="stage-card-title"><strong>天气、客流与预约</strong><span>事实状态</span></div><div class="honest-chart empty" id="liveRiskChart"><i></i><i></i><i></i><i></i><span>没有来源时保持未知</span></div><div class="live-risk-copy" id="liveRiskCopy">正在等待对应工具返回；预测不等于实时人数。</div></section>
+              </div>
+              <div class="route-draft-row"><section><strong>路线草案</strong><p id="liveRouteDraft">候选景点返回后才计算景点间路线，不预先绘制虚构轨迹。</p></section><section><strong>Travel Compiler</strong><p id="liveCompilerState">等待路线、开放时间和硬约束数据。</p></section></div>
+            </section>
+
+            <section class="agent-state-view validation-stage-view" id="validationStageView" data-agent-stage="VALIDATING_ITINERARY" hidden>
+              <div class="validation-intro"><div><span class="validation-ready-mark">✓</span><div><strong>三套候选路线已生成</strong><p>先核对差异、约束与未知项，再进入最终工作台。</p></div></div><button class="primary-button compact" id="openFinalWorkspace" type="button"><span>进入最终行程</span><b>→</b></button></div>
+              <div class="validation-layout">
+                <div class="validation-main"><div class="validation-candidate-grid" id="validationCandidateGrid"></div><div class="validation-bottom-grid"><section class="validation-issues" id="validationIssues"></section><section class="validation-evidence" id="validationEvidence"></section></div></div>
+                <aside class="validation-side"><section class="compiler-card" id="validationCompiler"></section><section class="validation-crowd" id="validationCrowd"></section><section class="validation-route" id="validationRoute"></section></aside>
+              </div>
+            </section>
+
+            <section class="agent-state-view error-stage-view" id="errorStageView" data-agent-stage="ERROR" hidden><div class="loading-state idle" id="loadingState"><div class="plan-empty-mark" aria-hidden="true">✦</div><div><strong>行程将在你确认需求后生成</strong><span>页面不会在打开时自动调用 AI。</span></div></div></section>
+            <section class="process-log-panel" id="processLogPanel"><div class="stage-card-title"><strong>智能体工作日志</strong><span>仅展示可验证步骤</span></div><div class="agent-log" id="agentLog" aria-live="polite"></div></section>
+          </article>
         </div>
       </section>
 
       <section class="ready-stage" id="readyStage" hidden>
+        <header class="ready-trip-header"><div><span class="section-code">ACTIVE TRIP</span><h1 id="readyTripTitle">行程工作台</h1><p id="readyTripMeta">等待行程数据</p></div><div class="ready-trip-actions"><button id="readyFavoriteButton" type="button">☆ 收藏</button><button id="readyShareButton" type="button">分享</button><button id="readyExportButton" type="button">导出行程</button></div></header>
         <section class="trip-health" id="tripHealth" aria-label="行程健康度"></section>
         <div class="ready-grid">
           <section class="itinerary panel" id="itinerarySection">
@@ -104,6 +134,6 @@
   <dialog id="spotDialog" class="spot-dialog"><form method="dialog" class="spot-dialog-card"><button class="dialog-close spot-close" value="close" aria-label="关闭景点详情">×</button><div id="spotDialogBody"></div></form></dialog>
   <dialog id="changePreviewDialog" class="change-preview-dialog"><form method="dialog" class="change-preview-card"><div class="dialog-head"><div><span class="section-code">CHANGE PREVIEW</span><h2>应用调整前先确认</h2></div><button class="dialog-close" value="close" aria-label="关闭">×</button></div><div id="changePreviewBody"></div><div class="change-preview-actions"><button class="secondary-button" id="discardChangeButton" value="close">继续使用原方案</button><button class="primary-button compact" id="applyChangeButton" type="button"><span>应用这次调整</span><b>✓</b></button></div></form></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

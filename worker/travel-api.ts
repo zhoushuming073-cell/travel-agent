@@ -242,7 +242,11 @@ function deterministicHints(text: string) {
   const start = text.match(/(?:上午|每天)?\s*(\d{1,2})\s*点(?:左右)?开始/);
   const end = text.match(/(?:晚上|每天)?\s*(\d{1,2})\s*点(?:前|之前)?结束/);
   if (start) result.dayStart = `${String(Number(start[1])).padStart(2, "0")}:00`;
-  if (end) result.dayEnd = `${String(Number(end[1])).padStart(2, "0")}:00`;
+  if (end) {
+    const rawHour = Number(end[1]);
+    const endHour = /晚上|晚间/.test(end[0]) && rawHour < 12 ? rawHour + 12 : rawHour;
+    result.dayEnd = `${String(endHour).padStart(2, "0")}:00`;
+  }
   const lodging = text.match(/(?:住宿|酒店)(?:暂定|定|住)?在\s*([^，。；;\n]{2,20})/);
   if (lodging) result.lodgingArea = lodging[1].trim();
   return result;
@@ -782,7 +786,7 @@ function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any)
 }
 
 function distribute(candidates: any[], profile: any, variantIndex: number) {
-  const targetPerDay = profile.pace === "slow" || variantIndex === 2 ? 2 : 3;
+  const targetPerDay = ["slow", "relax", "轻松"].includes(profile.pace) || variantIndex === 2 ? 2 : 3;
   const required = candidates.filter(item => item.requiredByUser);
   const optional = candidates.filter(item => !item.requiredByUser);
   const rotated = optional.slice(variantIndex * 2).concat(optional.slice(0, variantIndex * 2));
@@ -808,7 +812,7 @@ function planEvaluation(plan: any, profile: any, candidateCount: number) {
   const longestLeg = legs.reduce((max: number, leg: any) => Math.max(max, Number(leg.durationMin || 0)), 0);
   const routeEfficiency = Math.max(0, Math.round(100 - transportMinutes / Math.max(1, profile.days) * 0.35 - Math.max(0, longestLeg - 45) * 0.5));
   const dailyCounts = plan.daysPlan.map((day: any) => day.items?.length || 0);
-  const target = profile.pace === "slow" ? 2 : profile.pace === "tight" ? 4 : 3;
+  const target = ["slow", "relax", "轻松"].includes(profile.pace) ? 2 : profile.pace === "tight" || profile.pace === "紧凑" ? 4 : 3;
   const comfort = Math.max(0, Math.round(100 - dailyCounts.reduce((sum: number, count: number) => sum + Math.abs(count - target) * 8, 0) / Math.max(1, profile.days) - Math.max(0, longestLeg - 60) * 0.4));
   const dataConfidence = items.length ? Math.round(items.reduce((sum: number, item: any) => sum + Number(item.scoreBreakdown?.dataCompleteness || 50), 0) / items.length) : 0;
   const constraintSatisfaction = required.length ? Math.round(requiredMatched.length / required.length * 100) : 100;
@@ -1457,7 +1461,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       const requiredSpot = byId.get(requiredId);
       if (requiredSpot) buckets[targetIndex].unshift(requiredSpot);
     });
-    const targetPerDay = profile.pace === "slow" || variantIndex === 2 ? 2 : 3;
+    const targetPerDay = ["slow", "relax", "轻松"].includes(profile.pace) || variantIndex === 2 ? 2 : 3;
     buckets = buckets.map(items => {
       const fixed = items.filter(item => item.requiredByUser);
       const optional = items.filter(item => !item.requiredByUser);
