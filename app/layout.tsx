@@ -31,7 +31,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <head><link rel="stylesheet" href="/travel/styles.css?v=18" /></head>
       <body>{children}</body>
     </html>
   );

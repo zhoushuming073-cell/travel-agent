@@ -53,6 +53,13 @@ export interface PlanningProgress {
   title: string;
   items: string[];
   formSync?: TravelProfile;
+  sources?: Array<{
+    id: string;
+    label: string;
+    provider?: string;
+    state: "waiting" | "loading" | "success" | "error" | "unavailable";
+    detail?: string;
+  }>;
   collapsible?: boolean;
   generatedAt?: string;
 }
@@ -79,6 +86,9 @@ export interface PendingChange {
 export interface WorkspaceSnapshot extends Omit<TravelWorkspace, "alternatives" | "pendingChange"> {
   alternatives: UiPlan[];
   pendingChange: null;
+  draft?: string;
+  form?: TravelFormState;
+  messages?: ComposerMessage[];
 }
 
 export interface ComposerMessage {

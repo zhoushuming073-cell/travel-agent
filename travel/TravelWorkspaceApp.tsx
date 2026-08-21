@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appendItineraryVersion, restoreItineraryVersion } from "../worker/domain/versioning.ts";
 import type { AgentEvent, AgentState, ItineraryVersion } from "../worker/domain/types.ts";
 import { AgentActivity } from "./components/AgentActivity.tsx";
@@ -8,6 +8,7 @@ import { ChangePreview } from "./components/ChangePreview.tsx";
 import { DataAcquisition } from "./components/DataAcquisition.tsx";
 import { EmptyTripHero } from "./components/EmptyTripHero.tsx";
 import { ItineraryValidation } from "./components/ItineraryValidation.tsx";
+import { Icon } from "./components/Icon.tsx";
 import { PersistentChat } from "./components/PersistentChat.tsx";
 import { ReadyDashboard } from "./components/ReadyDashboard.tsx";
 import { RequirementProfile } from "./components/RequirementProfile.tsx";
@@ -19,25 +20,17 @@ import { explainPlan, runPlanningJob, type PlanningInput } from "./services/plan
 import { WORKSPACE_STAGES } from "./state/machine.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
 
-function dateAfter(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-const DEFAULT_FORM: TravelFormState = {
-  city: "杭州",
-  // Keep the server and first browser render deterministic. The browser fills a
-  // useful near-future default immediately after hydration.
+const EMPTY_FORM: TravelFormState = {
+  city: "",
   startDate: "",
   days: 3,
-  budget: 2000,
+  budget: 0,
   partySize: 2,
-  style: "自然风景",
-  preferences: ["自然", "摄影"],
+  style: "",
+  preferences: [],
   pace: "medium",
   transport: "公共交通优先",
-  hotelPreference: "交通方便",
+  hotelPreference: "",
 };
 
 function workspaceId(): string {
@@ -46,21 +39,21 @@ function workspaceId(): string {
 
 function eventFromProgress(id: string, progress: PlanningProgress): AgentEvent {
   const state: AgentState = progress.phase === "analysis" ? "BUILDING_PROFILE" : progress.phase === "live" ? "FETCHING_DATA" : "GENERATING_ITINERARY";
-  return { id: `${id}-${progress.phase}-${Date.now()}`, workspaceId: id, type: progress.phase, state, title: progress.title, detail: progress.items.at(-1), progress: progress.phase === "analysis" ? 18 : progress.phase === "live" ? 42 : 58, createdAt: new Date().toISOString() };
+  return { id: `${id}-${progress.phase}-${Date.now()}`, workspaceId: id, type: progress.phase, state, title: progress.title, detail: progress.items.at(-1), createdAt: new Date().toISOString() };
 }
 
-function profileToForm(profile: TravelProfile, previous: TravelFormState): TravelFormState {
+function profileToForm(profile: TravelProfile, fallback: TravelFormState = EMPTY_FORM): TravelFormState {
   return {
-    city: profile.city || previous.city,
-    startDate: profile.startDate || previous.startDate,
-    days: Number(profile.days || previous.days),
-    budget: Number(profile.budget || previous.budget),
-    partySize: Number(profile.partySize || previous.partySize),
-    style: profile.style || previous.style,
-    preferences: profile.preferences?.length ? profile.preferences : previous.preferences,
-    pace: profile.pace || previous.pace,
-    transport: profile.transport || previous.transport,
-    hotelPreference: profile.hotelPreference || previous.hotelPreference,
+    city: profile.city ?? fallback.city,
+    startDate: profile.startDate ?? fallback.startDate,
+    days: Number(profile.days ?? fallback.days),
+    budget: Number(profile.budget ?? fallback.budget),
+    partySize: Number(profile.partySize ?? fallback.partySize),
+    style: profile.style ?? fallback.style,
+    preferences: profile.preferences ?? fallback.preferences,
+    pace: profile.pace ?? fallback.pace,
+    transport: profile.transport ?? fallback.transport,
+    hotelPreference: profile.hotelPreference ?? fallback.hotelPreference,
   };
 }
 
@@ -72,7 +65,7 @@ export function TravelWorkspaceApp() {
   const [id, setId] = useState(workspaceId);
   const [stage, setStage] = useState<AgentState>("EMPTY");
   const [draft, setDraft] = useState("");
-  const [form, setForm] = useState<TravelFormState>(DEFAULT_FORM);
+  const [form, setForm] = useState<TravelFormState>(EMPTY_FORM);
   const [profile, setProfile] = useState<TravelProfile | null>(null);
   const [progress, setProgress] = useState<PlanningProgress | null>(null);
   const [plans, setPlans] = useState<UiPlan[]>([]);
@@ -86,11 +79,8 @@ export function TravelWorkspaceApp() {
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => setForm((current) => current.startDate ? current : { ...current, startDate: dateAfter(14) }));
-    return () => cancelAnimationFrame(frame);
-  }, []);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const planningController = useRef<AbortController | null>(null);
 
   const activePlan = useMemo(() => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null, [activePlanId, plans]);
   const stageConfig = WORKSPACE_STAGES[stage];
@@ -111,10 +101,13 @@ export function TravelWorkspaceApp() {
     events,
     pendingChange: null,
     executionFeedback: [],
+    draft,
+    form,
+    messages,
     createdAt: workspaces.find((workspace) => workspace.id === id)?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,
-  }), [activePlanId, events, id, plans, profile, stage, versions, workspaces]);
+  }), [activePlanId, draft, events, form, id, messages, plans, profile, stage, versions, workspaces]);
 
   const persist = useCallback(async (overrides?: Partial<WorkspaceSnapshot>) => {
     await workspaceRepository.save(snapshot(overrides));
@@ -127,12 +120,16 @@ export function TravelWorkspaceApp() {
     setId(stored.id);
     setStage(stored.state === "EXECUTING" ? "READY" : stored.state);
     setProfile(stored.profile);
-    if (stored.profile) setForm((current) => profileToForm(stored.profile as TravelProfile, current));
+    setForm(stored.form ?? (stored.profile ? profileToForm(stored.profile as TravelProfile) : EMPTY_FORM));
     setPlans(stored.alternatives);
     setActivePlanId(stored.activePlanId);
     setVersions(stored.versions);
     setEvents(stored.events);
-    setDraft("");
+    setDraft(stored.draft ?? "");
+    setMessages(stored.messages ?? []);
+    setProgress(null);
+    setPendingChange(null);
+    setMobileSidebarOpen(false);
     setError(null);
     if (updatePath) history.pushState({}, "", `/travel/${stored.id}`);
   }, []);
@@ -149,6 +146,34 @@ export function TravelWorkspaceApp() {
       if (pathId && pathId !== "index.html") await loadWorkspace(pathId, false);
     });
   }, [loadWorkspace, refreshWorkspaces]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
+      if (pathId && pathId !== "index.html") void loadWorkspace(pathId, false);
+      else {
+        setId(workspaceId()); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
+        setProfile(null); setProgress(null); setPlans([]); setActivePlanId(null);
+        setVersions([]); setEvents([]); setMessages([]); setPendingChange(null); setError(null);
+      }
+    };
+    addEventListener("popstate", onPopState);
+    return () => removeEventListener("popstate", onPopState);
+  }, [loadWorkspace]);
+
+  useEffect(() => {
+    if (!error || stage !== "READY") return;
+    const timer = setTimeout(() => setError(null), 8000);
+    return () => clearTimeout(timer);
+  }, [error, stage]);
+
+  useEffect(() => {
+    if (stage !== "READY" || !profile) return;
+    const timer = setTimeout(() => {
+      void workspaceRepository.get(id).then((stored) => stored ? workspaceRepository.save({ ...stored, draft, form, messages, updatedAt: new Date().toISOString() }) : undefined);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [draft, form, id, messages, profile, stage]);
 
   const planningInput = useCallback((freeText: string, replanContext: PlanningInput["replanContext"] = null): PlanningInput => ({
     city: form.city,
@@ -186,8 +211,11 @@ export function TravelWorkspaceApp() {
     setPlans([]);
     setVersions([]);
     setEvents([]);
+    planningController.current?.abort();
+    const controller = new AbortController();
+    planningController.current = controller;
     try {
-      const result = await runPlanningJob(planningInput(draft), handleProgress);
+      const result = await runPlanningJob(planningInput(draft), handleProgress, controller.signal);
       setProfile(result.request);
       setForm((current) => profileToForm(result.request, current));
       setPlans(result.alternatives);
@@ -195,14 +223,27 @@ export function TravelWorkspaceApp() {
       setEvents(result.agentEvents ?? []);
       setProgress(result.progress ?? null);
       setStage("VALIDATING_ITINERARY");
-      await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [] }));
+      await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages }));
       await refreshWorkspaces();
     } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") {
+        setStage("EMPTY");
+        setProgress(null);
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "规划工具暂时不可用");
       setStage("ERROR");
     } finally {
       setBusy(false);
+      if (planningController.current === controller) planningController.current = null;
     }
+  };
+
+  const cancelPlanning = () => {
+    planningController.current?.abort();
+    setBusy(false);
+    setProgress(null);
+    setStage("EMPTY");
   };
 
   const enterReady = async (planId: string) => {
@@ -246,7 +287,9 @@ export function TravelWorkspaceApp() {
           })),
         })),
       };
-      const result = await runPlanningJob(planningInput(`${draft}\n\n在现有行程基础上执行以下调整，并尽量保持未点名的日期不变：${text}`, context), (next) => setProgress(next));
+      const controller = new AbortController();
+      planningController.current = controller;
+      const result = await runPlanningJob(planningInput(`${draft}\n\n在现有行程基础上执行以下调整，并尽量保持未点名的日期不变：${text}`, context), (next) => setProgress(next), controller.signal);
       const after = result.alternatives.find((plan) => plan.id === activePlan.variant) ?? result.alternatives[0];
       setPendingChange({ before: activePlan, after, result, adjustment: text, changeSet: after.changeSet ?? null });
       setStage("READY");
@@ -279,10 +322,12 @@ export function TravelWorkspaceApp() {
   };
 
   const newTrip = () => {
+    planningController.current?.abort();
     const nextId = workspaceId();
     setId(nextId);
     setStage("EMPTY");
     setDraft("");
+    setForm(EMPTY_FORM);
     setProfile(null);
     setProgress(null);
     setPlans([]);
@@ -293,25 +338,33 @@ export function TravelWorkspaceApp() {
     setPendingChange(null);
     setError(null);
     setSidebarCollapsed(false);
+    setMobileSidebarOpen(false);
+    setSettingsOpen(false);
     history.pushState({}, "", "/travel/");
   };
 
   return <div className={`app-shell v2-shell react-workspace-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={newTrip} onOpen={(nextId) => void loadWorkspace(nextId)}/>
+    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={newTrip} onOpen={(nextId) => void loadWorkspace(nextId)}/>
     <main className="workspace-canvas react-workspace-canvas">
-      <header className="workspace-header"><div className="workspace-title"><span>{stageConfig.eyebrow}</span><strong>{activePlan && ["READY","EXECUTING"].includes(stage) ? `${activePlan.city} · ${activePlan.days} 天旅行` : stageConfig.title}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{stageConfig.label}</span><button type="button" onClick={() => setSettingsOpen(true)}>旅行参数</button></div></header>
+      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{stageConfig.eyebrow}</span><strong>{activePlan && ["READY","EXECUTING"].includes(stage) ? `${activePlan.city} · ${activePlan.days} 天旅行` : stageConfig.title}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{stageConfig.label}</span><button type="button" onClick={() => setSettingsOpen(true)}>旅行参数</button></div></header>
       {stage !== "EMPTY" && <StageProgress state={stage}/>} 
       {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onSubmit={() => void startPlanning()} onOpenSettings={() => setSettingsOpen(true)}/>} 
-      {stage === "BUILDING_PROFILE" && <RequirementProfile request={draft} profile={profile} progress={progress}/>} 
-      {["FETCHING_DATA","ASSESSING_EVIDENCE","GENERATING_ITINERARY"].includes(stage) && <DataAcquisition request={draft} profile={profile} progress={progress}/>} 
-      {stage === "VALIDATING_ITINERARY" && <ItineraryValidation plans={plans} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>} 
-      {stage === "ERROR" && <section className="error-workspace panel"><span>!</span><h2>规划工具暂时不可用</h2><p>{error}</p><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><b>↻</b></button></section>} 
-      {["READY","EXECUTING","REPLANNING"].includes(stage) && activePlan && <ReadyDashboard plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLInputElement>(".react-composer input")?.focus()}/>}
+      {stage === "BUILDING_PROFILE" && (
+        <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => { cancelPlanning(); setSettingsOpen(true); }}/>
+      )}
+      {["FETCHING_DATA","ASSESSING_EVIDENCE","GENERATING_ITINERARY"].includes(stage) && (
+        <DataAcquisition request={draft} profile={profile} progress={progress} onCancel={cancelPlanning}/>
+      )}
+      {stage === "VALIDATING_ITINERARY" && (
+        <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
+      )}
+      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划工具暂时不可用</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => { setStage("EMPTY"); setError(null); setSettingsOpen(true); }}>修改旅行需求</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><Icon name="arrow"/></button></div></section>}
+      {["READY","EXECUTING","REPLANNING"].includes(stage) && activePlan && <ReadyDashboard key={activePlan.id} plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLTextAreaElement>(".react-composer textarea")?.focus()}/>}
       {stage !== "EMPTY" && <PersistentChat busy={busy} messages={messages} onSend={(text) => void sendComposer(text)}/>} 
       {events.length > 0 && !["READY","EXECUTING","REPLANNING"].includes(stage) && <AgentActivity events={events}/>} 
     </main>
     <SettingsDrawer open={settingsOpen} form={form} onChange={setForm} onClose={() => setSettingsOpen(false)}/>
     {pendingChange && <ChangePreview pending={pendingChange} onApply={() => void applyPendingChange()} onDiscard={() => setPendingChange(null)}/>} 
-    {error && stage === "READY" && <div className="react-toast">{error}</div>}
+    {error && stage === "READY" && <div className="react-toast" role="alert"><span>{error}</span><button type="button" aria-label="关闭提示" onClick={() => setError(null)}><Icon name="close"/></button></div>}
   </div>;
 }

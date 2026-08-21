@@ -66,11 +66,12 @@ type StatusResponse =
 export async function runPlanningJob(
   input: PlanningInput,
   onProgress: (progress: PlanningProgress) => void,
+  signal?: AbortSignal,
 ): Promise<PlanningResult> {
-  const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input) });
+  const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), signal });
   onProgress(started.progress);
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(started.jobId)}`);
+    const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(started.jobId)}`, { signal });
     if (status.status === "working") {
       onProgress(status.progress);
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));

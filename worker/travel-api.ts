@@ -349,13 +349,17 @@ async function deepSeek(env: any, messages: any[], jsonMode = false, maxTokens =
 
 function deterministicHints(text: string) {
   const result: any = {};
-  const city = text.match(/(?:去|到|前往)\s*([\u4e00-\u9fa5]{2,8}?)(?:市)?(?:旅游|旅行|游玩|出差)|目的地(?:是|为)?\s*([\u4e00-\u9fa5]{2,8}?)(?:市|，|。|\s)/);
+  const city = text.match(/(?:去|到|前往)\s*([\u4e00-\u9fa5]{2,8}?)(?=(?:市)?(?:旅游|旅行|游玩|出差|玩|\d{1,2}天|[，,。；;\s]))|目的地(?:是|为)?\s*([\u4e00-\u9fa5]{2,8}?)(?:市|，|。|\s)/);
   if (city) result.city = cleanText(city[1] || city[2]).replace(/市$/, "");
   const range = text.match(/(20\d{2})年(\d{1,2})月(\d{1,2})日\s*(?:到|至|—|-)\s*(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日/);
   if (range) {
     result.startDate = `${range[1]}-${String(range[2]).padStart(2, "0")}-${String(range[3]).padStart(2, "0")}`;
     const end = `${range[4] || range[1]}-${String(range[5]).padStart(2, "0")}-${String(range[6]).padStart(2, "0")}`;
     result.days = Math.max(1, diffDays(result.startDate, end) + 1);
+  }
+  if (!range) {
+    const singleDate = text.match(/(20\d{2})年(\d{1,2})月(\d{1,2})日/);
+    if (singleDate) result.startDate = `${singleDate[1]}-${String(singleDate[2]).padStart(2, "0")}-${String(singleDate[3]).padStart(2, "0")}`;
   }
   const days = text.match(/(?:共|计划|玩|旅行)?\s*(\d{1,2})\s*天(?:\s*(\d{1,2})\s*晚)?/);
   if (days) { result.days = Number(days[1]); if (days[2]) result.nights = Number(days[2]); }
@@ -377,29 +381,41 @@ function deterministicHints(text: string) {
   if (lodging) result.lodgingArea = lodging[1].trim();
   const excludedText = text.match(/(?:不想去|不要去|明确排除|排除)\s*([^，,。；;\n]+)/);
   if (excludedText) result.excludedAttractions = excludedText[1].split(/[、和与及]/).map(v => v.trim()).filter(v => v.length >= 2 && v.length <= 18);
+  const preferenceTerms = ["自然", "摄影", "人文", "历史", "文化", "美食", "夜景", "亲子", "建筑", "博物馆", "徒步"];
+  const preferences = preferenceTerms.filter((term) => text.includes(term));
+  if (preferences.length) result.preferences = preferences;
   return result;
 }
 
 function mergeProfile(input: any, ai: any) {
   const text = cleanText(input.freeText);
   const hints = deterministicHints(text);
-  const today = new Date().toISOString().slice(0, 10);
   const merged = { ...input, ...ai, ...hints };
+  const explicitText = (value: unknown) => {
+    const normalized = cleanText(value);
+    return /^(unknown|未知|未设置|null)$/i.test(normalized) ? "" : normalized;
+  };
+  const city = explicitText(hints.city) || explicitText(input.city) || explicitText(ai.city);
+  const startDate = dateString(hints.startDate, dateString(input.startDate, dateString(ai.startDate, "")));
   const days = clamp(merged.days, 1, 7);
+  const budgetValue = Number(merged.budget ?? input.budget);
+  const missingFields = [...new Set(list(ai.unknownFields))];
+  if (!city && !missingFields.includes("city")) missingFields.push("city");
+  if (!startDate && !missingFields.includes("startDate")) missingFields.push("startDate");
   return {
-    city: cleanText(merged.city, "杭州").replace(/市$/, ""),
-    startDate: dateString(merged.startDate, dateString(input.startDate, addDays(today, 3))),
+    city: city.replace(/市$/, ""),
+    startDate,
     days,
     nights: clamp(merged.nights ?? days - 1, 0, 7),
     partySize: clamp(merged.partySize ?? 1, 1, 20),
-    budget: clamp(merged.budget ?? input.budget ?? 1500, 100, 200000),
-    style: cleanText(merged.style, input.style || "综合体验"),
+    budget: Number.isFinite(budgetValue) && budgetValue > 0 ? clamp(budgetValue, 100, 200000) : 0,
+    style: explicitText(merged.style) || explicitText(input.style),
     preferences: [...new Set([...list(input.preferences), ...list(ai.preferences)])].slice(0, 10),
     avoid: [...new Set(list(ai.avoid))].slice(0, 8),
     requiredAttractions: [...new Set([...list(ai.requiredAttractions), ...list(hints.requiredAttractions)])].slice(0, 12),
     pace: cleanText(merged.pace, input.pace || "medium"),
     transport: cleanText(merged.transport, input.transport || "公共交通优先"),
-    hotelPreference: cleanText(merged.hotelPreference, input.hotelPreference || "交通方便"),
+    hotelPreference: explicitText(merged.hotelPreference) || explicitText(input.hotelPreference),
     lodgingArea: cleanText(merged.lodgingArea, ""),
     dayStart: cleanText(merged.dayStart, "09:00"),
     dayEnd: cleanText(merged.dayEnd, "21:00"),
@@ -409,16 +425,16 @@ function mergeProfile(input: any, ai: any) {
     adults: clamp(merged.adults ?? merged.partySize ?? 1, 0, 20),
     children: clamp(merged.children ?? 0, 0, 20),
     seniors: clamp(merged.seniors ?? 0, 0, 20),
-    budgetLevel: cleanText(merged.budgetLevel, "中等"),
+    budgetLevel: explicitText(merged.budgetLevel) || "Unknown",
     interestPriorities: Array.isArray(ai.interestPriorities) ? ai.interestPriorities.slice(0, 12) : [],
     crowdSensitivity: cleanText(merged.crowdSensitivity, /拥挤|人流|避峰/.test(text) ? "高" : "Unknown"),
     weatherSensitivity: cleanText(merged.weatherSensitivity, /天气|下雨|降雨/.test(text) ? "高" : "Unknown"),
     walkingSensitivity: cleanText(merged.walkingSensitivity, "Unknown"),
     seasonalNeeds: [...new Set(list(ai.seasonalNeeds))].slice(0, 10),
-    unknownFields: [...new Set(list(ai.unknownFields))].slice(0, 20),
+    unknownFields: missingFields.slice(0, 20),
     returnTime: cleanText(merged.returnTime, "Unknown"),
-    clarificationNeeded: Boolean(ai.clarificationNeeded),
-    clarificationQuestion: cleanText(ai.clarificationQuestion),
+    clarificationNeeded: Boolean(ai.clarificationNeeded) || !city || !startDate,
+    clarificationQuestion: !city ? "请先说明一个中国境内的目的城市或区县。" : !startDate ? "请先说明出发日期，再生成可核验的天气、住宿和行程。" : cleanText(ai.clarificationQuestion),
     freeText: text.slice(0, 5000),
   };
 }
@@ -1895,9 +1911,9 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         `✓ 已识别目的地：${profile.city}`,
         `✓ 已识别旅行时长：${profile.days}天${profile.nights}晚`,
         `✓ 出行人数：${profile.partySize}人`,
-        `✓ 偏好：${profile.preferences.length ? profile.preferences.join(" / ") : profile.style}`,
+        `✓ 偏好：${profile.preferences.length ? profile.preferences.join(" / ") : profile.style || "未指定"}`,
         `✓ 必选景点：${profile.requiredAttractions.length ? profile.requiredAttractions.join(" / ") : "未指定"}`,
-        `✓ 每日时段：${profile.dayStart}—${profile.dayEnd}`,
+        `✓ 每日时段：${profile.dayStart === "Unknown" ? "待确认" : profile.dayStart}—${profile.dayEnd === "Unknown" ? "待确认" : profile.dayEnd}`,
         `✓ 需求解析模型：${profile.extractionModel || deepSeekModel(env, "extract")}`,
       ], formSync: profile };
       return json({ jobId, status: "working", progress });
@@ -1916,15 +1932,22 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       const cookieKey = `travel_job_${id.slice(0, 16)}`;
       const cookies = request.headers.get("cookie") || "";
       if (!cookies.includes(`${cookieKey}=ready`)) {
-        return json({ status: "working", progress: { phase: "live", title: "正在联网获取可验证的旅行数据……", items: [
+        return json({ status: "working", progress: { phase: "live", title: "正在联网获取可验证的旅行数据……", sources: [
+          { id: "spots", label: "景点与开放信息", provider: "中文维基百科 / 高德辅助核验", state: "loading" },
+          { id: "weather", label: "天气", provider: "Open-Meteo / 已配置天气服务", state: "loading" },
+          { id: "routing", label: "路线与交通时间", provider: "高德路线 / OSRM", state: "waiting", detail: "候选坐标返回后计算" },
+          { id: "hotels", label: "住宿候选", provider: "酒店服务 / 高德住宿检索", state: "loading" },
+          { id: "crowd", label: "拥挤与预约", provider: "官方实时接口", state: "unavailable", detail: "当前未连接" },
+          { id: "season", label: "当季景观", provider: "景点页面 / 受控公开信息检索", state: "loading" },
+        ], items: [
           `✓ 已通过中国范围地理服务核验目的地：${envelope.city.displayName || envelope.city.name}`,
           `✓ 已锁定硬约束：${envelope.profile.requiredAttractions.length ? envelope.profile.requiredAttractions.join("、") : "未指定必去景点"}`,
           `● 后端已启动天气、景点与酒店并行查询；任一来源失败不会中止其他来源`,
           `● 候选景点返回后将先计算住宿地到景点及景点间交通矩阵`,
           `● 交通矩阵就绪后才调用 ${deepSeekModel(env, "planner")} 生成完整活动时间轴`,
           `● 模型可按需调用受控联网工具补充 Wikimedia 与高德公开实体信息`,
-          `● 客流、预约、房价和余房没有可靠返回时保持 Unknown`,
-        ], formSync: envelope.profile } }, 200, { "set-cookie": `${cookieKey}=ready; Max-Age=900; Path=/; Secure; SameSite=Lax` });
+          `● 客流、预约、房价和余房没有可靠返回时保持“暂未核验”`,
+        ], formSync: envelope.profile } }, 200, { "set-cookie": `${cookieKey}=ready; Max-Age=900; Path=/; ${url.protocol === "https:" ? "Secure; " : ""}SameSite=Lax` });
       }
       const result = await buildPlan(envelope.profile, envelope.city, env, envelope.replanContext);
       return json({ status: "done", result, progress: result.progress });
@@ -2117,7 +2140,22 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     `✓ 三套方案差异检查：最大 Jaccard ${Number(generated.audit.differences.maxJaccard || 0).toFixed(2)}`,
     generated.modelAudit.degraded ? `● 当前为透明降级结果：${generated.modelAudit.degradationReason}` : "✓ 最终方案通过硬约束核验",
   ];
-  const progress = { phase: "route", title: generated.modelAudit.degraded ? "规划已完成（已明确标注降级）" : "三套路线已通过最终检查", items: progressItems, formSync: profile, collapsible: true, generatedAt: fetchedAt };
+  const progress = {
+    phase: "route",
+    title: generated.modelAudit.degraded ? "规划已完成（已明确标注降级）" : "三套路线已通过最终检查",
+    items: progressItems,
+    sources: [
+      { id: "spots", label: "景点与开放信息", provider: "中文维基百科 / 高德地图 / OSM", state: providerBundle.spots.status === "ready" ? "success" : "error", detail: providerBundle.spots.status === "ready" ? `${spots.length} 个进入候选池` : providerBundle.spots.error },
+      { id: "weather", label: "天气", provider: weather.source || "未返回", state: providerBundle.weather.status === "ready" ? "success" : "error", detail: providerBundle.weather.status === "ready" ? "已按出行日期核验" : providerBundle.weather.error },
+      { id: "routing", label: "路线与交通时间", provider: trafficMatrix.source, state: trafficMatrix.legs.length ? "success" : "error", detail: `${trafficMatrix.legs.length} 条有向路线` },
+      { id: "hotels", label: "住宿候选", provider: hotel.candidates?.length ? "高德地图 / 酒店 MCP" : "未返回", state: hotel.candidates?.length ? "success" : "unavailable", detail: hotel.candidates?.length ? `${hotel.candidates.length} 个候选` : "没有可靠候选" },
+      { id: "crowd", label: "拥挤与预约", provider: "未接官方实时接口", state: "unavailable", detail: "保持暂未核验" },
+      { id: "season", label: "当季景观", provider: generated.modelAudit.toolCalls.length ? "DeepSeek 联网工具" : "候选知识包", state: "success", detail: generated.modelAudit.toolCalls.length ? `${generated.modelAudit.toolCalls.length} 次受控查询` : "未额外调用搜索" },
+    ],
+    formSync: profile,
+    collapsible: true,
+    generatedAt: fetchedAt,
+  };
   const alternativeComparison = alternatives.map((plan: any) => ({ id: plan.id, title: plan.title, reliability: plan.compiler?.reliability, fragility: plan.fragility?.score, informationCompleteness: plan.compiler?.informationCompleteness, minBufferMinutes: plan.compiler?.minBufferMinutes, selectedCount: plan.evaluation?.evidence?.selectedCount, transportMinutes: plan.evaluation?.evidence?.transportMinutes, unknownCount: plan.uncertainty?.count, verificationCount: plan.minimumVerification?.length, stressResilientCount: plan.stressTest?.resilientCount }));
   const activeId = replanContext?.activeVariant || "relax";
   const activePlan = alternatives.find((plan: any) => plan.id === activeId) || alternatives[0];
