@@ -7,6 +7,9 @@ interface Env {
   ASSETS: Fetcher;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
+  DEEPSEEK_EXTRACT_MODEL?: string;
+  DEEPSEEK_PLANNER_MODEL?: string;
+  DEEPSEEK_REPAIR_MODEL?: string;
   AMAP_WEB_KEY?: string;
   UNSPLASH_ACCESS_KEY?: string;
   IMAGES: {

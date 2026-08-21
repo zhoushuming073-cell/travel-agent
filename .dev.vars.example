@@ -1,0 +1,10 @@
+# DeepSeek（服务端使用，切勿把密钥放入前端代码）
+DEEPSEEK_API_KEY=
+DEEPSEEK_EXTRACT_MODEL=deepseek-v4-flash
+DEEPSEEK_PLANNER_MODEL=deepseek-v4-pro
+DEEPSEEK_REPAIR_MODEL=deepseek-v4-pro
+
+# 地图、天气、酒店与图片数据源
+AMAP_WEB_KEY=
+UNSPLASH_ACCESS_KEY=
+

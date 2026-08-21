@@ -21,6 +21,20 @@ export interface TravelProfile {
   preferences: string[];
   avoid?: string[];
   requiredAttractions: string[];
+  excludedAttractions?: string[];
+  adults?: number;
+  children?: number;
+  seniors?: number;
+  budgetLevel?: string;
+  interestPriorities?: Array<{ name?: string; priority?: string | number }>;
+  crowdSensitivity?: string;
+  weatherSensitivity?: string;
+  walkingSensitivity?: string;
+  seasonalNeeds?: string[];
+  unknownFields?: string[];
+  returnTime?: string;
+  extractionModel?: string;
+  extractionFormatRepaired?: boolean;
   pace?: string;
   transport?: string;
   hotelPreference?: string;
@@ -169,6 +183,9 @@ export interface ItineraryBlock {
   mealType?: string;
   mcpTransport?: TransitEvidence;
   mcpStatus?: { note?: string };
+  mode?: string;
+  fetchedAt?: string;
+  reason?: string;
 }
 
 export interface WeatherDay {
@@ -257,6 +274,16 @@ export interface ItineraryPlan {
   fragility?: FragilityResult;
   stressTest?: StressResult;
   changeSet?: ChangeSet | null;
+  planningDecision?: {
+    model?: string;
+    repairModel?: string;
+    repairRounds?: number;
+    formatRepairs?: number;
+    networkToolCalls?: unknown[];
+    degraded?: boolean;
+    degradationReason?: string | null;
+    draftCompilerIssues?: CompilerIssue[];
+  };
 }
 
 export interface DependencyNode {
@@ -467,4 +494,3 @@ export interface WorkspaceRepository {
   save(workspace: TravelWorkspace): Promise<void>;
   remove(id: string): Promise<void>;
 }
-

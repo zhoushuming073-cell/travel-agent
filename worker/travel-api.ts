@@ -4,6 +4,14 @@ import { assertPlanContract } from "./domain/contract.ts";
 import { buildPlanningEvents } from "./domain/agent.ts";
 import { computeChangeSet } from "./domain/replan.ts";
 import { analyzePlanTrustV2 } from "./domain/trust.ts";
+import {
+  assertPlannerContext,
+  auditPlannerDraft,
+  mergeDeterministicProfile,
+  parseStrictJsonObject,
+  preserveLockedDays,
+  settleTravelProviders,
+} from "./domain/planner-v4.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -12,6 +20,12 @@ const OSRM = "https://router.project-osrm.org";
 const WEATHER_MCP = "https://mcpmarket.cn/mcp/a5be23a7cc256930f8f3ccc6";
 const HOTEL_MCP = "https://mcpmarket.cn/mcp/14d52a3200549c758f548f52";
 const AMAP_MCP = "https://mcpmarket.cn/mcp/06cbbceb8f161926894c4584";
+const COMMON_CHINA_CITIES = [
+  ["北京", 39.9042, 116.4074], ["上海", 31.2304, 121.4737], ["广州", 23.1291, 113.2644],
+  ["深圳", 22.5431, 114.0579], ["杭州", 30.2741, 120.1551], ["成都", 30.5728, 104.0668],
+  ["重庆", 29.563, 106.5516], ["西安", 34.3416, 108.9398], ["南京", 32.0603, 118.7969],
+  ["苏州", 31.2989, 120.5853], ["厦门", 24.4798, 118.0894], ["昆明", 25.0389, 102.7183],
+] as const;
 const mcpMemory = new Map<string, { expiresAt: number; value: any }>();
 const unsplashMemory = new Map<string, { expiresAt: number; value: any }>();
 
@@ -199,37 +213,144 @@ function poiImageScore(poi: any, wantedNames: string[]) {
 }
 
 function parseJsonObject(text: string) {
-  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  try { return JSON.parse(stripped); } catch { /* continue */ }
-  const start = stripped.indexOf("{");
-  const end = stripped.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(stripped.slice(start, end + 1));
-  throw new Error("DeepSeek 未返回有效 JSON");
+  return parseStrictJsonObject(text);
+}
+
+function deepSeekModel(env: any, purpose: "extract" | "planner" | "repair" | "explain") {
+  if (purpose === "extract") return cleanText(env.DEEPSEEK_EXTRACT_MODEL, "deepseek-v4-flash");
+  if (purpose === "repair") return cleanText(env.DEEPSEEK_REPAIR_MODEL, "deepseek-v4-pro");
+  if (purpose === "planner") return cleanText(env.DEEPSEEK_PLANNER_MODEL, "deepseek-v4-pro");
+  return cleanText(env.DEEPSEEK_PLANNER_MODEL || env.DEEPSEEK_MODEL, "deepseek-v4-pro");
+}
+
+async function searchVerifiedTravelContext(query: string, city: string, env: any) {
+  const fetchedAt = new Date().toISOString();
+  const wikiParams = new URLSearchParams({
+    action: "query", format: "json", origin: "*", list: "search", utf8: "1", srlimit: "6",
+    srsearch: `${cleanText(query)} ${cleanText(city)} 旅游`,
+  });
+  const providers = await settleTravelProviders({
+    wikipedia: fetchJson(`https://zh.wikipedia.org/w/api.php?${wikiParams}`, {}, 12000, "Wikimedia 联网检索"),
+    amap: callMcp(AMAP_MCP, "maps_text_search", { keywords: cleanText(query), city: cleanText(city) }, { timeoutMs: 10000, cacheMs: 20 * 60 * 1000 }),
+  });
+  const wikiRows = providers.wikipedia.status === "ready" ? (providers.wikipedia.data as any)?.query?.search || [] : [];
+  const amapRows = providers.amap.status === "ready" ? amapPoiRows(providers.amap.data).slice(0, 6) : [];
+  return {
+    query: cleanText(query), city: cleanText(city), fetchedAt,
+    sources: [
+      ...wikiRows.map((row: any) => ({ name: cleanText(row.title), snippet: cleanText(row.snippet).replace(/<[^>]+>/g, ""), source: "中文维基百科", url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(cleanText(row.title).replace(/ /g, "_"))}`, status: "public-context" })),
+      ...amapRows.map((row: any) => ({ name: cleanText(row.name), address: cleanText(row.address), type: cleanText(row.type), location: cleanText(row.location), source: "高德地图 MCP", status: "map-poi" })),
+    ],
+    unavailable: Object.entries(providers).filter(([, value]: any) => value.status === "unavailable").map(([name, value]: any) => ({ name, reason: value.error })),
+    note: "联网工具仅返回可追溯的公开页面与地图 POI；未返回的开放、预约、客流和价格信息继续保持 Unknown。",
+  };
+}
+
+async function deepSeekRequest(env: any, options: {
+  purpose: "extract" | "planner" | "repair" | "explain";
+  messages: any[];
+  jsonMode?: boolean;
+  thinking?: boolean;
+  maxTokens?: number;
+  webTools?: { city: string } | null;
+}) {
+  if (!env.DEEPSEEK_API_KEY) throw new Error("部署环境尚未配置 DeepSeek API Key");
+  const model = deepSeekModel(env, options.purpose);
+  const messages = structuredClone(options.messages);
+  const toolLog: any[] = [];
+  const tools = options.webTools ? [{
+    type: "function",
+    function: {
+      name: "search_verified_travel_context",
+      description: "联网查询中国目的地的公开旅游实体和地图 POI。仅在输入知识包不足以核验实体或季节背景时调用；不能把搜索摘要当成实时客流、开放、预约或价格。",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "要核验的景点、季节现象或旅行实体，2-80 字" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  }] : undefined;
+
+  for (let turn = 0; turn < 4; turn += 1) {
+    const payload: any = {
+      model,
+      messages,
+      max_tokens: options.maxTokens || 6000,
+      thinking: { type: options.thinking ? "enabled" : "disabled" },
+    };
+    if (options.thinking) payload.reasoning_effort = "high";
+    if (!options.thinking) payload.temperature = options.jsonMode ? 0.1 : 0.25;
+    if (options.jsonMode) payload.response_format = { type: "json_object" };
+    if (tools) { payload.tools = tools; payload.tool_choice = "auto"; }
+    const result = await fetchJson("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
+      body: JSON.stringify(payload),
+    }, options.thinking ? 120000 : 60000, `DeepSeek ${model}`);
+    const message = result?.choices?.[0]?.message;
+    if (!message) throw new Error(`DeepSeek ${model} 没有返回消息`);
+    if (!Array.isArray(message.tool_calls) || !message.tool_calls.length) {
+      const content = cleanText(message.content);
+      if (!content) throw new Error(`DeepSeek ${model} 没有返回内容`);
+      return { content, model: cleanText(result?.model, model), toolLog };
+    }
+    messages.push({ role: "assistant", content: message.content ?? "", reasoning_content: message.reasoning_content ?? "", tool_calls: message.tool_calls });
+    for (const call of message.tool_calls.slice(0, 3)) {
+      let args: any = {};
+      try { args = JSON.parse(cleanText(call?.function?.arguments, "{}")); } catch { args = {}; }
+      const query = cleanText(args.query).slice(0, 80);
+      const output = query.length >= 2
+        ? await searchVerifiedTravelContext(query, options.webTools?.city || "", env)
+        : { error: "query 必须为 2—80 字", sources: [] };
+      toolLog.push({
+        tool: "search_verified_travel_context",
+        query,
+        resultCount: output.sources?.length || 0,
+        fetchedAt: output.fetchedAt || new Date().toISOString(),
+        sources: (output.sources || []).slice(0, 6).map((source: any) => ({
+          name: cleanText(source.name),
+          provider: cleanText(source.source),
+          url: cleanText(source.url) || null,
+        })),
+        unavailable: output.unavailable || [],
+      });
+      messages.push({ role: "tool", tool_call_id: cleanText(call.id), content: JSON.stringify(output) });
+    }
+  }
+  throw new Error(`DeepSeek ${model} 联网工具调用超过安全上限`);
+}
+
+async function deepSeekJson(env: any, options: Parameters<typeof deepSeekRequest>[1]) {
+  const first = await deepSeekRequest(env, { ...options, jsonMode: true });
+  try { return { value: parseJsonObject(first.content), model: first.model, toolLog: first.toolLog, formatRepaired: false }; }
+  catch {
+    const repaired = await deepSeekRequest(env, {
+      purpose: options.purpose,
+      thinking: false,
+      maxTokens: options.maxTokens,
+      webTools: null,
+      jsonMode: true,
+      messages: [
+        { role: "system", content: "你是 JSON 格式修复器。只修复语法和字段容器，不添加新事实。只输出一个有效 JSON 对象。" },
+        { role: "user", content: first.content },
+      ],
+    });
+    return { value: parseJsonObject(repaired.content), model: repaired.model, toolLog: first.toolLog, formatRepaired: true };
+  }
 }
 
 async function deepSeek(env: any, messages: any[], jsonMode = false, maxTokens = 5000) {
-  if (!env.DEEPSEEK_API_KEY) throw new Error("部署环境尚未配置 DeepSeek API Key");
-  const payload: any = {
-    model: env.DEEPSEEK_MODEL || "deepseek-chat",
-    messages,
-    temperature: jsonMode ? 0.15 : 0.35,
-    max_tokens: maxTokens,
-  };
-  if (jsonMode) payload.response_format = { type: "json_object" };
-  const result = await fetchJson("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${env.DEEPSEEK_API_KEY}` },
-    body: JSON.stringify(payload),
-  }, 55000, "DeepSeek");
-  const content = result?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("DeepSeek 没有返回内容");
-  return cleanText(content);
+  const result = jsonMode
+    ? await deepSeekJson(env, { purpose: "explain", messages, thinking: false, maxTokens })
+    : await deepSeekRequest(env, { purpose: "explain", messages, thinking: false, maxTokens });
+  return jsonMode ? JSON.stringify((result as any).value) : (result as any).content;
 }
 
 function deterministicHints(text: string) {
   const result: any = {};
-  const city = text.match(/(?:去|到|目的地(?:是|为)?|前往)\s*([\u4e00-\u9fa5]{2,12}?)(?:市|旅游|旅行|游玩|，|。|\s)/);
-  if (city) result.city = city[1].replace(/市$/, "");
+  const city = text.match(/(?:去|到|前往)\s*([\u4e00-\u9fa5]{2,8}?)(?:市)?(?:旅游|旅行|游玩|出差)|目的地(?:是|为)?\s*([\u4e00-\u9fa5]{2,8}?)(?:市|，|。|\s)/);
+  if (city) result.city = cleanText(city[1] || city[2]).replace(/市$/, "");
   const range = text.match(/(20\d{2})年(\d{1,2})月(\d{1,2})日\s*(?:到|至|—|-)\s*(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日/);
   if (range) {
     result.startDate = `${range[1]}-${String(range[2]).padStart(2, "0")}-${String(range[3]).padStart(2, "0")}`;
@@ -254,6 +375,8 @@ function deterministicHints(text: string) {
   }
   const lodging = text.match(/(?:住宿|酒店)(?:暂定|定|住)?在\s*([^，。；;\n]{2,20})/);
   if (lodging) result.lodgingArea = lodging[1].trim();
+  const excludedText = text.match(/(?:不想去|不要去|明确排除|排除)\s*([^，,。；;\n]+)/);
+  if (excludedText) result.excludedAttractions = excludedText[1].split(/[、和与及]/).map(v => v.trim()).filter(v => v.length >= 2 && v.length <= 18);
   return result;
 }
 
@@ -282,6 +405,18 @@ function mergeProfile(input: any, ai: any) {
     dayEnd: cleanText(merged.dayEnd, "21:00"),
     mealPreference: cleanText(merged.mealPreference, "每天 1—2 个当地特色美食，顺路安排"),
     requestedVariants: list(merged.requestedVariants).length ? list(merged.requestedVariants).slice(0, 3) : ["经典景点覆盖率高", "偏自然和摄影", "避开人流、行程轻松"],
+    excludedAttractions: [...new Set([...list(ai.excludedAttractions), ...list(hints.excludedAttractions)])].slice(0, 12),
+    adults: clamp(merged.adults ?? merged.partySize ?? 1, 0, 20),
+    children: clamp(merged.children ?? 0, 0, 20),
+    seniors: clamp(merged.seniors ?? 0, 0, 20),
+    budgetLevel: cleanText(merged.budgetLevel, "中等"),
+    interestPriorities: Array.isArray(ai.interestPriorities) ? ai.interestPriorities.slice(0, 12) : [],
+    crowdSensitivity: cleanText(merged.crowdSensitivity, /拥挤|人流|避峰/.test(text) ? "高" : "Unknown"),
+    weatherSensitivity: cleanText(merged.weatherSensitivity, /天气|下雨|降雨/.test(text) ? "高" : "Unknown"),
+    walkingSensitivity: cleanText(merged.walkingSensitivity, "Unknown"),
+    seasonalNeeds: [...new Set(list(ai.seasonalNeeds))].slice(0, 10),
+    unknownFields: [...new Set(list(ai.unknownFields))].slice(0, 20),
+    returnTime: cleanText(merged.returnTime, "Unknown"),
     clarificationNeeded: Boolean(ai.clarificationNeeded),
     clarificationQuestion: cleanText(ai.clarificationQuestion),
     freeText: text.slice(0, 5000),
@@ -289,18 +424,28 @@ function mergeProfile(input: any, ai: any) {
 }
 
 async function extractProfile(input: any, env: any) {
-  const prompt = `请把用户的中国旅行需求整理成结构化 JSON。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。字段：city,startDate(YYYY-MM-DD),days,nights,partySize,budget,style,preferences(string[]),avoid(string[]),requiredAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,requestedVariants(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。当前规划器一次只支持一个明确城市或区县；如果原文只给省份/大区、给出多个目的地但没说明主城市，clarificationNeeded=true，并提出一个简短具体的问题；否则必须为 false。\n当前表单：${JSON.stringify(input)}\n用户原文：${cleanText(input.freeText)}`;
-  const content = await deepSeek(env, [
-    { role: "system", content: "你是旅行需求结构化助手。输出一个 JSON 对象，不要输出解释。" },
-    { role: "user", content: prompt },
-  ], true, 2200);
-  return mergeProfile(input, parseJsonObject(content));
+  const prompt = `请把用户的中国旅行需求整理成严格 json。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格，不把偏好提升为必去。\n字段：city,startDate(YYYY-MM-DD),days,nights,partySize,adults,children,seniors,budget,budgetLevel,style,preferences(string[]),interestPriorities([{name,priority}]),avoid(string[]),requiredAttractions(string[]),excludedAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,crowdSensitivity,weatherSensitivity,walkingSensitivity,seasonalNeeds(string[]),requestedVariants(string[]),returnTime,unknownFields(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。未明确字段填 "Unknown" 或放入 unknownFields，不得自行猜测。当前规划器一次只支持一个明确城市或区县；如果原文只给省份/大区、给出多个目的地但没说明主城市，clarificationNeeded=true。\nJSON 示例：{"city":"杭州","days":4,"requiredAttractions":["西湖"],"preferences":["摄影"],"unknownFields":["儿童情况"]}\n当前表单：${JSON.stringify(input)}\n用户原文：${cleanText(input.freeText)}`;
+  const extracted = await deepSeekJson(env, {
+    purpose: "extract", thinking: false, maxTokens: 3200,
+    messages: [
+      { role: "system", content: "你是旅行需求结构化助手。只输出一个 JSON 对象，不输出解释。" },
+      { role: "user", content: prompt },
+    ],
+  });
+  const hints = deterministicHints(cleanText(input.freeText));
+  const deterministic = { ...input, ...hints };
+  const merged = mergeDeterministicProfile(deterministic, extracted.value);
+  return { ...mergeProfile(input, merged), extractionModel: extracted.model, extractionFormatRepaired: extracted.formatRepaired };
 }
 
 async function searchCities(query: string, limit = 8) {
   if (cleanText(query).length < 2) return [];
+  const normalizedQuery = cleanText(query).replace(/市$/, "");
+  const common = COMMON_CHINA_CITIES.find(([name]) => name === normalizedQuery);
+  if (common) return [{ name: common[0], displayName: `${common[0]}，中国`, lat: common[1], lng: common[2], zoom: 11, countryCode: "cn", source: "常用城市稳定坐标" }];
   const geoParams = new URLSearchParams({ name: cleanText(query), count: String(limit), language: "zh", format: "json", countryCode: "CN" });
-  const geoData = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?${geoParams}`, {}, 15000, "Open-Meteo 城市搜索");
+  let geoData: any = {};
+  try { geoData = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?${geoParams}`, {}, 15000, "Open-Meteo 城市搜索"); } catch { geoData = {}; }
   const seen = new Set<string>();
   const cities = (geoData?.results || []).map((row: any) => {
     const name = cleanText(row.name || query).replace(/市$/, "");
@@ -313,7 +458,8 @@ async function searchCities(query: string, limit = 8) {
   }).filter((row: any) => row.name && Number.isFinite(row.lat) && !seen.has(row.name) && seen.add(row.name));
   if (cities.length) return cities;
   const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", addressdetails: "1", limit: String(Math.min(limit, 5)), countrycodes: "cn", "accept-language": "zh-CN" });
-  const data = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, "OSM 城市搜索");
+  let data: any[] = [];
+  try { data = await fetchJson(`${NOMINATIM}/search?${params}`, {}, 18000, "OSM 城市搜索"); } catch { data = []; }
   return (Array.isArray(data) ? data : []).map((row: any) => {
     const address = row.address || {};
     const name = cleanText(address.city || address.town || address.county || address.state_district || row.name || query).replace(/市$/, "");
@@ -582,9 +728,10 @@ async function wikipediaSpots(city: any, limit = 40, requiredNames: string[] = [
 async function verifyRequired(city: any, names: string[], candidates: any[] = [], env: any = null) {
   const verified: any[] = [];
   for (const name of names) {
+    const minimumEntityScore = normalizeName(name).length <= 3 ? 100 : 85;
     const localMatch = candidates
       .map(item => ({ item, score: poiMatchScore(item.name, [name, `${city.name}${name}`]) }))
-      .filter(entry => entry.score >= 70)
+      .filter(entry => entry.score >= minimumEntityScore)
       .sort((left, right) => right.score - left.score || haversine(city.lat, city.lng, left.item.lat, left.item.lng) - haversine(city.lat, city.lng, right.item.lat, right.item.lng))[0]?.item;
     if (localMatch) {
       verified.push({ ...localMatch, name, officialName: localMatch.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已在本次公开地图候选景点中完成实体消歧"] });
@@ -595,7 +742,7 @@ async function verifyRequired(city: any, names: string[], candidates: any[] = []
       try {
         const amapParams = new URLSearchParams({ key: officialKey, keywords: name, city: city.name, citylimit: "true", extensions: "all", offset: "10", page: "1" });
         const amapRaw = await fetchJson(`https://restapi.amap.com/v3/place/text?${amapParams}`, {}, 15000, `必选景点“${name}”高德官方核验`);
-        const exact = (amapRaw?.pois || []).map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= 80).sort((a: any, b: any) => b.score - a.score)[0]?.row;
+        const exact = (amapRaw?.pois || []).map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= minimumEntityScore).sort((a: any, b: any) => b.score - a.score)[0]?.row;
         const amapSpot = exact ? amapCandidateRecord(exact, city, [name]) : null;
         if (amapSpot) {
           verified.push({ ...amapSpot, name, officialName: amapSpot.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已通过高德官方 Web POI 精确核验"] });
@@ -605,7 +752,7 @@ async function verifyRequired(city: any, names: string[], candidates: any[] = []
     }
     try {
       const mcpRows = amapPoiRows(await callMcp(AMAP_MCP, "maps_text_search", { keywords: name, city: city.name, types: "风景名胜" }, { timeoutMs: 10000, cacheMs: 30 * 60 * 1000 }));
-      const exact = mcpRows.map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= 80).sort((a: any, b: any) => b.score - a.score)[0]?.row;
+      const exact = mcpRows.map((row: any) => ({ row, score: poiMatchScore(row?.name, [name, `${city.name}${name}`]) })).filter((item: any) => item.score >= minimumEntityScore).sort((a: any, b: any) => b.score - a.score)[0]?.row;
       const amapSpot = exact ? amapCandidateRecord(exact, city, [name]) : null;
       if (amapSpot) {
         verified.push({ ...amapSpot, name, officialName: amapSpot.name, requiredByUser: true, category: "用户必选", recommendationReasons: ["用户明确指定的必选项", "已通过高德地图 MCP 精确核验"] });
@@ -876,6 +1023,62 @@ async function routeFor(items: any[]) {
   } catch { return routeFallback(items); }
 }
 
+async function resolveLodgingAnchor(profile: any, city: any) {
+  const label = cleanText(profile.lodgingArea, `${city.name}住宿区域`);
+  if (!profile.lodgingArea) return { id: "hotel", name: label, lat: Number(city.lat), lng: Number(city.lng), source: city.source || "城市中心坐标" };
+  try {
+    const raw = await callMcp(AMAP_MCP, "maps_text_search", { keywords: label, city: city.name }, { timeoutMs: 9000, cacheMs: 30 * 60 * 1000 });
+    const row = amapPoiRows(raw)[0];
+    const location = cleanText(row?.location).split(",").map(Number);
+    if (location.length === 2 && location.every(Number.isFinite)) return { id: "hotel", name: label, lat: location[1], lng: location[0], source: "高德地图 MCP" };
+  } catch { /* use the verified city center */ }
+  return { id: "hotel", name: label, lat: Number(city.lat), lng: Number(city.lng), source: city.source || "城市中心坐标" };
+}
+
+function fallbackMatrix(nodes: any[], fetchedAt: string) {
+  const legs: any[] = [];
+  for (let fromIndex = 0; fromIndex < nodes.length; fromIndex += 1) {
+    for (let toIndex = 0; toIndex < nodes.length; toIndex += 1) {
+      if (fromIndex === toIndex) continue;
+      const distanceM = Math.round(haversine(nodes[fromIndex].lat, nodes[fromIndex].lng, nodes[toIndex].lat, nodes[toIndex].lng) * 1.25);
+      legs.push({ fromId: nodes[fromIndex].id, toId: nodes[toIndex].id, durationMin: Math.max(8, Math.round(distanceM / 260 / 60)), distanceM, source: "坐标距离×1.25 透明估算", quality: "estimated", fetchedAt });
+    }
+  }
+  return { source: "坐标距离×1.25 透明估算", fetchedAt, quality: "estimated", nodes, legs };
+}
+
+async function buildTrafficMatrix(profile: any, city: any, spots: any[]) {
+  const fetchedAt = new Date().toISOString();
+  const anchor = await resolveLodgingAnchor(profile, city);
+  const selected = uniqueSpots([
+    ...spots.filter((spot: any) => spot.requiredByUser),
+    ...spots.filter((spot: any) => !spot.requiredByUser),
+  ]).filter((spot: any) => Number.isFinite(Number(spot.lat)) && Number.isFinite(Number(spot.lng))).slice(0, 18);
+  const nodes = [anchor, ...selected.map((spot: any) => ({ id: spot.id, name: spot.name, lat: Number(spot.lat), lng: Number(spot.lng) }))];
+  if (nodes.length < 2) throw new Error("无法为候选景点建立交通矩阵：有效坐标不足");
+  const coordinates = nodes.map((node: any) => `${node.lng},${node.lat}`).join(";");
+  try {
+    const data = await fetchJson(`${OSRM}/table/v1/driving/${coordinates}?annotations=duration,distance`, {}, 22000, "OSRM 交通矩阵");
+    if (!Array.isArray(data?.durations) || !Array.isArray(data?.distances)) throw new Error("OSRM 未返回完整矩阵");
+    const legs: any[] = [];
+    nodes.forEach((from: any, fromIndex: number) => nodes.forEach((to: any, toIndex: number) => {
+      if (fromIndex === toIndex) return;
+      const seconds = Number(data.durations[fromIndex]?.[toIndex]);
+      const distance = Number(data.distances[fromIndex]?.[toIndex]);
+      if (!Number.isFinite(seconds) || !Number.isFinite(distance)) return;
+      legs.push({ fromId: from.id, toId: to.id, durationMin: Math.max(1, Math.round(seconds / 60)), distanceM: Math.round(distance), source: "OSRM Table 道路路由", quality: "routed", fetchedAt });
+    }));
+    if (legs.length < nodes.length * (nodes.length - 1) * 0.8) throw new Error("OSRM 矩阵缺失过多");
+    return { source: "OSRM Table 道路路由", fetchedAt, quality: "routed", nodes, legs };
+  } catch { return fallbackMatrix(nodes, fetchedAt); }
+}
+
+function matrixLeg(matrix: any, fromId: string, toId: string) {
+  return matrix?.legs?.find((leg: any) => leg.fromId === fromId && leg.toId === toId)
+    || matrix?.legs?.find((leg: any) => leg.fromId === toId && leg.toId === fromId)
+    || null;
+}
+
 function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any) {
   let cursor = timeToMinutes(profile.dayStart, 540);
   const endLimit = timeToMinutes(profile.dayEnd, 1260);
@@ -899,6 +1102,14 @@ function scheduleDay(items: any[], profile: any, dayIndex: number, weather: any)
     const spot = { ...original, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + durationMin), durationMin };
     scheduled.push(spot); blocks.push({ type: "attraction", item: spot }); cursor += durationMin;
   });
+  if (scheduled.length && !blocks.some((block: any) => block.mealType === "lunch")) {
+    const restStart = Math.max(cursor, 12 * 60);
+    if (restStart + 75 <= endLimit) {
+      const last = scheduled[scheduled.length - 1];
+      blocks.push({ type: "rest", mealType: "lunch", anchor: { lat: last.lat, lng: last.lng }, label: "午餐与休息（就近安排，不跨区追店）", startTime: minutesToTime(restStart), endTime: minutesToTime(restStart + 75), durationMin: 75 });
+      cursor = restStart + 75;
+    }
+  }
   if (cursor >= 17 * 60 && cursor + 60 <= endLimit) {
     const last = scheduled[scheduled.length - 1];
     blocks.push({ type: "rest", mealType: "dinner", anchor: last ? { lat: last.lat, lng: last.lng } : null, label: "晚餐（优先选择路线附近的当地风味）", startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + 60), durationMin: 60 });
@@ -1329,11 +1540,209 @@ async function diningFor(city: string, lat: number, lng: number, mealType: strin
   }
 }
 
+const PLANNER_JSON_EXAMPLE = {
+  variants: [{
+    id: "hot", title: "经典覆盖", style: "经典", strategy: "代表性景点优先并控制跨区移动",
+    days: [{
+      day: 1, theme: "湖山经典", returnHotelTime: "19:30", totalActivityMin: 360, totalTransportMin: 45,
+      activities: [
+        { type: "attraction", spotId: "spot-id", startTime: "09:00", endTime: "11:00", durationMin: 120, reason: "必去且上午更顺路", evidenceRefs: ["spot-id", "traffic-matrix"] },
+        { type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:15", durationMin: 75, reason: "正常用餐，不跨区追店", evidenceRefs: [] },
+      ],
+    }],
+  }],
+};
+
+const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案生成器。你的最终输出必须是一个严格 json 对象，不要输出 Markdown，不要输出思维过程。
+硬规则：
+1. 只允许使用输入候选池中的 spotId，绝不创造景点、酒店、价格、客流、开放时间、预约或交通数据。
+2. requiredByUser=true 是所有方案的硬约束；Unknown 必须保持 Unknown。
+3. 核心决策必须使用输入 trafficMatrix；交通、游玩、午餐、晚餐、休息与缓冲必须共同进入时间轴。
+4. 先保证可执行性，再优化覆盖率。不得安排开放时间冲突、明显折返、超出每日时段或不合理夜景时段。
+5. 三套方案分别优化：hot=经典覆盖；niche=自然摄影和合理光线/季节；relax=少景点、大缓冲、透明避峰风险。三套不能只换名字或交换一两个点。
+6. 客流无官方实时数据时只可说 Unknown 或基于节假日/时段的 Prediction；不得宣称已实时避峰。
+7. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
+8. 每套天数严格等于 profile.days；首次分目标调用时只输出调用方指定的一套，统一修复调用时输出完整三套。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
+
+function normalizePlannerDraft(value: any, profile: any) {
+  const variants = Array.isArray(value?.variants) ? value.variants.slice(0, 3) : [];
+  return {
+    variants: variants.map((variant: any, variantIndex: number) => ({
+      id: ["hot", "niche", "relax"][variantIndex],
+      title: cleanText(variant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
+      style: cleanText(variant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
+      strategy: cleanText(variant?.strategy),
+      days: (Array.isArray(variant?.days) ? variant.days : []).slice(0, profile.days).map((day: any, dayIndex: number) => ({
+        day: dayIndex + 1,
+        theme: cleanText(day?.theme, `第 ${dayIndex + 1} 天`),
+        returnHotelTime: cleanText(day?.returnHotelTime, profile.dayEnd),
+        totalActivityMin: clamp(day?.totalActivityMin, 0, 900),
+        totalTransportMin: clamp(day?.totalTransportMin, 0, 600),
+        activities: (Array.isArray(day?.activities) ? day.activities : []).slice(0, 12).map((activity: any) => ({
+          type: ["attraction", "meal", "rest"].includes(cleanText(activity?.type)) ? cleanText(activity.type) : "rest",
+          spotId: cleanText(activity?.spotId) || undefined,
+          label: cleanText(activity?.label) || undefined,
+          startTime: cleanText(activity?.startTime), endTime: cleanText(activity?.endTime),
+          durationMin: clamp(activity?.durationMin, 15, 360),
+          transportFromPrevious: activity?.transportFromPrevious ? {
+            mode: cleanText(activity.transportFromPrevious.mode, "公共交通"),
+            durationMin: clamp(activity.transportFromPrevious.durationMin, 1, 360),
+            matrixKey: cleanText(activity.transportFromPrevious.matrixKey) || undefined,
+          } : undefined,
+          reason: cleanText(activity?.reason, "依据候选景点知识包与交通矩阵"),
+          evidenceRefs: list(activity?.evidenceRefs).slice(0, 8),
+          alternativeSpotIds: list(activity?.alternativeSpotIds).slice(0, 4),
+          adjustmentCondition: cleanText(activity?.adjustmentCondition) || undefined,
+        })),
+      })),
+    })),
+  };
+}
+
+function fallbackPlannerDraft(profile: any, spots: any[], matrix: any, reason: string) {
+  const variants = [0, 1, 2].map((variantIndex) => {
+    const buckets = distribute(spots, profile, variantIndex);
+    return {
+      id: ["hot", "niche", "relax"][variantIndex],
+      title: ["经典覆盖（透明降级）", "自然摄影（透明降级）", "轻松避峰（透明降级）"][variantIndex],
+      style: ["经典", "自然摄影", "轻松避峰"][variantIndex],
+      strategy: `DeepSeek 暂不可用；按候选评分、必去约束和交通矩阵生成的确定性降级方案。原因：${reason}`,
+      days: buckets.map((items: any[], dayIndex: number) => {
+        let cursor = timeToMinutes(profile.dayStart, 540);
+        let previous: any = null;
+        const activities: any[] = [];
+        nearestOrder(items).forEach((spot: any, index: number) => {
+          const leg = previous ? matrixLeg(matrix, previous.id, spot.id) : matrixLeg(matrix, "hotel", spot.id);
+          if (previous) cursor += Number(leg?.durationMin || 20);
+          const durationMin = Math.min(variantIndex === 2 ? 120 : 150, Number(spot.durationMin || 120));
+          if (cursor < 12 * 60 && cursor + durationMin > 12 * 60) {
+            activities.push({ type: "meal", label: "午餐与休息", startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + 75), durationMin: 75, reason: "正常用餐与休息", evidenceRefs: [] });
+            cursor += 75;
+          }
+          activities.push({ type: "attraction", spotId: spot.id, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + durationMin), durationMin, transportFromPrevious: previous ? { mode: "公共交通 / 打车", durationMin: Number(leg?.durationMin || 20), matrixKey: `${previous.id}->${spot.id}` } : undefined, reason: spot.requiredByUser ? "用户必去硬约束" : "候选评分与空间顺路", evidenceRefs: [spot.id, "traffic-matrix"] });
+          cursor += durationMin;
+          previous = spot;
+        });
+        if (!activities.some(item => item.type === "meal")) activities.push({ type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:15", durationMin: 75, reason: "正常用餐与休息", evidenceRefs: [] });
+        activities.push({ type: "rest", label: "弹性休息", startTime: minutesToTime(Math.min(cursor, timeToMinutes(profile.dayEnd, 1260) - 30)), endTime: minutesToTime(Math.min(cursor + 30, timeToMinutes(profile.dayEnd, 1260))), durationMin: 30, reason: "吸收排队和交通波动", evidenceRefs: [] });
+        return { day: dayIndex + 1, theme: "透明降级路线", activities, returnHotelTime: minutesToTime(Math.min(cursor + 30, timeToMinutes(profile.dayEnd, 1260))), totalActivityMin: activities.reduce((sum, item) => sum + Number(item.durationMin || 0), 0), totalTransportMin: activities.reduce((sum, item) => sum + Number(item.transportFromPrevious?.durationMin || 0), 0) };
+      }),
+    };
+  });
+  return { variants, degraded: true, degradationReason: reason };
+}
+
+async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
+  assertPlannerContext(knowledge);
+  const modelAudit = { plannerModel: deepSeekModel(env, "planner"), repairModel: deepSeekModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, degraded: false, degradationReason: "", compilerIssues: [] as any[] };
+  let draft: any;
+  const objectives = [
+    { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；不要把购物 POI 当景点。" },
+    { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；恶劣天气给候选池内室内替代。" },
+    { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功。" },
+  ];
+  const initialResults = await Promise.allSettled(objectives.map(async (objective) => {
+    const messages = [
+      { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n本次只生成方案 ${objective.id}（${objective.name}），variants 数组只放这一套；其目标函数是：${objective.goal}\n联网工具已提供。请先调用 search_verified_travel_context 核验一个与本方案最相关的季节或景点实体，再完成 JSON；工具结果不能升级为实时客流、预约或价格。` },
+      { role: "user", content: JSON.stringify({ task: replanContext ? "局部重规划" : "首次规划", objective, knowledge, replanContext, instruction: "输出这一套方案的完整活动时间轴 json；不要只输出景点 ID 列表。" }) },
+    ];
+    try {
+      return { response: await deepSeekJson(env, { purpose: "planner", thinking: true, maxTokens: 12000, webTools: { city: profile.city }, messages }), thinkingFallback: false, fallbackReason: "" };
+    } catch (error: any) {
+      const fallbackReason = cleanText(error?.message, `${objective.name} thinking 调用失败`);
+      const response = await deepSeekJson(env, { purpose: "planner", thinking: false, maxTokens: 7500, webTools: { city: profile.city }, messages: [...messages, { role: "user", content: "thinking 模式上游未能完成。请作为透明降级，用非 thinking 模式直接输出同一 JSON 方案；不得改变事实与硬约束。" }] });
+      return { response, thinkingFallback: true, fallbackReason };
+    }
+  }));
+  const deterministicFallback = fallbackPlannerDraft(profile, knowledge.spots, knowledge.trafficMatrix, "单个 V4 Pro 方案调用失败");
+  const rawVariants: any[] = [];
+  const initialErrors: string[] = [];
+  let failedVariantCount = 0;
+  initialResults.forEach((result, index) => {
+    if (result.status === "fulfilled" && Array.isArray((result.value.response.value as any)?.variants) && (result.value.response.value as any).variants[0]) {
+      rawVariants.push((result.value.response.value as any).variants[0]);
+      modelAudit.plannerModel = result.value.response.model;
+      modelAudit.toolCalls.push(...result.value.response.toolLog.map((entry: any) => ({ ...entry, variant: objectives[index].id })));
+      if (result.value.response.formatRepaired) modelAudit.formatRepairs += 1;
+      if (result.value.thinkingFallback) initialErrors.push(`${objectives[index].name} thinking 降级：${result.value.fallbackReason}`);
+    } else {
+      rawVariants.push(deterministicFallback.variants[index]);
+      failedVariantCount += 1;
+      initialErrors.push(result.status === "rejected" ? cleanText(result.reason?.message, `方案 ${objectives[index].id} 调用失败`) : `方案 ${objectives[index].id} 返回结构不完整`);
+    }
+  });
+  if (initialErrors.length) {
+    modelAudit.degraded = true;
+    modelAudit.degradationReason = initialErrors.join("；");
+  }
+  draft = normalizePlannerDraft({ variants: rawVariants }, profile);
+  if (failedVariantCount === 3) return { draft, audit: auditPlannerDraft(draft, knowledge), modelAudit };
+
+  let audit = auditPlannerDraft(draft, knowledge);
+  for (let round = 0; round < 2 && audit.needsRepair; round += 1) {
+    try {
+      const repaired = await deepSeekJson(env, {
+        purpose: "repair", thinking: true, maxTokens: 10000, webTools: null,
+        messages: [
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你现在是冲突修复器。只修复问题清单涉及的日期或节点；硬约束不能删除。输出修复后的完整三套方案 json。` },
+          { role: "user", content: JSON.stringify({ knowledge, draft, issues: audit.issues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, softConstraints: { preferences: profile.preferences, pace: profile.pace }, replanContext }) },
+        ],
+      });
+      draft = normalizePlannerDraft(repaired.value, profile);
+      modelAudit.repairModel = repaired.model;
+      modelAudit.repairRounds += 1;
+      if (repaired.formatRepaired) modelAudit.formatRepairs += 1;
+      audit = auditPlannerDraft(draft, knowledge);
+    } catch (error: any) {
+      modelAudit.compilerIssues.push({ code: "REPAIR_FAILED", message: cleanText(error?.message) });
+      break;
+    }
+  }
+  modelAudit.compilerIssues.push(...audit.issues);
+  if (audit.hardIssues.length) {
+    modelAudit.degraded = true;
+    modelAudit.degradationReason = `两轮修复后仍有 ${audit.hardIssues.length} 个硬冲突`;
+    draft = fallbackPlannerDraft(profile, knowledge.spots, knowledge.trafficMatrix, modelAudit.degradationReason);
+    audit = auditPlannerDraft(draft, knowledge);
+  }
+  return { draft, audit, modelAudit };
+}
+
+function planDayFromDraft(dayDraft: any, dayIndex: number, spotsById: Map<string, any>, matrix: any, weather: any, profile: any) {
+  const blocks: any[] = [];
+  const items: any[] = [];
+  let previousSpot: any = null;
+  const ordered = [...(dayDraft.activities || [])].sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
+  for (const activity of ordered) {
+    if (activity.type === "attraction") {
+      const base = spotsById.get(activity.spotId);
+      if (!base) continue;
+      if (previousSpot) {
+        const leg = matrixLeg(matrix, previousSpot.id, base.id);
+        const durationMin = Number(leg?.durationMin || activity.transportFromPrevious?.durationMin || 20);
+        const attractionStart = timeToMinutes(activity.startTime, timeToMinutes(profile.dayStart, 540));
+        blocks.push({ type: "leg", from: previousSpot.name, to: base.name, startTime: minutesToTime(Math.max(0, attractionStart - durationMin)), endTime: activity.startTime, durationMin, distanceM: Number(leg?.distanceM || 0), source: cleanText(leg?.source, "交通矩阵"), quality: cleanText(leg?.quality, "estimated"), fetchedAt: leg?.fetchedAt, mode: cleanText(activity.transportFromPrevious?.mode, "公共交通 / 打车") });
+      }
+      const item = { ...base, startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, recommendationReason: activity.reason, evidenceRefs: activity.evidenceRefs, alternativeSpotIds: activity.alternativeSpotIds, adjustmentCondition: activity.adjustmentCondition };
+      items.push(item); blocks.push({ type: "attraction", item, startTime: item.startTime, endTime: item.endTime, durationMin: item.durationMin }); previousSpot = item;
+    } else {
+      blocks.push({ type: "rest", mealType: activity.type === "meal" ? (/晚餐/.test(activity.label || "") ? "dinner" : "lunch") : undefined, label: activity.label || (activity.type === "meal" ? "用餐与休息" : "弹性休息"), startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, reason: activity.reason });
+    }
+  }
+  return { day: dayIndex + 1, date: weather.date, weekday: weekday(weather.date), theme: dayDraft.theme || "城市探索", items, blocks, conflicts: [], weather, returnHotelTime: dayDraft.returnHotelTime, totalActivityMin: dayDraft.totalActivityMin, totalTransportMin: dayDraft.totalTransportMin };
+}
+
 export async function handleTravelApi(request: Request, env: any, url: URL): Promise<Response | null> {
   try {
     if (url.pathname === "/api/health") return json({
       ok: true,
-      ai: { status: env?.DEEPSEEK_API_KEY ? "configured" : "unconfigured", model: env?.DEEPSEEK_MODEL || "deepseek-chat", note: "两阶段调用：先提取需求，再把 MCP 与公开数据交给 DeepSeek 排序" },
+      ai: {
+        status: env?.DEEPSEEK_API_KEY ? "configured" : "unconfigured",
+        extractionModel: deepSeekModel(env, "extract"), plannerModel: deepSeekModel(env, "planner"), repairModel: deepSeekModel(env, "repair"),
+        thinking: { planner: "enabled", repair: "enabled", reasoningContentExposed: false },
+        network: { enabled: true, mode: "DeepSeek function tool calls", tools: ["Wikimedia 公开检索", "高德地图 MCP POI 查询"] },
+        note: "先结构化需求，再获取真实工具数据和交通矩阵；V4 Pro 输出完整时间轴，编译器发现问题后由 V4 Pro 最多修复两轮。",
+      },
       services: [
         { name: "天气查询 MCP", provider: "MCPMarket", status: "live", note: "Open-Meteo 逐小时预报；MCP 失败时使用 Open-Meteo 直连兜底" },
         { name: "酒店与参考价", provider: "高德地图官方 + MCPMarket", status: env?.AMAP_WEB_KEY ? "live" : "partial", note: "地图 POI 保证候选真实性；展示高德最低参考价或酒店 MCP 在售套餐参考价，并明确非指定日期成交价" },
@@ -1343,6 +1752,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         { name: "中文维基百科景点检索", provider: "Wikimedia", status: "live", note: "公开页面、摘要、坐标与精确页面图片兜底" },
         { name: "OpenStreetMap / Nominatim", provider: "OSM", status: "live", note: "城市和用户必选景点核验兜底" },
         { name: "OSRM", provider: "OSRM", status: "live", note: "地图线路几何；失败时透明估算" },
+        { name: "DeepSeek 联网工具", provider: "服务端受控 Tool Calls", status: "live", note: "模型可调用 Wikimedia 与高德查询；搜索结果不能冒充实时客流、预约或价格" },
         { name: "官方客流与预约", provider: "未接入", status: "offline", note: "保持未知，不由 AI 编造" },
       ],
     });
@@ -1355,15 +1765,11 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       crowd: { name: "客流与预约", role: "景区官方来源待接入", status: "unconfigured", fallback: "保持未知" },
       hotel: { name: "住宿候选", role: "高德地图官方酒店 POI + MCPMarket 在售产品", status: env?.AMAP_WEB_KEY ? "ready" : "partial", fallback: "仅保留用户住宿区域；没有来源价格时不补写假价" },
       images: { name: "景点图片", role: "高德官方精确 POI + Unsplash + Wikimedia", status: env?.AMAP_WEB_KEY || env?.UNSPLASH_ACCESS_KEY ? "ready" : "unconfigured", fallback: "高德官方无照片时依次使用 Unsplash、高德免费 MCP 和中文维基百科实体图片" },
+      aiSearch: { name: "AI 联网查询", role: "DeepSeek Tool Calls -> Wikimedia / 高德地图 MCP", status: env?.DEEPSEEK_API_KEY ? "ready" : "unconfigured", fallback: "模型不可用时仍由后端直接获取数据；降级结果明确标注" },
     } });
 
     if (url.pathname === "/api/cities") {
-      const centers = [
-        ["北京", 39.9042, 116.4074], ["上海", 31.2304, 121.4737], ["广州", 23.1291, 113.2644],
-        ["深圳", 22.5431, 114.0579], ["杭州", 30.2741, 120.1551], ["成都", 30.5728, 104.0668],
-        ["重庆", 29.563, 106.5516], ["西安", 34.3416, 108.9398], ["南京", 32.0603, 118.7969],
-        ["苏州", 31.2989, 120.5853], ["厦门", 24.4798, 118.0894], ["昆明", 25.0389, 102.7183],
-      ].map(([name, lat, lng]) => ({ name, displayName: `${name}，中国`, lat, lng, zoom: 11, countryCode: "cn", source: "内置城市入口坐标" }));
+      const centers = COMMON_CHINA_CITIES.map(([name, lat, lng]) => ({ name, displayName: `${name}，中国`, lat, lng, zoom: 11, countryCode: "cn", source: "内置城市入口坐标" }));
       return json({ cities: centers, scope: "中国", note: "仅为常用城市入口；任意中国城市仍通过搜索接口实时查找" });
     }
 
@@ -1456,7 +1862,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         { role: "system", content: "你是旅行行程解释助手。只能依据用户提供的已核验上下文回答。凡实时客流、预约、房价、开放状态等上下文中为未知的内容，必须明确说未知，不得推测。回答简洁、中文。" },
         { role: "user", content: `问题：${cleanText(body.prompt)}\n已核验上下文：${JSON.stringify(body.context || {})}` },
       ], false, 1800);
-      return json({ message, model: env.DEEPSEEK_MODEL || "deepseek-chat" });
+      return json({ message, model: deepSeekModel(env, "explain") });
     }
 
     if (url.pathname === "/api/plan/start" && request.method === "POST") {
@@ -1492,6 +1898,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         `✓ 偏好：${profile.preferences.length ? profile.preferences.join(" / ") : profile.style}`,
         `✓ 必选景点：${profile.requiredAttractions.length ? profile.requiredAttractions.join(" / ") : "未指定"}`,
         `✓ 每日时段：${profile.dayStart}—${profile.dayEnd}`,
+        `✓ 需求解析模型：${profile.extractionModel || deepSeekModel(env, "extract")}`,
       ], formSync: profile };
       return json({ jobId, status: "working", progress });
     }
@@ -1511,12 +1918,12 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       if (!cookies.includes(`${cookieKey}=ready`)) {
         return json({ status: "working", progress: { phase: "live", title: "正在联网获取可验证的旅行数据……", items: [
           `✓ 已通过中国范围地理服务核验目的地：${envelope.city.displayName || envelope.city.name}`,
-          "● 正在调用天气查询 MCP，读取出行日期逐小时预报；失败时使用 Open-Meteo 直连兜底",
-          "● 正在检索带坐标的中文百科景点，并核验所有用户必选项",
-          "● 正在调用国内酒店 MCP 查询住宿区域附近的可核验候选",
-          "● 正在准备高德地图 MCP 的 POI 图片和公交/地铁路线校验",
-          "● 完成工具校验后，再把结果交给 DeepSeek 生成三套差异化路线",
-          "● 客流、预约、房价、余房没有可靠返回时保持未知，不由 AI 补写",
+          `✓ 已锁定硬约束：${envelope.profile.requiredAttractions.length ? envelope.profile.requiredAttractions.join("、") : "未指定必去景点"}`,
+          `● 后端已启动天气、景点与酒店并行查询；任一来源失败不会中止其他来源`,
+          `● 候选景点返回后将先计算住宿地到景点及景点间交通矩阵`,
+          `● 交通矩阵就绪后才调用 ${deepSeekModel(env, "planner")} 生成完整活动时间轴`,
+          `● 模型可按需调用受控联网工具补充 Wikimedia 与高德公开实体信息`,
+          `● 客流、预约、房价和余房没有可靠返回时保持 Unknown`,
         ], formSync: envelope.profile } }, 200, { "set-cookie": `${cookieKey}=ready; Max-Age=900; Path=/; Secure; SameSite=Lax` });
       }
       const result = await buildPlan(envelope.profile, envelope.city, env, envelope.replanContext);
@@ -1530,224 +1937,195 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
 }
 
 async function buildPlan(profile: any, city: any, env: any, replanContext: any = null) {
-  const [weather, rawSpots, hotel] = await Promise.all([
-    weatherFor(city, profile.startDate, profile.days), wikipediaSpots(city, 45, profile.requiredAttractions, profile.preferences, env), hotelFor(profile, city, env),
-  ]);
+  const providerBundle = await settleTravelProviders({
+    weather: weatherFor(city, profile.startDate, profile.days),
+    spots: wikipediaSpots(city, 48, profile.requiredAttractions, profile.preferences, env),
+    hotels: hotelFor(profile, city, env),
+  });
+  const weather = providerBundle.weather.status === "ready"
+    ? providerBundle.weather.data as any
+    : {
+      city: city.name, source: "Unavailable", fetchedAt: new Date().toISOString(),
+      tripForecast: Array.from({ length: profile.days }, (_, index) => ({ date: addDays(profile.startDate, index), quality: "unavailable", note: `天气服务不可用：${providerBundle.weather.error || "Unknown"}` })),
+    };
+  const hotel = providerBundle.hotels.status === "ready"
+    ? providerBundle.hotels.data as any
+    : { name: cleanText(profile.lodgingArea, `${city.name}住宿区域`), candidates: [], pricedCount: 0, mcpStatus: "unavailable", note: `酒店查询不可用：${providerBundle.hotels.error || "Unknown"}；未生成假价格` };
+  let rawSpots = providerBundle.spots.status === "ready" ? providerBundle.spots.data as any[] : [];
   const required = await verifyRequired(city, profile.requiredAttractions, rawSpots, env);
+  const requiredNameById = new Map(required.map((spot: any, index: number) => [spot.id, profile.requiredAttractions[index] || spot.name]));
+  rawSpots = uniqueSpots([...required, ...rawSpots]);
+
   const requiredNames = profile.requiredAttractions.map((name: string) => normalizeName(name));
-  // A large scenic area often exposes gates, halls and branch POIs whose names contain
-  // the required attraction. Treating all of them as separate required stops caused
-  // duplicate itineraries (for example several different “灵隐寺” POIs on one day).
-  // Keep the single verified canonical entity and leave unrelated real POIs as options.
-  const relatedToName = (spot: any, wanted: string) => {
+  const excludedNames = (profile.excludedAttractions || []).map((name: string) => normalizeName(name));
+  const canonicalRequiredIds = new Set(required.map((spot: any) => spot.id));
+  const relatedRequired = (spot: any) => requiredNames.some((wanted: string) => {
     const actual = normalizeName(spot.name);
     return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
-  };
-  const relatedToRequired = (spot: any) => requiredNames.some((wanted: string) => relatedToName(spot, wanted));
-  const unrelatedSpots = rawSpots.filter(spot => !relatedToRequired(spot));
-  const nearbySubSpots = required.flatMap(requiredSpot => rawSpots
-    .filter(spot => spot.id !== requiredSpot.id && relatedToName(spot, normalizeName(requiredSpot.name)))
-    .map(spot => ({ spot, distance: haversine(requiredSpot.lat, requiredSpot.lng, spot.lat, spot.lng) }))
-    .filter(entry => entry.distance <= 6000)
-    .sort((left, right) => left.distance - right.distance)
-    .slice(0, 2)
-    .map(entry => entry.spot));
-  const optionalSpots = uniqueSpots([...unrelatedSpots, ...nearbySubSpots])
-    .map(spot => ({ ...spot, requiredByUser: false, category: spot.category === "用户必选" ? fallbackPoiCategory(spotSearchText(spot)) : spot.category }));
-  const spots = rankSpots(uniqueSpots([...required, ...optionalSpots]), profile);
-  if (spots.length < Math.max(4, profile.days * 2)) throw new Error(`仅核验到 ${spots.length} 个可用景点，不足以生成可靠的 ${profile.days} 天行程`);
+  });
+  const filtered = rawSpots.filter((spot: any) => {
+    if (!spot?.id || !spot?.name || !Number.isFinite(Number(spot.lat)) || !Number.isFinite(Number(spot.lng))) return false;
+    if (excludedNames.some((excluded: string) => normalizeName(spot.name).includes(excluded))) return false;
+    const entityText = `${spot.name || ""} ${spot.category || ""} ${spot.poiType || ""} ${spot.type || ""}`;
+    if (/商务住宅|购物服务|公司企业|汽车服务|生活服务|医疗保健|大型商场/.test(entityText)) return false;
+    if (/片场|摄影棚|摄影基地|总店|旗舰店|购物中心|商场|售楼处|影楼/.test(spot.name)) return false;
+    if (/(?:北馆|南馆|东馆|西馆|分馆)$/.test(spot.name) && rawSpots.some((candidate: any) => normalizeName(candidate.name) === normalizeName(spot.name.replace(/(?:北馆|南馆|东馆|西馆|分馆)$/, "")))) return false;
+    if (spot.category === "城市景观" && !/风景名胜|公园广场|科教文化|文物古迹|自然地名|特色街区|旅游景点|景区|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|寺|庙|塔|湖|山|湿地|运河|古街|历史|文化/.test(entityText)) return false;
+    if (/暂停开放|永久关闭|停止营业/.test(`${spot.openingHours || ""} ${spot.status || ""}`)) return false;
+    if (relatedRequired(spot) && !canonicalRequiredIds.has(spot.id)) return false;
+    return true;
+  });
+  const ranked = rankSpots(uniqueSpots([...required, ...filtered]), profile);
+  if (ranked.length < Math.max(profile.days + required.length, 6)) throw new Error(`仅核验到 ${ranked.length} 个有效景点，无法可靠生成 ${profile.days} 天行程`);
 
-  const toolContext = {
-    request: { ...profile, freeText: undefined }, city,
+  const trafficMatrix = await buildTrafficMatrix(profile, city, ranked);
+  const matrixSpotIds = new Set(trafficMatrix.nodes.filter((node: any) => node.id !== "hotel").map((node: any) => node.id));
+  const spots = ranked.filter((spot: any) => matrixSpotIds.has(spot.id)).map((spot: any) => requiredNameById.has(spot.id)
+    ? { ...spot, name: requiredNameById.get(spot.id), requiredByUser: true, category: "用户必选" }
+    : { ...spot, requiredByUser: false });
+  const fetchedAt = new Date().toISOString();
+  const plannerSpots = spots.map((spot: any) => {
+    const canonicalName = cleanText(requiredNameById.get(spot.id), spot.name);
+    const tags = [...new Set([spot.category, ...(spot.matchedPreferences || []), ...(/夜|江|湖|河|桥/.test(canonicalName) ? ["夜景"] : []), ...(/园|湖|山|湿地|溪|谷/.test(canonicalName) ? ["自然", "摄影"] : []), ...(/寺|庙|博物馆|遗址|故居|古镇/.test(canonicalName) ? ["文化"] : [])].map(cleanText).filter(Boolean))];
+    return {
+      id: spot.id, name: canonicalName, officialName: spot.officialName || spot.name, aliases: imageLookupNames(canonicalName, city.name), lat: Number(spot.lat), lng: Number(spot.lng),
+      category: spot.category, poiType: spot.category || "旅游景点", cluster: cleanText(spot.district || spot.address, "Unknown"),
+      recommendedDurationMin: clamp(spot.durationMin || 120, 60, 240), openingHours: spot.openingHours || null,
+      openingStatus: spot.openingHours ? "estimated" : "unknown", reservation: { status: "unknown", note: "未接入景区指定日期官方预约余量" },
+      indoor: /博物馆|展览|纪念馆|美术馆/.test(`${spot.name}${spot.category}`) ? true : /山|湖|园|湿地|古镇|街/.test(`${spot.name}${spot.category}`) ? false : null,
+      weatherFit: /博物馆|展览|纪念馆|美术馆/.test(`${spot.name}${spot.category}`) ? ["降雨备选"] : ["无强降雨时优先"],
+      bestTimes: tags.includes("夜景") ? ["日落后"] : tags.includes("摄影") ? ["上午柔光", "日落前"] : ["开放时段内"],
+      seasonFit: { status: "unknown", note: profile.seasonalNeeds?.length ? `用户关注 ${profile.seasonalNeeds.join("、")}；尚无景区官方指定日期状态，不能当作确定盛花/秋色` : "未要求季节限定" },
+      tags, requiredByUser: Boolean(spot.requiredByUser), sourceName: spot.sourceName || spot.source || "公开地图 / 中文维基百科",
+      sourceUrl: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt,
+      sources: [{ name: spot.sourceName || spot.source || "公开地图 / 中文维基百科", url: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt, status: spot.openingHours ? "entity-verified" : "entity-only" }],
+      unknown: [!spot.openingHours ? "开放时间" : null, "指定日期预约", "官方实时客流"].filter(Boolean),
+    };
+  });
+  const knowledge = {
+    profile: { ...profile, freeText: undefined, extractionModel: undefined }, city,
+    spots: plannerSpots,
     weather: weather.tripForecast,
     hotel,
-    spots: spots.slice(0, 32).map(spot => ({ id: spot.id, name: spot.name, category: spot.category, lat: spot.lat, lng: spot.lng, openingHours: spot.openingHours || null, requiredByUser: spot.requiredByUser })),
-    replanContext: replanContext ? {
-      adjustment: replanContext.adjustment,
-      activeVariant: replanContext.activeVariant,
-      previousDays: replanContext.days,
-    } : null,
-    rules: [
-      "每套方案必须包含全部 requiredByUser 景点",
-      "同一大型景区只安排主实体一次，不要把入口、殿堂、支线 POI 当成多个独立景点重复堆叠",
-      "不得声称未知的实时客流、预约、房价、开放状态",
-      "每天保留午餐和休息时间",
-      "只可引用 spots 列表中的 id",
-      replanContext ? "这是已有行程的局部调整：对用户没有明确要求修改的日期，尽量保持 previousDays 中景点 ID 与顺序不变" : "这是首次规划",
+    trafficMatrix,
+    unknowns: [
+      "官方实时客流（未接入，不能标记 Verified）",
+      "景区指定日期预约余量",
+      ...(weather.tripForecast.some((day: any) => day.quality === "unavailable") ? ["超出预报窗口的逐日天气"] : []),
+      ...(!hotel.pricedCount ? ["指定日期酒店成交价与余房"] : []),
     ],
+    dataPolicy: { verified: "仅来自工具返回", prediction: "必须显示 Prediction 与依据", unknown: "不得升级为 Verified" },
   };
-  const content = await deepSeek(env, [
-    { role: "system", content: "你是旅行路线排序器。只可使用输入中已核验的景点 ID，不能创建新景点或实时数据。输出 JSON：{variants:[{style,title,strategy,daySpotIds:string[][]}]}，正好 3 套，每套天数与 request.days 一致。" },
-    { role: "user", content: JSON.stringify(toolContext) },
-  ], true, 4200);
-  const aiAdvice: any = parseJsonObject(content);
-  if (!Array.isArray(aiAdvice?.variants) || aiAdvice.variants.length < 3) throw new Error("DeepSeek 第二阶段没有生成完整的三套路线结构，请重试");
-
-  const byId = new Map(spots.map(spot => [spot.id, spot]));
-  const requiredIds = required.map(spot => spot.id);
-  const labels = profile.requestedVariants.length >= 3 ? profile.requestedVariants : ["经典覆盖", "自然摄影", "轻松避峰"];
+  const generated = await generatePlannerDraft(profile, knowledge, env, replanContext);
+  const spotsById = new Map(spots.map((spot: any) => [spot.id, requiredNameById.has(spot.id) ? { ...spot, name: requiredNameById.get(spot.id), officialName: spot.officialName || spot.name } : spot]));
   const alternatives: any[] = [];
   const affectedDayIndexes = replanContext ? adjustmentDayIndexes(replanContext.adjustment, profile.days) : [];
+
   for (let variantIndex = 0; variantIndex < 3; variantIndex += 1) {
-    const advised = aiAdvice?.variants?.[variantIndex];
-    const id = variantIndex === 0 ? "hot" : variantIndex === 1 ? "niche" : "relax";
-    let buckets: any[][] = [];
-    if (Array.isArray(advised?.daySpotIds) && advised.daySpotIds.length === profile.days) {
-      buckets = advised.daySpotIds.map((ids: any[]) => uniqueSpots((ids || []).map(id => byId.get(cleanText(id))).filter(Boolean)).slice(0, ["slow", "relax", "轻松"].includes(profile.pace) ? 2 : 3));
+    const draftVariant = generated.draft.variants[variantIndex];
+    const variantId = ["hot", "niche", "relax"][variantIndex];
+    let daysPlan = Array.from({ length: profile.days }, (_, dayIndex) => {
+      const draftDay = draftVariant?.days?.[dayIndex] || fallbackPlannerDraft(profile, spots, trafficMatrix, "模型缺少日期").variants[variantIndex].days[dayIndex];
+      return planDayFromDraft(draftDay, dayIndex, spotsById, trafficMatrix, weather.tripForecast[dayIndex], profile);
+    });
+    const missingRequired = required.filter((requiredSpot: any) => !daysPlan.flatMap((day: any) => day.items).some((item: any) => item.id === requiredSpot.id && normalizeName(item.name) === normalizeName(requiredNameById.get(requiredSpot.id) || requiredSpot.name) && item.requiredByUser));
+    if (missingRequired.length && !generated.modelAudit.degraded) {
+      throw new Error(`确定性编译器拒绝模型草案：${draftVariant?.title || variantId} 缺少 ${missingRequired.map((spot: any) => requiredNameById.get(spot.id) || spot.name).join("、")}`);
     }
-    if (buckets.length !== profile.days || buckets.some(items => !items.length)) buckets = distribute(spots, profile, variantIndex);
-    if (replanContext && id === replanContext.activeVariant && affectedDayIndexes.length) {
-      for (let dayIndex = 0; dayIndex < profile.days; dayIndex += 1) {
-        if (affectedDayIndexes.includes(dayIndex)) continue;
-        const previous = replanContext.days.find((day: any) => Number(day.day) === dayIndex + 1);
-        const preserved = Array.isArray(previous?.items) && previous.items.length
-          ? previous.items.map((item: any) => byId.get(item.id) || item).filter((item: any) => item.id && item.name && Number.isFinite(item.lat) && Number.isFinite(item.lng))
-          : (previous?.spotIds || []).map((spotId: string) => byId.get(spotId)).filter(Boolean);
-        if (preserved.length) buckets[dayIndex] = uniqueSpots(preserved);
-      }
+    for (const requiredSpot of missingRequired) {
+      const targetIndex = Math.max(0, required.findIndex((spot: any) => spot.id === requiredSpot.id)) % profile.days;
+      const canonical = spotsById.get(requiredSpot.id) || requiredSpot;
+      const rebuilt = scheduleDay(uniqueSpots([canonical, ...daysPlan[targetIndex].items.filter((item: any) => !item.requiredByUser)]).slice(0, 2), profile, targetIndex, weather.tripForecast[targetIndex]);
+      rebuilt.degradedConstraintRepair = "DeepSeek 不可用时由确定性降级器恢复缺失的用户必去硬约束";
+      daysPlan[targetIndex] = rebuilt;
     }
-    buckets = buckets.map(items => items.filter(item => !requiredIds.includes(item.id)));
-    requiredIds.forEach((requiredId, requiredIndex) => {
-      let targetIndex = requiredIndex % profile.days;
-      if (replanContext && id === replanContext.activeVariant) {
-        const previousIndex = replanContext.days.findIndex((day: any) => (day.spotIds || []).includes(requiredId));
-        if (previousIndex >= 0 && previousIndex < profile.days) targetIndex = previousIndex;
-      }
-      const requiredSpot = byId.get(requiredId);
-      if (requiredSpot) buckets[targetIndex].unshift(requiredSpot);
-    });
-    const targetPerDay = ["slow", "relax", "轻松"].includes(profile.pace) || variantIndex === 2 ? 2 : 3;
-    const usedIds = new Set(buckets.flat().map(item => item.id));
-    buckets = buckets.map(items => {
-      const filled = [...items];
-      while (filled.length < targetPerDay) {
-        const anchor = filled.at(-1);
-        const next = spots
-          .filter(candidate => !usedIds.has(candidate.id) && !candidate.requiredByUser)
-          .map(candidate => ({ candidate, distance: anchor ? haversine(anchor.lat, anchor.lng, candidate.lat, candidate.lng) : 0 }))
-          .sort((left, right) => left.distance - right.distance || Number(right.candidate.plannerScore || 0) - Number(left.candidate.plannerScore || 0))[0]?.candidate;
-        if (!next) break;
-        filled.push(next);
-        usedIds.add(next.id);
-      }
-      return filled;
-    });
-    buckets = buckets.map(items => {
-      const fixed = items.filter(item => item.requiredByUser);
-      const optional = items.filter(item => !item.requiredByUser);
-      return [...fixed, ...optional.slice(0, Math.max(0, targetPerDay - fixed.length))];
-    });
-    const daysPlan = buckets.map((items, index) => scheduleDay(items, profile, index, weather.tripForecast[index]));
+    if (generated.modelAudit.degraded) {
+      const seenRequiredIds = new Set<string>();
+      daysPlan = daysPlan.map((day: any, dayIndex: number) => {
+        let changed = false;
+        const cleanedItems = day.items.flatMap((item: any) => {
+          if (!requiredNameById.has(item.id)) return [{ ...item, requiredByUser: false }];
+          if (seenRequiredIds.has(item.id)) { changed = true; return []; }
+          seenRequiredIds.add(item.id);
+          const canonicalName = requiredNameById.get(item.id);
+          if (item.name !== canonicalName || !item.requiredByUser) changed = true;
+          return [{ ...item, name: canonicalName, requiredByUser: true }];
+        });
+        if (!changed) return { ...day, items: cleanedItems };
+        const rebuilt = scheduleDay(cleanedItems, profile, dayIndex, weather.tripForecast[dayIndex]);
+        rebuilt.degradedConstraintRepair = "透明降级器已去除重复必去节点并恢复标准名称";
+        return rebuilt;
+      });
+    }
+    if (replanContext && variantId === replanContext.activeVariant && affectedDayIndexes.length) {
+      daysPlan = daysPlan.map((day: any, dayIndex: number) => {
+        if (affectedDayIndexes.includes(dayIndex)) return day;
+        const previous = replanContext.days.find((item: any) => Number(item.day) === dayIndex + 1);
+        if (!previous?.items?.length) return day;
+        const preservedItems = previous.items.map((item: any) => spotsById.get(item.id) ? { ...spotsById.get(item.id), ...item } : item);
+        const preservedBlocks = preservedItems.map((item: any) => ({ type: "attraction", item, startTime: item.startTime, endTime: item.endTime, durationMin: item.durationMin }));
+        return { ...day, items: preservedItems, blocks: preservedBlocks, preserved: true };
+      });
+    }
     for (const day of daysPlan) {
       day.route = await routeFor(day.items);
       await enrichDayTransit(day, city);
+      day.dining = await Promise.all(day.blocks.filter((block: any) => block.type === "rest" && block.mealType && block.anchor).map((block: any) => diningFor(city.name, block.anchor.lat, block.anchor.lng, block.mealType)));
     }
-    const transportEstimate = Math.round(daysPlan.reduce((sum, day) => sum + day.route.distance, 0) / 1000 * 2.2);
+    const transportEstimate = Math.round(daysPlan.reduce((sum: number, day: any) => sum + Number(day.route?.distance || 0), 0) / 1000 * 2.2);
     alternatives.push({
-      id, city: city.name, cityRef: city, startDate: profile.startDate, days: profile.days, budget: profile.budget,
-      style: profile.style, preferences: profile.preferences, pace: profile.pace, variant: id, transport: profile.transport,
-      title: cleanText(advised?.title, `${city.name}${labels[variantIndex] || "旅行"}方案`),
-      strategy: cleanText(advised?.strategy, labels[variantIndex] || "已核验景点的顺路组合"), weather,
+      id: variantId, city: city.name, cityRef: city, startDate: profile.startDate, days: profile.days, budget: profile.budget,
+      style: draftVariant?.style || profile.style, preferences: profile.preferences, pace: profile.pace, variant: variantId, transport: profile.transport,
+      title: draftVariant?.title || ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex], strategy: draftVariant?.strategy || "依据候选景点知识包与交通矩阵", weather,
       daysPlan, hotelPlan: hotel,
-      budgetBreakdown: { knownEstimate: transportEstimate, limit: profile.budget, items: [
-        { name: "市内交通透明估算", amount: transportEstimate }, { name: "住宿", amount: null }, { name: "门票", amount: null }, { name: "餐饮", amount: null },
-      ], note: "只汇总可透明估算的市内交通；实时房价、票价与餐费未核验，保持未知" },
-      dataSources: { weather: "Open-Meteo", spots: "中文维基百科公开页面与坐标；必选项由 OSM Nominatim 精确核验", hotels: "用户指定住宿区域（无实时房价）", routing: "OSRM；失败时坐标距离×1.25透明估算", transit: "道路耗时参考，未接入实时公交班次", crowd: "未接入官方可验证来源，全部保持未知", reservations: "未接入景区官方预约接口" },
-      generatedAt: new Date().toISOString(),
-      changeScope: replanContext && id === replanContext.activeVariant ? {
-        mode: affectedDayIndexes.length ? "minimum-disruption" : "global-with-preservation-guidance",
-        affectedDays: affectedDayIndexes.map(index => index + 1),
-        preservedDays: affectedDayIndexes.length ? Array.from({ length: profile.days }, (_, index) => index + 1).filter(day => !affectedDayIndexes.includes(day - 1)) : [],
-        note: affectedDayIndexes.length ? "后端固定未受影响日期的可用景点 ID 与顺序，再重新校验路线。" : "未识别到明确日期，已要求模型尽量保留原结构并提供全局变更预览。",
-      } : null,
+      budgetBreakdown: { knownEstimate: transportEstimate, limit: profile.budget, items: [{ name: "市内交通透明估算", amount: transportEstimate }, { name: "住宿", amount: hotel.pricedCount ? hotel.candidates?.[0]?.price || null : null }, { name: "门票", amount: null }, { name: "餐饮", amount: null }], note: "只汇总有数据来源的金额；缺失价格保持 Unknown" },
+      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", images: "高德官方 / Wikimedia / Unsplash", crowd: "Unknown；节假日风险仅可标记 Prediction", reservations: "Unknown" },
+      generatedAt: fetchedAt,
+      planningDecision: { model: generated.modelAudit.plannerModel, repairModel: generated.modelAudit.repairModel, repairRounds: generated.modelAudit.repairRounds, formatRepairs: generated.modelAudit.formatRepairs, networkToolCalls: generated.modelAudit.toolCalls, degraded: generated.modelAudit.degraded, degradationReason: generated.modelAudit.degradationReason || null, draftCompilerIssues: generated.modelAudit.compilerIssues },
+      changeScope: replanContext && variantId === replanContext.activeVariant ? { mode: affectedDayIndexes.length ? "minimum-disruption" : "global-with-preservation-guidance", affectedDays: affectedDayIndexes.map((index: number) => index + 1), preservedDays: Array.from({ length: profile.days }, (_, index) => index + 1).filter((day) => !affectedDayIndexes.includes(day - 1)), note: "未受影响日期的稳定景点 ID 与原时间由后端锁定，不交给模型重写。" } : null,
     });
   }
+
   for (const plan of alternatives) {
     plan.evaluation = planEvaluation(plan, profile, spots.length);
-    plan.optimization = {
-      algorithm: "DeepSeek 白名单排序 + 空间最近邻重排",
-      candidateCount: spots.length,
-      selectedCount: plan.evaluation.evidence.selectedCount,
-      requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`,
-      note: "分数由本次已核验景点、实际日程与交通段计算，不是模型自报分数。",
-    };
-    plan.candidatePool = spots.slice(0, 12).map(spot => ({
-      id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore,
-      scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis,
-      requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences,
-      selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)),
-    }));
-    plan.dataSources = {
-      weather: weather.source || "MCPMarket 天气查询",
-      spots: "中文维基百科公开页面与坐标；必选项由 OSM Nominatim 核验；高德 POI 用于精确图片补充",
-      hotels: hotel.candidates?.length ? "高德地图官方酒店 POI + MCPMarket 酒店在售产品" : "酒店服务已调用但无可核验结果，保留用户住宿区域",
-      routing: "OSRM 路线几何；失败时坐标距离×1.25 透明估算",
-      transit: "高德地图 MCP 公交/地铁方案；共享免费额度不足时透明回退",
-      images: "高德官方 POI 精确照片优先；Unsplash 相关性补图；高德免费 MCP 与中文维基百科实体图片兜底",
-      dining: "高德地图 MCP 路线附近餐饮 POI；无返回时保留自由用餐",
-      crowd: "未接入官方可验证来源，全部保持未知",
-      reservations: "未接入景区官方预约接口",
-    };
+    plan.optimization = { algorithm: "DeepSeek V4 Pro 完整时间轴 + 规划前交通矩阵 + Travel Compiler", candidateCount: spots.length, selectedCount: plan.evaluation.evidence.selectedCount, requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`, note: "交通矩阵在模型调用前生成；AI 草案经确定性校验，必要时最多两轮修复。" };
+    plan.candidatePool = spots.slice(0, 16).map((spot: any) => ({ id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore, scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis, requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences, selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)) }));
     Object.assign(plan, analyzePlanTrustV2(plan, profile));
     plan.changeSet = null;
     if (replanContext && plan.id === replanContext.activeVariant) {
-      const previousDaysPlan = replanContext.days.map((previousDay: any) => {
-        const currentDay = plan.daysPlan.find((day: any) => Number(day.day) === Number(previousDay.day));
-        const previousItems = Array.isArray(previousDay.items) && previousDay.items.length
-          ? previousDay.items
-          : (previousDay.spotIds || []).map((spotId: string) => byId.get(spotId)).filter(Boolean);
-        return {
-          day: Number(previousDay.day),
-          date: currentDay?.date || plan.startDate,
-          items: previousItems.map((spot: any) => ({ ...spot })),
-          blocks: [],
-        };
-      });
-      const previousPlan = { ...plan, daysPlan: previousDaysPlan, changeSet: null };
-      plan.changeSet = computeChangeSet(previousPlan, plan, affectedDayIndexes.map((index: number) => index + 1));
+      const previousDaysPlan = replanContext.days.map((previousDay: any) => ({ day: Number(previousDay.day), date: addDays(profile.startDate, Number(previousDay.day) - 1), items: previousDay.items || [], blocks: [] }));
+      plan.changeSet = computeChangeSet({ ...plan, daysPlan: previousDaysPlan, changeSet: null }, plan, affectedDayIndexes.map((index: number) => index + 1));
     }
   }
-  const requiredCoverage = alternatives.map(plan => requiredIds.every(id => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => item.id === id)));
-  if (requiredCoverage.some(covered => !covered)) throw new Error("必选景点覆盖校验失败，已拒绝返回不完整路线");
-  const transitLegs = alternatives.flatMap(plan => plan.daysPlan).flatMap((day: any) => day.blocks).filter((block: any) => block.type === "leg");
+
+  const requiredCoverage = alternatives.every((plan: any) => profile.requiredAttractions.every((name: string) => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => normalizeName(item.name) === normalizeName(name) && item.requiredByUser)));
+  if (!requiredCoverage) {
+    const details = alternatives.map((plan: any) => `${plan.id}=[${plan.daysPlan.flatMap((day: any) => day.items).filter((item: any) => item.requiredByUser).map((item: any) => `${item.id}:${item.name}`).join("、")}]`).join("；");
+    throw new Error(`最终编译器拒绝返回：至少一套方案缺少用户必去景点；实际必去节点 ${details}`);
+  }
+  const transitLegs = alternatives.flatMap((plan: any) => plan.daysPlan).flatMap((day: any) => day.blocks).filter((block: any) => block.type === "leg");
   const amapVerifiedLegs = transitLegs.filter((block: any) => block.mcpTransport).length;
-  const progress = { phase: "route", title: "路线规划与工具校验已完成", items: [
-    `✓ 获取并去重带坐标候选景点 ${spots.length} 个`,
-    `✓ 核验用户必选景点 ${required.length} 个；3 套方案覆盖校验全部通过`,
-    `✓ 酒店查询状态：${hotel.candidates?.length ? `返回 ${hotel.candidates.length} 个地图可核验候选，其中 ${hotel.pricedCount || 0} 个带来源参考价` : hotel.mcpStatus === "empty" ? "已查询但暂无候选" : "已透明回退，不虚构酒店"}`,
-    `✓ 为 ${profile.days * 3} 个日程计算路线；高德 MCP 已校验 ${amapVerifiedLegs}/${transitLegs.length} 个交通段`,
-    `✓ 已按 ${profile.dayStart}—${profile.dayEnd} 安排游玩，并插入午餐、晚餐与弹性休息节点`,
-    `✓ 已计算候选景点可解释评分，并对每天路线执行空间最近邻重排以减少折返`,
-    `✓ 已生成 3 套差异化方案，并再次检查必选项`,
-    weather.tripForecast.some((day: any) => day.quality === "unavailable") ? "● 部分日期超出天气预报范围，保持不可用而非套用今日天气" : `✓ 天气已由 ${weather.source} 覆盖`,
-    "● 酒店价格只展示高德最低参考价或 MCP 在售套餐参考价；指定日期最终房价与余房仍需下单前复核",
-  ], formSync: profile };
-  const alternativeComparison = alternatives.map(plan => ({
-    id: plan.id, title: plan.title, strategy: plan.strategy,
-    reliability: plan.compiler?.reliability, fragility: plan.fragility?.score,
-    informationCompleteness: plan.compiler?.informationCompleteness,
-    minBufferMinutes: plan.compiler?.minBufferMinutes,
-    selectedCount: plan.evaluation?.evidence?.selectedCount,
-    transportMinutes: plan.evaluation?.evidence?.transportMinutes,
-    unknownCount: plan.uncertainty?.count,
-    verificationCount: plan.minimumVerification?.length,
-    stressResilientCount: plan.stressTest?.resilientCount,
-  }));
+  const progressItems = [
+    `✓ 实际获取候选景点 ${rawSpots.length} 个，过滤后进入知识包 ${spots.length} 个`,
+    `✓ 已核验用户必去景点 ${required.length} 个；三套方案均通过覆盖检查`,
+    `✓ 已在核心规划前计算交通矩阵 ${trafficMatrix.legs.length} 条有向路线（${trafficMatrix.source}）`,
+    `✓ 天气状态：${providerBundle.weather.status === "ready" ? `由 ${weather.source} 返回` : "Unavailable，未套用其他日期"}`,
+    `✓ 酒店状态：${hotel.candidates?.length ? `${hotel.candidates.length} 个候选，${hotel.pricedCount || 0} 个带来源参考价` : "Unknown，未生成假酒店或假价格"}`,
+    `✓ ${generated.modelAudit.plannerModel} 已生成完整活动时间轴；联网查询工具实际调用 ${generated.modelAudit.toolCalls.length} 次`,
+    `✓ Travel Compiler 检出 ${generated.modelAudit.compilerIssues.length} 项并执行 ${generated.modelAudit.repairRounds} 轮 AI 修复`,
+    `✓ 高德 MCP 校验 ${amapVerifiedLegs}/${transitLegs.length} 个最终交通段；其余保留矩阵来源`,
+    `✓ 三套方案差异检查：最大 Jaccard ${Number(generated.audit.differences.maxJaccard || 0).toFixed(2)}`,
+    generated.modelAudit.degraded ? `● 当前为透明降级结果：${generated.modelAudit.degradationReason}` : "✓ 最终方案通过硬约束核验",
+  ];
+  const progress = { phase: "route", title: generated.modelAudit.degraded ? "规划已完成（已明确标注降级）" : "三套路线已通过最终检查", items: progressItems, formSync: profile, collapsible: true, generatedAt: fetchedAt };
+  const alternativeComparison = alternatives.map((plan: any) => ({ id: plan.id, title: plan.title, reliability: plan.compiler?.reliability, fragility: plan.fragility?.score, informationCompleteness: plan.compiler?.informationCompleteness, minBufferMinutes: plan.compiler?.minBufferMinutes, selectedCount: plan.evaluation?.evidence?.selectedCount, transportMinutes: plan.evaluation?.evidence?.transportMinutes, unknownCount: plan.uncertainty?.count, verificationCount: plan.minimumVerification?.length, stressResilientCount: plan.stressTest?.resilientCount }));
   const activeId = replanContext?.activeVariant || "relax";
-  const generatedAt = new Date().toISOString();
-  const activePlan = alternatives.find(plan => plan.id === activeId) || alternatives[0];
+  const activePlan = alternatives.find((plan: any) => plan.id === activeId) || alternatives[0];
   const workspaceId = `travel-${cleanText(city.name).replace(/\s+/g, "-")}-${profile.startDate}`;
   const result = {
-    request: profile,
-    alternatives,
-    alternativeComparison,
-    activeId,
-    generatedAt,
+    request: profile, alternatives, alternativeComparison, activeId, generatedAt: fetchedAt,
     agentEvents: buildPlanningEvents(workspaceId, profile, activePlan),
-    planner: {
-      type: "two-stage-deepseek-with-mcp-tools",
-      stages: ["DeepSeek 需求结构化", "天气 / 酒店 / 高德 MCP 与公开数据核验", "DeepSeek 景点排序", "路线工具补全", "证据图、Travel Compiler、未知项、脆弱性与节点级情景模拟"],
-    },
+    planner: { type: "deepseek-v4-constraint-solver-with-server-tools", extractionModel: profile.extractionModel || deepSeekModel(env, "extract"), plannerModel: generated.modelAudit.plannerModel, repairModel: generated.modelAudit.repairModel, thinking: { planner: "enabled", repair: "enabled", hiddenReasoningExposed: false }, network: { enabled: true, implementation: "DeepSeek tool calls -> server-side Wikimedia / 高德查询", actualToolCalls: generated.modelAudit.toolCalls }, trafficMatrix: { readyBeforePlanner: true, source: trafficMatrix.source, legCount: trafficMatrix.legs.length, fetchedAt: trafficMatrix.fetchedAt }, repairRounds: generated.modelAudit.repairRounds, degraded: generated.modelAudit.degraded, stages: ["V4 Flash 需求结构化", "真实数据与联网工具", "规划前交通矩阵", "V4 Pro 完整时间轴", "确定性编译", "V4 Pro 局部修复", "最终核验"] },
     progress,
   };
   assertPlanContract(result);

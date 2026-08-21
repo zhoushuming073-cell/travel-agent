@@ -78,6 +78,17 @@
 .validation-crowd h3 { font-size: 12px; }.validation-crowd p { display: grid; gap: 2px; padding: 7px 0; border-bottom: 1px solid #edf1f5; }.validation-crowd p b { font-size: 9px; }.validation-crowd p span { color: #7b899b; font-size: 8px; }
 
 .react-ready-stage { max-width: 1480px; margin: 0 auto; padding: 18px 26px 116px; }
+.planning-record { margin: 12px 0 16px; overflow: hidden; }
+.planning-record summary { align-items: center; cursor: pointer; display: grid; gap: 6px 14px; grid-template-columns: 1fr auto auto; list-style: none; padding: 15px 18px; }
+.planning-record summary::-webkit-details-marker { display: none; }
+.planning-record summary span { color: var(--ink); font-size: 14px; font-weight: 750; }
+.planning-record summary small { color: var(--muted); font-size: 12px; }
+.planning-record summary b { color: var(--accent); font-size: 12px; }
+.planning-record[open] summary { border-bottom: 1px solid var(--line); }
+.planning-record > div { display: grid; gap: 7px; padding: 15px 18px 17px; }
+.planning-record h3 { font-size: 14px; margin: 0 0 4px; }
+.planning-record p { color: var(--muted); font-size: 12px; margin: 0; }
+.degraded-note { color: #a35313; font-size: 12px; margin-top: 5px; }
 .react-ready-stage .trip-health { grid-template-columns: repeat(7,minmax(0,1fr)); }
 .react-ready-stage .trip-health article { min-width: 0; }
 .react-ready-stage .trip-health article strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -146,6 +157,8 @@
   .react-composer { left: 14px !important; }
 }
 @media (max-width:620px) {
+  .planning-record summary { grid-template-columns: 1fr auto; }
+  .planning-record summary small { grid-column: 1 / -1; grid-row: 2; }
   .workspace-header { position: sticky; top: 0; z-index: 20; background: rgba(255,255,255,.96); }
   .react-stage-progress { width: calc(100% - 18px); }.react-stage-progress li span { font-size: 7px; }
   .react-empty-stage .query-card { grid-template-columns: 1fr; }.react-empty-stage .primary-button { min-height: 48px; }

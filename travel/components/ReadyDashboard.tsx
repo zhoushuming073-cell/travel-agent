@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { AgentEvent, UiPlan } from "../types.ts";
+import type { AgentEvent, PlanningProgress, UiPlan } from "../types.ts";
 import { AgentActivity } from "./AgentActivity.tsx";
 import { EvidencePanel } from "./EvidencePanel.tsx";
 import { ExecutionMode } from "./ExecutionMode.tsx";
@@ -17,6 +17,7 @@ interface Props {
   onSelectPlan: (id: string) => void;
   onRestoreVersion: (id: string) => void;
   onOpenReplan: () => void;
+  progress?: PlanningProgress | null;
 }
 
 function paceLabel(value?: string): string { return value === "relax" || value === "slow" ? "轻松" : value === "tight" ? "紧凑" : "适中"; }
@@ -44,7 +45,7 @@ function Hotels({ plan }: { plan: UiPlan }) {
   return <section className="ready-hotel-card"><header><b>住宿规划</b><span>价格仅显示可追溯来源</span></header>{hotels.length ? hotels.slice(0, 5).map((hotel) => <article key={`${hotel.name}-${hotel.address}`}><div><strong>{hotel.name ?? "酒店候选"}</strong><span>{hotel.address ?? hotel.source ?? "已调用酒店工具"}</span></div><b>{hotel.price ? `¥${hotel.price}` : "价格待核验"}<small>{hotel.priceType ?? "指定日期成交价未知"}</small></b></article>) : <p>酒店服务已查询，但没有可靠候选或价格；结果保持 Unknown。</p>}</section>;
 }
 
-export function ReadyDashboard({ plan, plans, events, versions, onSelectPlan, onRestoreVersion, onOpenReplan }: Props) {
+export function ReadyDashboard({ plan, plans, events, versions, onSelectPlan, onRestoreVersion, onOpenReplan, progress }: Props) {
   const [tab, setTab] = useState<"map" | "weather" | "crowd" | "evidence">("map");
   const [selectedDay, setSelectedDay] = useState(plan.daysPlan[0]?.day ?? 1);
   const [selectedSpotId, setSelectedSpotId] = useState<string | null>(plan.daysPlan[0]?.items[0]?.id ?? null);
@@ -60,6 +61,7 @@ export function ReadyDashboard({ plan, plans, events, versions, onSelectPlan, on
   return <section className="ready-stage react-ready-stage">
     <ExecutionMode plan={plan} now={new Date()} onReplan={onOpenReplan} onRefresh={() => setLastChecked(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }))} lastChecked={lastChecked}/>
     <header className="ready-trip-header"><div><span className="section-code">ACTIVE TRIP</span><h1>{plan.city} · {plan.days}日游</h1><p>{plan.startDate} · {plan.days} 天 · 预算约 ¥{plan.budget ?? "未知"}</p></div><div className="ready-trip-actions"><button type="button">☆ 收藏</button><button type="button">分享</button><button type="button">导出行程</button></div></header>
+    {progress?.items?.length ? <details className="planning-record panel"><summary><span>查看本次规划记录</span><small>{progress.generatedAt ? `数据更新于 ${new Date(progress.generatedAt).toLocaleString("zh-CN")}` : progress.title}</small><b>展开</b></summary><div><h3>{progress.title}</h3>{progress.items.map((item) => <p key={item}>{item}</p>)}{plan.planningDecision?.degraded ? <strong className="degraded-note">透明降级：{plan.planningDecision.degradationReason}</strong> : null}</div></details> : null}
     <section className="trip-health"><article className="health-metric"><span>匹配度</span><strong>{plan.evaluation?.overall ?? "—"}%</strong><small>偏好匹配</small></article><article className="health-metric"><span>预计花费</span><strong>{plan.budgetBreakdown?.knownEstimate ? `¥${plan.budgetBreakdown.knownEstimate}` : "Unknown"}</strong><small>仅已知项目</small></article><article className="health-metric"><span>路线总里程</span><strong>{routeDistance} km</strong><small>道路路由 / 透明估算</small></article><article className="health-metric"><span>拥挤风险</span><strong>{crowdRisk}</strong><small>非实时人数</small></article><article className="health-metric"><span>节奏评分</span><strong>{paceLabel(plan.pace)}</strong><small>综合缓冲</small></article><article className="health-metric"><span>行程可靠度</span><strong>{plan.compiler?.reliability ?? "—"}/100</strong><small>{plan.compiler?.status}</small></article><article className="health-metric"><span>Fragility</span><strong>{plan.fragility?.score ?? "—"}</strong><small>越低越稳</small></article></section>
     <div className="ready-grid"><section className="itinerary panel"><div className="section-heading-row"><div><span className="section-code">ITINERARY / DECISION</span><h2>{plan.title}</h2><p>{plan.strategy}</p></div><div className="variant-control-row"><div className="variant-tabs">{plans.map((item) => <button className={item.id === plan.id ? "active" : ""} key={item.id} type="button" onClick={() => onSelectPlan(item.id)}><b>{item.id === "relax" ? "舒适版" : item.id === "hot" ? "精华版" : "错峰版"}</b><small>可靠 {item.compiler?.reliability ?? "—"} · 脆弱 {item.fragility?.score ?? "—"}</small></button>)}</div></div></div><ItineraryTimeline plan={plan} selectedDay={selectedDay} selectedSpotId={selectedSpotId} onSelectDay={setSelectedDay} onSelectSpot={selectSpot}/><div className="compiler-footnote"><span>✓ 行程已通过 Travel Compiler 2.0</span><b>最小缓冲 {plan.bufferAnalysis?.minBufferMinutes ?? 0} 分钟 · 关键未知 {plan.uncertainty?.importantCount ?? 0} 个</b></div></section>
       <aside className="decision-panel panel"><div className="decision-tabs">{([['map','行程地图'],['weather','天气预报'],['crowd','人流预测'],['evidence','数据依据']] as const).map(([id,label]) => <button className={tab === id ? "active" : ""} key={id} type="button" onClick={() => setTab(id)}>{label}</button>)}</div>{tab === "map" && <MapPanel plan={plan} selectedDay={selectedDay} selectedSpotId={selectedSpotId} onSelectSpot={selectSpot}/>} {tab === "weather" && <div className="decision-stack"><Weather plan={plan}/><Hotels plan={plan}/></div>} {tab === "crowd" && <Crowd plan={plan}/>} {tab === "evidence" && <EvidencePanel plan={plan}/>}</aside></div>

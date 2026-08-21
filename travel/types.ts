@@ -53,6 +53,8 @@ export interface PlanningProgress {
   title: string;
   items: string[];
   formSync?: TravelProfile;
+  collapsible?: boolean;
+  generatedAt?: string;
 }
 
 export interface PlanningResult {
@@ -63,6 +65,7 @@ export interface PlanningResult {
   alternativeComparison?: Array<Record<string, string | number | null | undefined>>;
   agentEvents?: AgentEvent[];
   progress?: PlanningProgress;
+  planner?: Record<string, unknown>;
 }
 
 export interface PendingChange {

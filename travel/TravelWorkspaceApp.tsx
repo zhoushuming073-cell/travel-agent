@@ -306,7 +306,7 @@ export function TravelWorkspaceApp() {
       {["FETCHING_DATA","ASSESSING_EVIDENCE","GENERATING_ITINERARY"].includes(stage) && <DataAcquisition request={draft} profile={profile} progress={progress}/>} 
       {stage === "VALIDATING_ITINERARY" && <ItineraryValidation plans={plans} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>} 
       {stage === "ERROR" && <section className="error-workspace panel"><span>!</span><h2>规划工具暂时不可用</h2><p>{error}</p><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><b>↻</b></button></section>} 
-      {["READY","EXECUTING","REPLANNING"].includes(stage) && activePlan && <ReadyDashboard plan={activePlan} plans={plans} events={events} versions={versions} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLInputElement>(".react-composer input")?.focus()}/>} 
+      {["READY","EXECUTING","REPLANNING"].includes(stage) && activePlan && <ReadyDashboard plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLInputElement>(".react-composer input")?.focus()}/>}
       {stage !== "EMPTY" && <PersistentChat busy={busy} messages={messages} onSend={(text) => void sendComposer(text)}/>} 
       {events.length > 0 && !["READY","EXECUTING","REPLANNING"].includes(stage) && <AgentActivity events={events}/>} 
     </main>
