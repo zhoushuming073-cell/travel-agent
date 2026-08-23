@@ -32,7 +32,7 @@ export function DataAcquisition({ request, profile, progress, onCancel }: Props)
       })}</div>
       <div className="data-truth-grid">
         <section><Icon name="search"/><div><strong>先核验实体</strong><p>景点名称、坐标和来源返回后才进入候选池。</p></div></section>
-        <section><Icon name="train"/><div><strong>再计算交通矩阵</strong><p>路线矩阵完成后，DeepSeek 才开始安排每日时间轴。</p></div></section>
+        <section><Icon name="train"/><div><strong>再计算交通矩阵</strong><p>路线矩阵完成后，DeepSeek V4 Pro 才开始联网核验并安排每日时间轴。</p></div></section>
         <section><Icon name="alert"/><div><strong>无法核验就留空</strong><p>客流、预约、远期天气和指定日期房价可能显示“暂未核验”。</p></div></section>
       </div>
       <div className="agent-live-log"><b>{progress?.title ?? "正在联网获取可验证的旅行数据……"}</b>{items.slice(-5).map((line) => <span key={line}>{line.replaceAll("Unknown", "暂未核验")}</span>)}</div>

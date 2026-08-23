@@ -5,6 +5,13 @@ import { handleTravelApi } from "./travel-api";
 
 interface Env {
   ASSETS: Fetcher;
+  AI_API_KEY?: string;
+  AI_API_BASE_URL?: string;
+  AI_EXTRACT_MODEL?: string;
+  AI_PLANNER_MODEL?: string;
+  AI_REPAIR_MODEL?: string;
+  AI_REPAIR_FALLBACK_MODEL?: string;
+  AI_EXPLAIN_MODEL?: string;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
   DEEPSEEK_EXTRACT_MODEL?: string;

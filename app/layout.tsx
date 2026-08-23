@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://smart-travel-cn-2026.zhoushuming.chatgpt.site"),
   title: "智能旅游助手",
-  description: "DeepSeek V4 约束求解、受控联网工具与真实交通矩阵驱动的中国旅行规划助手。",
+  description: "GLM-5 需求理解、DeepSeek V4 Pro 联网核验与约束决策驱动的中国旅行规划助手。",
   openGraph: {
     title: "智能旅游助手",
     description: "从一句想法，到一份真正能出发的中国旅行行程。",

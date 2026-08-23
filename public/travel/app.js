@@ -523,10 +523,10 @@ async function loadHealth() {
     const ai = health.ai || {};
     const available = ['live', 'configured'].includes(ai.status);
     $('#topModelDot').className = `status-dot ${available ? 'live' : 'offline'}`;
-    $('#topModelStatus').textContent = available ? `DeepSeek · ${ai.model}` : 'DeepSeek 未配置';
+    $('#topModelStatus').textContent = available ? `元景 · ${ai.model}` : '元景 AI 未配置';
     $('#agentState').textContent = available ? ai.model : '离线';
     $('#agentState').className = `state-label ${available ? 'success' : 'offline'}`;
-    $('#agentNote').textContent = ai.note || 'DeepSeek 只使用后端提供的已验证工具数据。';
+    $('#agentNote').textContent = ai.note || 'GLM 负责理解与咨询，DeepSeek 负责规划与决策。';
     $('#agentInput').disabled = !available;
     $('#agentSend').disabled = !available;
   } catch (error) {
@@ -536,7 +536,7 @@ async function loadHealth() {
 
 function renderSources() {
   const ai = state.health?.ai || {};
-  const rows = [{ name: 'DeepSeek 路线规划', provider: ai.model || '未配置', status: ai.status, note: ai.note }, ...(state.health?.services || [])];
+  const rows = [{ name: '元景双模型', provider: `${ai.extractionModel || 'GLM-5'} / ${ai.plannerModel || ai.model || 'DeepSeek V4 Pro'}`, status: ai.status, note: ai.note }, ...(state.health?.services || [])];
   $('#sourceList').innerHTML = rows.slice(0, 7).map(row => `<div><span class="source-status ${row.status === 'live' ? 'live' : row.status === 'estimate' ? 'estimate' : row.status === 'offline' ? 'offline' : 'pending'}"></span><b>${esc(row.name)}</b><small>${statusLabel(row.status)}</small></div>`).join('');
   const mcpRows = Object.values(state.providerStatus?.providers || {});
   $('#sourceDialogBody').innerHTML = [...rows.map(row => ({ ...row, group: '运行工具' })), ...mcpRows.map(row => ({ ...row, provider: row.role, note: row.fallback || row.note, group: '可选 MCP' }))]
@@ -551,7 +551,7 @@ function renderSources() {
 function renderEvidenceSourceGrid(rows = []) {
   const root = $('#evidenceSourceGrid');
   if (!root) return;
-  const preferred = rows.filter(row => !/DeepSeek/i.test(row.name)).slice(0, 6);
+  const preferred = rows.filter(row => !/双模型|DeepSeek|GLM/i.test(row.name)).slice(0, 6);
   const sourceRows = preferred.length ? preferred : [
     { name: '景点与地图', status: 'unknown', provider: '等待查询' },
     { name: '天气预报', status: 'unknown', provider: '等待查询' },
@@ -742,7 +742,7 @@ function applyRequestFormSync(data) {
     ['住宿区域', data.lodgingArea || '未指定', true],
   ];
   const card = $('#aiSyncCard');
-  $('#aiSyncSource').textContent = data.source || 'DeepSeek 第 1 阶段';
+  $('#aiSyncSource').textContent = data.source || 'GLM-5 需求理解';
   $('#aiSyncFields').innerHTML = items.map(([label, value, wide]) => `<div class="ai-sync-item${wide ? ' wide' : ''}"><span>${esc(label)}</span><strong title="${esc(value)}">${esc(value)}</strong></div>`).join('');
   card.hidden = false;
   card.classList.remove('syncing');
@@ -902,12 +902,12 @@ function startPlanningProgress() {
   state.pendingReadyResult = null;
   $('#aiSyncCard').hidden = true;
   $('#requestEcho').textContent = $('#requestText').value.trim() || '未输入补充文案，使用旅行参数进行规划。';
-  $('#profileSummary').innerHTML = '<div class="data-empty">DeepSeek 正在把原始文案整理为目的地、日期、人数、偏好与硬约束。</div>';
+  $('#profileSummary').innerHTML = '<div class="data-empty">GLM-5 正在把原始文案整理为目的地、日期、人数、偏好与硬约束。</div>';
   ['profileNodeCity', 'profileNodeDuration', 'profileNodeParty', 'profileNodePreference', 'profileNodePace', 'profileNodeRequired'].forEach(id => { $(`#${id}`).textContent = '识别中'; });
-  $('#profileDetailGrid').innerHTML = '<div class="stage-empty">DeepSeek 正在把原始文字整理为结构化画像，尚未返回的字段保持“识别中”。</div>';
-  $('#profileCompletion').innerHTML = '<span>…</span><div><strong>正在建立用户画像</strong><small>画像完成后将自动进入资料搜集</small></div><b>等待 DeepSeek</b>';
+  $('#profileDetailGrid').innerHTML = '<div class="stage-empty">GLM-5 正在把原始文字整理为结构化画像，尚未返回的字段保持“识别中”。</div>';
+  $('#profileCompletion').innerHTML = '<span>…</span><div><strong>正在建立用户画像</strong><small>画像完成后将自动进入资料搜集</small></div><b>等待 GLM-5</b>';
   setWorkspaceStage('BUILDING_PROFILE');
-  renderPlanningProgress({ phase: 'analysis', title: '正在分析您的需求……', items: ['… DeepSeek 第 1 阶段正在整理目的地、日期、人数、必选景点和限制条件'] });
+  renderPlanningProgress({ phase: 'analysis', title: '正在分析您的需求……', items: ['… GLM-5 正在整理目的地、日期、人数、必选景点和限制条件'] });
 }
 
 function stopPlanningProgress() {
@@ -1321,7 +1321,7 @@ async function askAgent() {
   if (!prompt) return;
   const button = $('#agentSend');
   button.disabled = true; button.textContent = '思考中';
-  $('#agentAnswer').hidden = false; $('#agentAnswer').textContent = '正在调用 DeepSeek，并限制其只读取当前已验证行程…';
+  $('#agentAnswer').hidden = false; $('#agentAnswer').textContent = '正在调用 GLM-5 陪聊咨询，必要时会核验公开信息…';
   try {
     const context = state.plan ? {
       request: { city: state.plan.city, startDate: state.plan.startDate, days: state.plan.days, preferences: state.plan.preferences },
@@ -1334,9 +1334,9 @@ async function askAgent() {
       fragility: state.plan.fragility,
     } : { note: '尚未生成行程' };
     const result = await api('/api/agent', { method: 'POST', body: JSON.stringify({ prompt, context }) });
-    $('#agentAnswer').textContent = result.message || 'DeepSeek 没有返回内容。';
+    $('#agentAnswer').textContent = result.message || 'AI 没有返回内容。';
   } catch (error) {
-    $('#agentAnswer').textContent = `DeepSeek 暂不可用：${error.message}`;
+    $('#agentAnswer').textContent = `AI 咨询暂不可用：${error.message}`;
   } finally {
     button.disabled = false; button.textContent = '发送';
   }
