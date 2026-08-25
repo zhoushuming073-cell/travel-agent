@@ -12,7 +12,6 @@ import { Icon } from "./components/Icon.tsx";
 import { PersistentChat } from "./components/PersistentChat.tsx";
 import { ReadyDashboard } from "./components/ReadyDashboard.tsx";
 import { RequirementProfile } from "./components/RequirementProfile.tsx";
-import { SettingsDrawer } from "./components/SettingsDrawer.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
@@ -32,6 +31,7 @@ const EMPTY_FORM: TravelFormState = {
   transport: "公共交通优先",
   hotelPreference: "",
 };
+const REVIEW_LABELS = ["理解需求", "联网取证", "生成方案", "校验完成"] as const;
 
 function workspaceId(): string {
   return `trip-${crypto.randomUUID().slice(0, 12)}`;
@@ -77,7 +77,8 @@ export function TravelWorkspaceApp() {
   const [messages, setMessages] = useState<ComposerMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [parametersOpen, setParametersOpen] = useState(false);
+  const [reviewStep, setReviewStep] = useState(3);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const planningController = useRef<AbortController | null>(null);
@@ -104,10 +105,11 @@ export function TravelWorkspaceApp() {
     draft,
     form,
     messages,
+    progress,
     createdAt: workspaces.find((workspace) => workspace.id === id)?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     ...overrides,
-  }), [activePlanId, draft, events, form, id, messages, plans, profile, stage, versions, workspaces]);
+  }), [activePlanId, draft, events, form, id, messages, plans, profile, progress, stage, versions, workspaces]);
 
   const persist = useCallback(async (overrides?: Partial<WorkspaceSnapshot>) => {
     await workspaceRepository.save(snapshot(overrides));
@@ -127,7 +129,8 @@ export function TravelWorkspaceApp() {
     setEvents(stored.events);
     setDraft(stored.draft ?? "");
     setMessages(stored.messages ?? []);
-    setProgress(null);
+    setProgress(stored.progress ?? null);
+    setReviewStep(stored.state === "READY" || stored.state === "EXECUTING" ? 3 : Math.max(0, WORKSPACE_STAGES[stored.state].flow));
     setPendingChange(null);
     setMobileSidebarOpen(false);
     setError(null);
@@ -155,6 +158,7 @@ export function TravelWorkspaceApp() {
         setId(workspaceId()); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
         setProfile(null); setProgress(null); setPlans([]); setActivePlanId(null);
         setVersions([]); setEvents([]); setMessages([]); setPendingChange(null); setError(null);
+        setParametersOpen(false); setReviewStep(3);
       }
     };
     addEventListener("popstate", onPopState);
@@ -208,7 +212,10 @@ export function TravelWorkspaceApp() {
     setBusy(true);
     setError(null);
     setStage("BUILDING_PROFILE");
+    setParametersOpen(false);
+    setReviewStep(0);
     setPlans([]);
+    setActivePlanId(null);
     setVersions([]);
     setEvents([]);
     planningController.current?.abort();
@@ -223,7 +230,7 @@ export function TravelWorkspaceApp() {
       setEvents(result.agentEvents ?? []);
       setProgress(result.progress ?? null);
       setStage("VALIDATING_ITINERARY");
-      await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages }));
+      await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages, progress: result.progress ?? null }));
       await refreshWorkspaces();
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") {
@@ -244,6 +251,7 @@ export function TravelWorkspaceApp() {
     setBusy(false);
     setProgress(null);
     setStage("EMPTY");
+    setParametersOpen(true);
   };
 
   const enterReady = async (planId: string) => {
@@ -253,7 +261,9 @@ export function TravelWorkspaceApp() {
     const nextVersions = versions.length ? versions : appendItineraryVersion([], id, selected, null, "初始方案", "agent");
     setVersions(nextVersions);
     setStage("READY");
-    await persist({ state: "READY", activePlanId: planId, versions: nextVersions });
+    setReviewStep(3);
+    requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
+    await persist({ state: "READY", activePlanId: planId, versions: nextVersions, progress });
   };
 
   const sendComposer = async (text: string) => {
@@ -272,6 +282,7 @@ export function TravelWorkspaceApp() {
       return;
     }
     setStage("REPLANNING");
+    setReviewStep(3);
     try {
       const context = {
         adjustment: text,
@@ -308,6 +319,7 @@ export function TravelWorkspaceApp() {
     setEvents(result.agentEvents ?? events);
     setVersions(nextVersions);
     setPendingChange(null);
+    setReviewStep(3);
     setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", text: `已按最小扰动原则保存 Version ${nextVersions.length}；未受影响日期保持原方案。`, createdAt: new Date().toISOString() }]);
     await persist({ state: "READY", alternatives: result.alternatives, activePlanId: after.id, events: result.agentEvents ?? events, versions: nextVersions });
   };
@@ -339,18 +351,44 @@ export function TravelWorkspaceApp() {
     setError(null);
     setSidebarCollapsed(false);
     setMobileSidebarOpen(false);
-    setSettingsOpen(false);
+    setParametersOpen(false);
+    setReviewStep(3);
     history.pushState({}, "", "/travel/");
   };
 
+  const editRequirements = () => {
+    planningController.current?.abort();
+    setBusy(false);
+    setError(null);
+    setStage("EMPTY");
+    setParametersOpen(true);
+    requestAnimationFrame(() => document.getElementById("inline-parameters-title")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  };
+
+  const deleteWorkspace = async (workspaceIdToDelete: string) => {
+    await workspaceRepository.remove(workspaceIdToDelete);
+    if (workspaceIdToDelete === id && stage !== "EMPTY") newTrip();
+    await refreshWorkspaces();
+  };
+
+  const openReviewStep = (step: number) => {
+    setReviewStep(step);
+    requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
+  };
+
+  const readyForReview = stage === "READY" && Boolean(activePlan);
+  const headerTitle = readyForReview && reviewStep < 3 ? `回看：${REVIEW_LABELS[reviewStep]}` : activePlan && ["READY","EXECUTING"].includes(stage) ? `${activePlan.city} · ${activePlan.days} 天旅行` : stageConfig.title;
+  const headerEyebrow = readyForReview && reviewStep < 3 ? `STAGE ${reviewStep + 1} / REVIEW` : stageConfig.eyebrow;
+  const headerState = readyForReview && reviewStep < 3 ? "阶段回看" : stageConfig.label;
+
   return <div className={`app-shell v2-shell react-workspace-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={newTrip} onOpen={(nextId) => void loadWorkspace(nextId)}/>
+    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={newTrip} onOpen={(nextId) => void loadWorkspace(nextId)} onDelete={(nextId) => void deleteWorkspace(nextId)}/>
     <main className="workspace-canvas react-workspace-canvas">
-      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{stageConfig.eyebrow}</span><strong>{activePlan && ["READY","EXECUTING"].includes(stage) ? `${activePlan.city} · ${activePlan.days} 天旅行` : stageConfig.title}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{stageConfig.label}</span><button type="button" onClick={() => setSettingsOpen(true)}>旅行参数</button></div></header>
-      {stage !== "EMPTY" && <StageProgress state={stage}/>} 
-      {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onSubmit={() => void startPlanning()} onOpenSettings={() => setSettingsOpen(true)}/>} 
+      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{headerEyebrow}</span><strong>{headerTitle}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{headerState}</span><button type="button" onClick={() => stage === "EMPTY" ? setParametersOpen((value) => !value) : editRequirements()}>{stage === "EMPTY" && parametersOpen ? "收起参数" : "旅行参数"}</button></div></header>
+      {stage !== "EMPTY" && <StageProgress state={stage} selectedStep={readyForReview ? reviewStep : undefined} onSelect={readyForReview ? openReviewStep : undefined}/>}
+      {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onFormChange={setForm} onSubmit={() => void startPlanning()} parametersOpen={parametersOpen} onToggleParameters={() => setParametersOpen((value) => !value)}/>}
       {stage === "BUILDING_PROFILE" && (
-        <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => { cancelPlanning(); setSettingsOpen(true); }}/>
+        <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>
       )}
       {["FETCHING_DATA","ASSESSING_EVIDENCE","GENERATING_ITINERARY"].includes(stage) && (
         <DataAcquisition request={draft} profile={profile} progress={progress} onCancel={cancelPlanning}/>
@@ -358,12 +396,14 @@ export function TravelWorkspaceApp() {
       {stage === "VALIDATING_ITINERARY" && (
         <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
       )}
-      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划工具暂时不可用</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => { setStage("EMPTY"); setError(null); setSettingsOpen(true); }}>修改旅行需求</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><Icon name="arrow"/></button></div></section>}
-      {["READY","EXECUTING","REPLANNING"].includes(stage) && activePlan && <ReadyDashboard key={activePlan.id} plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLTextAreaElement>(".react-composer textarea")?.focus()}/>}
-      {stage !== "EMPTY" && <PersistentChat busy={busy} messages={messages} onSend={(text) => void sendComposer(text)}/>} 
+      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划工具暂时不可用</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={editRequirements}>修改旅行需求</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><Icon name="arrow"/></button></div></section>}
+      {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>}
+      {readyForReview && reviewStep === 1 && <DataAcquisition request={draft} profile={profile} progress={progress}/>}
+      {readyForReview && reviewStep === 2 && <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => { setActivePlanId(planId); setReviewStep(3); void persist({ activePlanId: planId }); }}/>}
+      {(["EXECUTING","REPLANNING"].includes(stage) || readyForReview && reviewStep === 3) && activePlan && <ReadyDashboard key={activePlan.id} plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLTextAreaElement>(".react-composer textarea")?.focus()}/>}
+      {stage !== "EMPTY" && (!readyForReview || reviewStep === 3) && <PersistentChat busy={busy} messages={messages} onSend={(text) => void sendComposer(text)}/>}
       {events.length > 0 && !["READY","EXECUTING","REPLANNING"].includes(stage) && <AgentActivity events={events}/>} 
     </main>
-    <SettingsDrawer open={settingsOpen} form={form} onChange={setForm} onClose={() => setSettingsOpen(false)}/>
     {pendingChange && <ChangePreview pending={pendingChange} onApply={() => void applyPendingChange()} onDiscard={() => setPendingChange(null)}/>} 
     {error && stage === "READY" && <div className="react-toast" role="alert"><span>{error}</span><button type="button" aria-label="关闭提示" onClick={() => setError(null)}><Icon name="close"/></button></div>}
   </div>;

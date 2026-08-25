@@ -2,7 +2,7 @@ import type { WorkspaceRepository } from "../../worker/domain/types.ts";
 import type { WorkspaceSnapshot } from "../types.ts";
 
 const STORAGE_KEY = "travel-workspaces-v3";
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 interface StoredEnvelope {
   schemaVersion: number;
@@ -19,7 +19,7 @@ function read(): WorkspaceSnapshot[] {
   if (typeof window === "undefined") return [];
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null") as StoredEnvelope | null;
-    if (!value || ![3, SCHEMA_VERSION].includes(value.schemaVersion) || !Array.isArray(value.workspaces)) return [];
+    if (!value || ![3, 4, SCHEMA_VERSION].includes(value.schemaVersion) || !Array.isArray(value.workspaces)) return [];
     return value.workspaces.filter(isWorkspace);
   } catch {
     return [];

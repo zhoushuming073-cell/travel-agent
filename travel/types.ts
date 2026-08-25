@@ -89,6 +89,7 @@ export interface WorkspaceSnapshot extends Omit<TravelWorkspace, "alternatives" 
   draft?: string;
   form?: TravelFormState;
   messages?: ComposerMessage[];
+  progress?: PlanningProgress | null;
 }
 
 export interface ComposerMessage {

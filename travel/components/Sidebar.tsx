@@ -13,6 +13,7 @@ interface Props {
   onCloseMobile: () => void;
   onNew: () => void;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
 }
 
 function chinaDate(date = new Date()): string {
@@ -33,8 +34,9 @@ function groupLabel(workspace: WorkspaceSnapshot): "旅行中" | "即将出发" 
   return daysAway <= 30 ? "即将出发" : "未开始";
 }
 
-export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle, onCloseMobile, onNew, onOpen }: Props) {
+export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle, onCloseMobile, onNew, onOpen, onDelete }: Props) {
   const [query, setQuery] = useState("");
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const groups = ["旅行中", "即将出发", "未开始", "已结束"] as const;
   const filtered = useMemo(() => {
@@ -66,11 +68,15 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
     onNew();
     onCloseMobile();
   };
+  const confirmDelete = (workspaceId: string) => {
+    onDelete(workspaceId);
+    setPendingDeleteId(null);
+  };
 
   return <>
     <aside className={`travel-sidebar react-sidebar${collapsed ? " is-collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`} aria-label="旅行工作区导航">
       <a className="brand sidebar-brand" href="/travel/" aria-label="智能旅游助手首页">
-        <span className="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M8.7 26.8 40 9.2 32 40l-8.6-10-11 8.1 3.1-14.2-6.8 2.9Z"/><path className="brand-path" d="m20 22.5 9.2 7.4"/></svg></span>
+        <span className="brand-mark travel-logo-mark" aria-hidden="true"><Icon name="mapPin"/><i></i></span>
         <span className="sidebar-label"><b>智能旅游助手</b><small>AI TRAVEL ASSISTANT</small></span>
       </a>
       <button className="sidebar-collapse" onClick={onToggle} type="button" aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button>
@@ -83,12 +89,13 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
             if (!rows.length) return null;
             return <section className="trip-history-group" key={group}>
               <header><span>{group}</span><b>{rows.length}</b></header>
-              <div>{rows.map((workspace) => <button
-                className={`history-item${workspace.id === activeId ? " active" : ""}`}
-                key={workspace.id}
-                type="button"
-                onClick={() => openWorkspace(workspace.id)}
-              ><i></i><span><b>{workspace.profile?.city ?? "未命名"} · {workspace.profile?.days ?? "?"}天</b><small>{workspace.profile?.startDate ?? "日期未定"} · {workspace.state === "READY" ? "规划完成" : "进行中"}</small></span></button>)}</div>
+              <div>{rows.map((workspace) => <div className="history-item-row" key={workspace.id}>
+                <button className={`history-item${workspace.id === activeId ? " active" : ""}`} type="button" onClick={() => openWorkspace(workspace.id)}>
+                  <i></i><span><b>{workspace.profile?.city ?? "未命名"} · {workspace.profile?.days ?? "?"}天</b><small>{workspace.profile?.startDate ?? "日期未定"} · {workspace.state === "READY" ? "规划完成" : "进行中"}</small></span>
+                </button>
+                <button className="history-delete" type="button" aria-label={`删除${workspace.profile?.city ?? "未命名"}旅行`} title="删除旅行" onClick={() => setPendingDeleteId(workspace.id)}><Icon name="close"/></button>
+                {pendingDeleteId === workspace.id ? <div className="history-delete-confirm" role="alert"><span>确定删除？</span><button type="button" onClick={() => confirmDelete(workspace.id)}>删除</button><button type="button" onClick={() => setPendingDeleteId(null)}>取消</button></div> : null}
+              </div>)}</div>
             </section>;
           })}</div>}
       </section>
