@@ -13,3 +13,11 @@ DEEPSEEK_API_KEY=
 # 地图、天气、酒店与图片数据源
 AMAP_WEB_KEY=
 UNSPLASH_ACCESS_KEY=
+
+# 可选社交趋势 MCP。默认留空，不会自动登录、绕过验证码或抓取社交平台。
+# 可选：自行部署的 NewsNow。未配置时仍会直连百度、头条与哔哩哔哩公开热榜。
+NEWSNOW_BASE_URL=
+# 可接入自行部署并已获授权的 xpzouying/xiaohongshu-mcp 等 Streamable HTTP 服务。
+SOCIAL_MCP_URL=
+SOCIAL_MCP_TOOL=search_feeds
+SOCIAL_MCP_PLATFORM=xiaohongshu

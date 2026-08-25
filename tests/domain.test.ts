@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { analyzeBuffers, buildDependencyGraph, calculateCriticalPath } from "../worker/domain/dependency.ts";
-import { FACT_TTL_MS, isStale, resolveObservationStatus } from "../worker/domain/facts.ts";
+import { buildTravelFacts, FACT_TTL_MS, isStale, resolveObservationStatus } from "../worker/domain/facts.ts";
+import { auditPlannerDraft } from "../worker/domain/planner-v4.ts";
 import { proposeReplan } from "../worker/domain/replan.ts";
 import { analyzeFragility } from "../worker/domain/risk.ts";
 import { runStressTest } from "../worker/domain/stress.ts";
@@ -83,6 +84,47 @@ test("TravelFact detects conflicting observations and stale TTL", () => {
   assert.equal(isStale("2026-08-20T00:00:00.000Z", FACT_TTL_MS.weather, now.getTime()), true);
 });
 
+test("Travel intelligence keeps crowd, hotness, seasonality and opening alerts as separate evidence", () => {
+  const current = plan();
+  current.daysPlan[0].items[0] = {
+    ...current.daysPlan[0].items[0],
+    crowd: { score: 78, label: "高风险", confidence: 0.63, source: "节假日与公开趋势风险模型", updatedAt: now.toISOString() },
+    hotness: { score: 71, label: "近期热门", status: "predicted", confidence: 0.58, updatedAt: now.toISOString(), source: "近 7 天公开报道" },
+    seasonality: { score: 86, state: "GOOD", label: "秋景适配", status: "predicted", confidence: 0.66, updatedAt: now.toISOString(), source: "近期时令报道" },
+    openingStatus: { status: "conflicting", alert: "检测到官方来源相关公告：国庆期间预约入园", sourceUrl: "https://example.gov.cn/notice", updatedAt: now.toISOString() },
+  };
+  const facts = buildTravelFacts(current, profile, now);
+  const crowd = facts.find((fact) => fact.subject === "西湖" && fact.field === "拥挤风险");
+  const hotness = facts.find((fact) => fact.subject === "西湖" && fact.field === "趋势热度");
+  const season = facts.find((fact) => fact.subject === "西湖" && fact.field === "时令适配");
+  const opening = facts.find((fact) => fact.subject === "西湖" && fact.field === "开放状态提醒");
+  assert.equal(crowd?.status, "predicted");
+  assert.equal(hotness?.status, "predicted");
+  assert.equal(hotness?.importance, "medium");
+  assert.equal(season?.status, "predicted");
+  assert.equal(opening?.status, "conflicting");
+  assert.equal(opening?.sourceUrl, "https://example.gov.cn/notice");
+});
+
+test("Planner audit surfaces recent opening notices without deleting required attractions", () => {
+  const pack = {
+    profile: { city: "杭州", days: 1, dayStart: "09:00", dayEnd: "21:00" },
+    spots: [{ id: "west-lake", name: "西湖", requiredByUser: true, openingHours: "08:00-22:00", openingAlert: "国庆预约公告" }],
+    weather: [], hotel: null, unknowns: [],
+  };
+  const variant = (id: string) => ({ id, title: id, style: id, strategy: id, days: [{
+    day: 1, theme: "湖区", returnHotelTime: "18:00", totalActivityMin: 120, totalTransportMin: 0,
+    activities: [
+      { type: "attraction" as const, spotId: "west-lake", startTime: "09:00", endTime: "11:00", durationMin: 120, reason: "必去", evidenceRefs: ["west-lake"] },
+      { type: "meal" as const, label: "午餐", startTime: "11:30", endTime: "12:30", durationMin: 60, reason: "用餐", evidenceRefs: [] },
+      { type: "rest" as const, label: "休息", startTime: "12:30", endTime: "13:00", durationMin: 30, reason: "缓冲", evidenceRefs: [] },
+    ],
+  }] });
+  const audit = auditPlannerDraft({ variants: [variant("hot"), variant("niche"), variant("relax")] }, pack);
+  assert.equal(audit.issues.filter((issue) => issue.code === "OPENING_ALERT_REVIEW").length, 3);
+  assert.equal(audit.hardIssues.some((issue) => issue.code === "REQUIRED_MISSING"), false);
+});
+
 test("Unknown Analysis ranks required reservation before lower-impact unknowns", () => {
   const current = plan();
   const facts: TravelFact[] = [
@@ -149,4 +191,3 @@ test("Trust orchestrator produces evidence, compiler, unknown, fragility and str
   assert.ok(result.dependencyGraph.nodes.length > current.daysPlan.length);
   assert.equal(result.stressTest.type, "simulation");
 });
-

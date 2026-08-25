@@ -28,6 +28,9 @@ const OSRM = "https://router.project-osrm.org";
 const WEATHER_MCP = "https://mcpmarket.cn/mcp/a5be23a7cc256930f8f3ccc6";
 const HOTEL_MCP = "https://mcpmarket.cn/mcp/14d52a3200549c758f548f52";
 const AMAP_MCP = "https://mcpmarket.cn/mcp/06cbbceb8f161926894c4584";
+const GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc";
+const BING_NEWS_RSS = "https://www.bing.com/news/search";
+const NEWSNOW_SOURCES = ["weibo", "douyin", "zhihu", "baidu", "toutiao", "thepaper", "tencent-hot"];
 const COMMON_CHINA_CITIES = [
   ["北京", 39.9042, 116.4074], ["上海", 31.2304, 121.4737], ["广州", 23.1291, 113.2644],
   ["深圳", 22.5431, 114.0579], ["杭州", 30.2741, 120.1551], ["成都", 30.5728, 104.0668],
@@ -36,6 +39,7 @@ const COMMON_CHINA_CITIES = [
 ] as const;
 const mcpMemory = new Map<string, { expiresAt: number; value: any }>();
 const unsplashMemory = new Map<string, { expiresAt: number; value: any }>();
+const intelligenceMemory = new Map<string, { expiresAt: number; value: any }>();
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
@@ -845,12 +849,16 @@ function scoreSpot(spot: any, profile: any) {
   const preference = preferences.length ? Math.round(45 + 55 * matched.length / preferences.length) : 60;
   const quality = spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
   const completeness = Math.min(100, 45 + (spot.sourceUrl ? 15 : 0) + (spot.lat && spot.lng ? 20 : 0) + (spot.extract ? 12 : 0) + (spot.openingHours ? 8 : 0));
+  const season = spot.seasonality?.score == null ? 50 : Number(spot.seasonality.score);
+  const crowdProbability = spot.crowd?.score == null ? 50 : Number(spot.crowd.score);
+  const avoidCrowd = profile.crowdSensitivity === "high" || (profile.avoid || []).some((item: string) => /拥挤|人流/.test(item));
+  const crowdFit = avoidCrowd ? 100 - crowdProbability : 55;
   const required = Boolean(spot.requiredByUser);
-  const final = required ? 100 : Math.round(preference * 0.5 + quality * 0.3 + completeness * 0.2);
+  const final = required ? 100 : Math.round(preference * 0.42 + quality * 0.2 + completeness * 0.16 + season * 0.12 + crowdFit * 0.1);
   return {
     final, required, matched,
-    breakdown: { preference, poiQuality: quality, dataCompleteness: completeness },
-    basis: "偏好 50% · 静态 POI 质量 30% · 公开数据完整度 20%",
+    breakdown: { preference, poiQuality: quality, dataCompleteness: completeness, seasonality: season, crowdFit },
+    basis: "偏好 42% · POI 质量 20% · 数据完整度 16% · 时令证据 12% · 拥挤适配 10%",
   };
 }
 
@@ -865,6 +873,295 @@ function rankSpots(spots: any[], profile: any) {
       return { ...spot, plannerScore: score.final, scoreBreakdown: score.breakdown, scoreBasis: score.basis, matchedPreferences: score.matched, recommendationReasons: [...new Set(recommendationReasons)].slice(0, 4) };
     })
     .sort((a, b) => Number(b.requiredByUser) - Number(a.requiredByUser) || b.plannerScore - a.plannerScore || a.name.localeCompare(b.name, "zh-CN"));
+}
+
+function officialDomain(value: unknown) {
+  const domain = cleanText(value).toLowerCase();
+  return domain.endsWith(".gov.cn") || domain === "gov.cn" || /(?:^|\.)mct\.gov\.cn$/.test(domain);
+}
+
+function articleDate(value: unknown) {
+  const text = cleanText(value);
+  const match = text.match(/^(\d{4})(\d{2})(\d{2})T?(\d{2})?(\d{2})?/);
+  if (!match) return null;
+  const [, year, month, day, hour = "00", minute = "00"] = match;
+  const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function articleMatchesSpot(article: any, spot: any) {
+  const title = normalizeName(article?.title);
+  if (!title) return false;
+  return imageLookupNames(spot.name).some((alias) => {
+    const wanted = normalizeName(alias);
+    return wanted.length >= 2 && title.includes(wanted);
+  });
+}
+
+function decodeXmlText(value: unknown) {
+  return cleanText(value)
+    .replace(/^<!\[CDATA\[|\]\]>$/g, "")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function rssTag(item: string, tag: string) {
+  return decodeXmlText(item.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1] || "");
+}
+
+async function bingNewsTravelSignals(city: any, spots: any[]) {
+  const targets = spots.slice(0, 8);
+  const cacheKey = `bing-news:${city.name}:${targets.map((spot) => spot.name).join("|")}`;
+  const cached = intelligenceMemory.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const settled = await Promise.allSettled(targets.map(async (spot) => {
+      const params = new URLSearchParams({ q: `${city.name} ${spot.name}`, format: "RSS" });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(`${BING_NEWS_RSS}?${params}`, fetchOptions({ signal: controller.signal, headers: { accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8" } })).finally(() => clearTimeout(timer));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const xml = await response.text();
+      if (!/^\s*<\?xml/i.test(xml)) throw new Error("未返回 RSS XML");
+      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const articles = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, 30).map((match) => {
+        const item = match[1];
+        const rssUrl = rssTag(item, "link");
+        let url = rssUrl;
+        try { url = new URL(rssUrl).searchParams.get("url") || rssUrl; } catch { /* 保留 RSS 链接 */ }
+        let domain = "";
+        try { domain = new URL(url).hostname.replace(/^www\./, ""); } catch { /* 无法解析的来源保持空值 */ }
+        const published = Date.parse(rssTag(item, "pubDate"));
+        return { title: rssTag(item, "title"), url, domain, sourceUrl: url, seenAt: Number.isFinite(published) ? new Date(published).toISOString() : null, language: "Chinese", sourceCountry: "China" };
+      }).filter((article) => article.title && article.url && article.seenAt && Date.parse(article.seenAt) >= cutoff && articleMatchesSpot(article, spot));
+      return { spot, articles };
+    }));
+    const fulfilled = settled.filter((result): result is PromiseFulfilledResult<any> => result.status === "fulfilled");
+    if (!fulfilled.length) throw new Error(settled.map((result: any) => result.reason?.message).filter(Boolean).join("；") || "新闻 RSS 未返回");
+    const allArticles = fulfilled.flatMap((result) => result.value.articles);
+    const articles = [...new Map(allArticles.map((article) => [article.url || article.title, article])).values()];
+    const bySpot = new Map<string, any>();
+    for (const spot of spots) {
+      const matches = articles.filter((article) => articleMatchesSpot(article, spot));
+      const seasonal = matches.filter((article) => /花期|赏花|樱花|荷花|桂花|梅花|杜鹃|红叶|秋色|银杏|雪景|冰雪|观鸟|候鸟|花海|枫叶/.test(article.title));
+      const openingAlerts = matches.filter((article) => officialDomain(article.domain) && /闭园|暂停开放|临时关闭|恢复开放|预约|限流|停止入园|开放时间|停止售票/.test(article.title));
+      bySpot.set(spot.id, { mentions: matches.length, domains: new Set(matches.map((article) => article.domain)).size, articles: matches.slice(0, 4), seasonal: seasonal.slice(0, 3), openingAlerts: openingAlerts.slice(0, 3) });
+    }
+    const value = { status: "ready", provider: "Bing 新闻 RSS · 近 7 天中文公开报道", articles, bySpot, fetchedAt: new Date().toISOString() };
+    intelligenceMemory.set(cacheKey, { value, expiresAt: Date.now() + 30 * 60 * 1000 });
+    return value;
+  } catch (error: any) {
+    return { status: "unavailable", provider: "Bing 新闻 RSS", articles: [], bySpot: new Map(), error: cleanText(error?.message, "中文公开报道服务不可用"), fetchedAt: new Date().toISOString() };
+  }
+}
+
+async function gdeltTravelSignals(city: any, spots: any[]) {
+  const names = [...new Set(spots.map((spot) => cleanText(spot.name)).filter(Boolean))].slice(0, 12);
+  if (!names.length) return { status: "unavailable", provider: "GDELT DOC 2.0", articles: [], bySpot: new Map(), error: "没有可查询景点" };
+  const cacheKey = `gdelt:${city.name}:${names.join("|")}`;
+  const cached = intelligenceMemory.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const params = new URLSearchParams({
+      query: `${city.name}旅游`,
+      mode: "artlist", format: "json", maxrecords: "100", timespan: "1week", sort: "datedesc",
+    });
+    const raw = await fetchJson(`${GDELT_DOC}?${params}`, {}, 5000, "GDELT 公开新闻趋势");
+    const articles = (Array.isArray(raw?.articles) ? raw.articles : []).map((article: any) => ({
+      title: cleanText(article.title), url: cleanText(article.url), domain: cleanText(article.domain),
+      seenAt: articleDate(article.seendate), language: cleanText(article.language), sourceCountry: cleanText(article.sourcecountry),
+    })).filter((article: any) => article.title && article.url);
+    const bySpot = new Map<string, any>();
+    for (const spot of spots) {
+      const matches = articles.filter((article: any) => articleMatchesSpot(article, spot));
+      const seasonal = matches.filter((article: any) => /花期|赏花|樱花|荷花|桂花|梅花|杜鹃|红叶|秋色|银杏|雪景|冰雪|观鸟|候鸟|花海|枫叶/.test(article.title));
+      const openingAlerts = matches.filter((article: any) => officialDomain(article.domain) && /闭园|暂停开放|临时关闭|恢复开放|预约|限流|停止入园|开放时间|停止售票/.test(article.title));
+      bySpot.set(spot.id, {
+        mentions: matches.length,
+        domains: new Set(matches.map((article: any) => article.domain)).size,
+        articles: matches.slice(0, 4), seasonal: seasonal.slice(0, 3), openingAlerts: openingAlerts.slice(0, 3),
+      });
+    }
+    const value = { status: "ready", provider: "GDELT DOC 2.0 公开新闻趋势", articles, bySpot, fetchedAt: new Date().toISOString() };
+    intelligenceMemory.set(cacheKey, { value, expiresAt: Date.now() + 30 * 60 * 1000 });
+    return value;
+  } catch (error: any) {
+    const value = { status: "unavailable", provider: "GDELT DOC 2.0", articles: [], bySpot: new Map(), error: cleanText(error?.message, "公开趋势服务不可用"), fetchedAt: new Date().toISOString() };
+    intelligenceMemory.set(cacheKey, { value, expiresAt: Date.now() + 10 * 60 * 1000 });
+    return value;
+  }
+}
+
+async function publicTravelSignals(city: any, spots: any[]) {
+  const chineseNews = await bingNewsTravelSignals(city, spots);
+  if (chineseNews.status === "ready") return chineseNews;
+  const gdelt = await gdeltTravelSignals(city, spots);
+  return { ...gdelt, fallbackError: chineseNews.error || (chineseNews.status === "ready" ? "中文新闻 RSS 未返回条目" : "中文新闻 RSS 不可用") };
+}
+
+async function domesticHotSignals(env: any, city: any, spots: any[]) {
+  const base = cleanText(env?.NEWSNOW_BASE_URL).replace(/\/$/, "");
+  const cacheKey = `domestic-hot:${base || "direct"}`;
+  const cached = intelligenceMemory.get(cacheKey);
+  let cachedValue = cached && cached.expiresAt > Date.now() ? cached.value : null;
+  if (!cachedValue) {
+    const requests: Record<string, Promise<any>> = {
+      baidu: fetchJson("https://top.baidu.com/api/board?platform=wise&tab=realtime", {}, 9000, "百度实时热搜"),
+      toutiao: fetchJson("https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc", {}, 9000, "今日头条热榜"),
+      bilibili: fetchJson("https://api.bilibili.com/x/web-interface/search/square?limit=50", {}, 9000, "哔哩哔哩热搜"),
+    };
+    if (base) {
+      for (const id of NEWSNOW_SOURCES) requests[`newsnow-${id}`] = fetchJson(`${base}/api/s?id=${encodeURIComponent(id)}`, {}, 9000, `NewsNow ${id}`);
+    }
+    const providers = await settleTravelProviders(requests);
+    const fetchedAt = new Date().toISOString();
+    const entries: any[] = [];
+    if (providers.baidu?.status === "ready") {
+      const cards = Array.isArray((providers.baidu.data as any)?.data?.cards) ? (providers.baidu.data as any).data.cards : [];
+      const rows = cards.flatMap((card: any) => (Array.isArray(card?.content) ? card.content : [])).flatMap((group: any) => Array.isArray(group?.content) ? group.content : [group]);
+      rows.filter((row: any) => !row?.isTop && row?.word).forEach((row: any, index: number) => entries.push({ title: cleanText(row.word), url: cleanText(row.url || row.rawUrl), source: "百度热搜", rank: Number(row.index || index + 1), updatedAt: fetchedAt }));
+    }
+    if (providers.toutiao?.status === "ready") {
+      const rows = Array.isArray((providers.toutiao.data as any)?.data) ? (providers.toutiao.data as any).data : [];
+      rows.forEach((row: any, index: number) => entries.push({ title: cleanText(row.Title), url: row.ClusterIdStr ? `https://www.toutiao.com/trending/${encodeURIComponent(row.ClusterIdStr)}/` : "", source: "今日头条热榜", rank: index + 1, updatedAt: fetchedAt }));
+    }
+    if (providers.bilibili?.status === "ready") {
+      const rows = Array.isArray((providers.bilibili.data as any)?.data?.trending?.list) ? (providers.bilibili.data as any).data.trending.list : [];
+      rows.forEach((row: any, index: number) => entries.push({ title: cleanText(row.show_name || row.keyword), url: `https://search.bilibili.com/all?keyword=${encodeURIComponent(cleanText(row.keyword || row.show_name))}`, source: "哔哩哔哩热搜", rank: index + 1, updatedAt: fetchedAt }));
+    }
+    for (const id of NEWSNOW_SOURCES) {
+      const payload = providers[`newsnow-${id}`]?.status === "ready" ? providers[`newsnow-${id}`].data as any : null;
+      (Array.isArray(payload?.items) ? payload.items : []).forEach((item: any, index: number) => entries.push({ title: cleanText(item.title), url: cleanText(item.url), source: `NewsNow ${id}`, rank: index + 1, updatedAt: Number.isFinite(Number(payload.updatedTime)) ? new Date(Number(payload.updatedTime)).toISOString() : fetchedAt }));
+    }
+    const readyProviders = Object.entries(providers).filter(([, result]: any) => result.status === "ready").map(([name]) => name);
+    cachedValue = { entries: entries.filter((item) => item.title), readyProviders, fetchedAt };
+    if (cachedValue.entries.length) intelligenceMemory.set(cacheKey, { value: cachedValue, expiresAt: Date.now() + 10 * 60 * 1000 });
+  }
+  const entries = cachedValue?.entries || [];
+  if (!entries.length) return { status: "unavailable", provider: "国内公开热榜", bySpot: new Map(), detail: "百度、头条、哔哩哔哩及可选 NewsNow 均未返回" };
+  const bySpot = new Map<string, number>();
+  for (const spot of spots) {
+    const wanted = imageLookupNames(spot.name, city.name).map(normalizeName).filter(Boolean);
+    const matches = entries.filter((entry) => wanted.some((name) => normalizeName(entry.title).includes(name)));
+    bySpot.set(spot.id, matches.reduce((score, entry) => score + (entry.rank <= 10 ? 2 : 1), 0));
+  }
+  return {
+    status: "ready", provider: `国内公开热榜（${cachedValue.readyProviders.join(" / ")}）`, bySpot,
+    fetchedAt: cachedValue.fetchedAt,
+    detail: `${cachedValue.readyProviders.length} 个国内热榜来源返回；只统计标题中可归因到景点的提及`,
+  };
+}
+
+async function optionalSocialSignals(env: any, city: any, spots: any[]) {
+  const publicSignals = await domesticHotSignals(env, city, spots);
+  const endpoint = cleanText(env?.SOCIAL_MCP_URL);
+  if (!endpoint) return publicSignals;
+  const tool = cleanText(env?.SOCIAL_MCP_TOOL, "search_feeds");
+  const platform = cleanText(env?.SOCIAL_MCP_PLATFORM, "authorized-social-mcp");
+  try {
+    const raw = await callMcp(endpoint, tool, { keyword: `${city.name} 旅游景点`, query: `${city.name} 旅游景点` }, { timeoutMs: 12000, cacheMs: 20 * 60 * 1000 });
+    const haystack = normalizeName(JSON.stringify(raw));
+    const bySpot = new Map<string, number>();
+    for (const spot of spots) {
+      const wanted = normalizeName(spot.name);
+      bySpot.set(spot.id, Number(publicSignals.bySpot.get(spot.id) || 0) + (wanted ? Math.max(0, haystack.split(wanted).length - 1) : 0));
+    }
+    return { status: "ready", provider: `${publicSignals.status === "ready" ? `${publicSignals.provider} + ` : ""}${platform} MCP（授权实例）`, bySpot, fetchedAt: new Date().toISOString(), detail: `${publicSignals.detail || ""}；${tool} 已返回授权数据` };
+  } catch (error: any) {
+    return { ...publicSignals, detail: `${publicSignals.detail || ""}；可选 ${platform} MCP 未返回：${cleanText(error?.message, "不可用")}` };
+  }
+}
+
+function chinaTravelPeak(dateText: string) {
+  const monthDay = dateText.slice(5);
+  if (monthDay >= "10-01" && monthDay <= "10-07") return "国庆黄金周日期先验";
+  if (monthDay >= "05-01" && monthDay <= "05-05") return "五一假期日期先验";
+  if (monthDay >= "01-01" && monthDay <= "01-03") return "元旦假期日期先验";
+  return "";
+}
+
+function crowdRiskPrediction(profile: any, weather: any, hotness: any, rating: number | null, socialMentions: number) {
+  const date = new Date(`${profile.startDate}T12:00:00+08:00`);
+  const weekend = [0, 6].includes(date.getDay());
+  const peak = chinaTravelPeak(profile.startDate);
+  const rain = Number(weather?.precipitationProbability || 0);
+  let probability = 25 + (weekend ? 17 : 0) + (peak ? 31 : 0);
+  const factors = [weekend ? "周末日期" : "工作日日期", peak || null];
+  if (hotness?.score != null) { probability += Math.round(Number(hotness.score) * 0.18); factors.push("近 7 天公开新闻热度"); }
+  if (socialMentions > 0) { probability += Math.min(12, socialMentions * 3); factors.push("已授权社交 MCP 提及"); }
+  if (rating && rating >= 4.5) { probability += 5; factors.push("高德高评分 POI 先验"); }
+  if (rain >= 65) { probability -= 7; factors.push("高降雨概率对户外客流的抑制先验"); }
+  probability = clamp(probability, 8, 96);
+  const label = probability >= 78 ? "很高" : probability >= 60 ? "高" : probability >= 38 ? "中" : "低";
+  let confidence = 0.42 + (hotness?.score != null ? 0.13 : 0) + (socialMentions > 0 ? 0.1 : 0) + (weather?.quality === "forecast" ? 0.08 : 0) + (rating ? 0.05 : 0);
+  confidence = Math.min(0.78, confidence);
+  return { score: probability, riskProbability: probability, label, confidence, uncertainty: confidence >= 0.68 ? "low" : confidence >= 0.54 ? "medium" : "high", factors: factors.filter(Boolean) };
+}
+
+function crowdRiskAtVisitTime(crowd: any, startTime: unknown) {
+  if (crowd?.score == null) return crowd;
+  const minute = timeToMinutes(startTime, 600);
+  const adjustment = minute < 570 ? -9 : minute >= 600 && minute <= 960 ? 7 : minute >= 1140 ? 3 : 0;
+  const score = clamp(Number(crowd.score) + adjustment, 5, 98);
+  const label = score >= 78 ? "很高" : score >= 60 ? "高" : score >= 38 ? "中" : "低";
+  const timeFactor = minute < 570 ? "09:30 前到访错峰修正" : minute <= 960 ? "10:00–16:00 常见高峰时段修正" : minute >= 1140 ? "晚间热门时段修正" : "平峰时段修正";
+  return { ...crowd, score, riskProbability: score, label, factors: [...(crowd.factors || []), timeFactor] };
+}
+
+async function enrichTravelIntelligence(spots: any[], profile: any, city: any, weather: any, env: any) {
+  const targets = spots.slice(0, 16);
+  const [news, social, amapResults] = await Promise.all([
+    publicTravelSignals(city, targets),
+    optionalSocialSignals(env, city, targets),
+    Promise.allSettled(targets.slice(0, 12).map((spot) => amapPoiForSpot(spot.name, city.name))),
+  ]);
+  const amapById = new Map<string, any>();
+  targets.slice(0, 12).forEach((spot, index) => {
+    const result = amapResults[index];
+    if (result?.status === "fulfilled" && result.value) amapById.set(spot.id, result.value);
+  });
+  const fetchedAt = new Date().toISOString();
+  const enriched = spots.map((spot) => {
+    const signal = news.bySpot.get(spot.id) || { mentions: 0, domains: 0, articles: [], seasonal: [], openingAlerts: [] };
+    const socialMentions = Number(social.bySpot.get(spot.id) || 0);
+    const amap = amapById.get(spot.id);
+    const raw = amap?.raw || {};
+    const amapOpening = cleanText(raw?.business?.opentime_today || raw?.business?.opentime_week || raw?.opentime_today || raw?.opentime_week || raw?.opening_hours);
+    const openingHours = amapOpening || spot.openingHours || "";
+    const ratingValue = Number(raw?.biz_ext?.rating || raw?.business?.rating || raw?.rating);
+    const rating = Number.isFinite(ratingValue) && ratingValue > 0 ? ratingValue : null;
+    const mentionCount = Number(signal.mentions || 0) + socialMentions;
+    const hotness = mentionCount > 0 ? {
+      score: clamp(32 + mentionCount * 10 + Number(signal.domains || 0) * 6 + Math.min(12, socialMentions * 3), 35, 95),
+      label: mentionCount >= 4 || Number(signal.domains || 0) >= 3 ? "近期关注较高" : "近期有公开提及",
+      status: "predicted", confidence: Math.min(0.8, 0.45 + Number(signal.domains || 0) * 0.05 + (socialMentions > 0 ? 0.1 : 0)),
+      updatedAt: news.fetchedAt || social.fetchedAt || fetchedAt,
+      source: [signal.mentions ? news.provider : "", socialMentions ? social.provider : ""].filter(Boolean).join(" + "),
+      sourceUrl: signal.articles?.[0]?.url || null,
+    } : { score: null, label: "近 7 天未取得可归因趋势信号", status: "unknown", confidence: 0, updatedAt: news.fetchedAt || fetchedAt, source: news.provider, sourceUrl: null };
+    const seasonalArticle = signal.seasonal?.[0];
+    const daysToTrip = Math.round((new Date(`${profile.startDate}T12:00:00+08:00`).getTime() - Date.now()) / 86_400_000);
+    const seasonScore = daysToTrip <= 21 ? 82 : daysToTrip <= 60 ? 68 : 52;
+    const seasonality = seasonalArticle ? {
+      score: seasonScore, state: daysToTrip <= 21 ? "GOOD" : "PRE_SEASON", label: `近期报道：${cleanText(seasonalArticle.title).slice(0, 42)}`, status: "predicted", confidence: daysToTrip <= 21 ? 0.66 : 0.54,
+      updatedAt: seasonalArticle.seenAt || news.fetchedAt || fetchedAt, source: `近期公开报道 · ${seasonalArticle.domain}`, sourceUrl: seasonalArticle.url,
+    } : { score: null, state: "UNKNOWN", label: "未取得指定日期的时令实况证据", status: "unknown", confidence: 0, updatedAt: news.fetchedAt || fetchedAt, source: news.provider, sourceUrl: null };
+    const crowd = crowdRiskPrediction(profile, weather?.tripForecast?.[0], hotness, rating, socialMentions);
+    const crowdSourceUrl = hotness.sourceUrl || spot.sourceUrl || null;
+    const openingAlert = signal.openingAlerts?.[0];
+    const factObservations = { ...(spot.factObservations || {}) };
+    if (openingHours) factObservations.openingHours = [{ value: openingHours, confidence: amapOpening ? 0.78 : 0.68, source: { id: `source-${spot.id}-opening-amap`, name: amapOpening ? "高德地图 POI 营业时间" : cleanText(spot.sourceName, "公开 POI 页面"), type: "map-service", url: amap?.id ? `https://www.amap.com/place/${encodeURIComponent(amap.id)}` : spot.sourceUrl || null, fetchedAt, quality: "estimated" } }];
+    factObservations.crowd = [{ value: { score: crowd.score, label: crowd.label, probability: crowd.riskProbability, factors: crowd.factors }, confidence: crowd.confidence, source: { id: `source-${spot.id}-crowd-model`, name: "Crowd Risk 多源概率模型", type: "prediction", url: crowdSourceUrl, fetchedAt, quality: "predicted" } }];
+    if (hotness.score != null) factObservations.hotness = [{ value: { score: hotness.score, label: hotness.label }, confidence: hotness.confidence, source: { id: `source-${spot.id}-hotness`, name: hotness.source, type: "public-trend", url: hotness.sourceUrl, fetchedAt: hotness.updatedAt, quality: "predicted" } }];
+    if (seasonality.score != null) factObservations.seasonality = [{ value: { score: seasonality.score, state: seasonality.state, label: seasonality.label }, confidence: seasonality.confidence, source: { id: `source-${spot.id}-seasonality`, name: seasonality.source, type: "public-season-signal", url: seasonality.sourceUrl, fetchedAt: seasonality.updatedAt, quality: "predicted" } }];
+    return {
+      ...spot, openingHours, rating, hotness, seasonality,
+      openingStatus: { status: openingAlert ? "conflicting" : openingHours ? "estimated" : "unknown", label: openingHours ? `地图营业时间：${openingHours}` : "开放时间暂未核验", alert: openingAlert ? `检测到官方来源相关公告：${openingAlert.title}` : null, sourceUrl: openingAlert?.url || null, updatedAt: fetchedAt },
+      crowd: { ...crowd, source: "日期/节假日先验 + 天气 + 公开趋势；非实时人数", updatedAt: fetchedAt },
+      factObservations,
+    };
+  });
+  return { spots: enriched, news, social, fetchedAt };
 }
 
 function uniqueSpots(spots: any[]) {
@@ -1596,8 +1893,10 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 4. 先保证可执行性，再优化覆盖率。不得安排开放时间冲突、明显折返、超出每日时段或不合理夜景时段。
 5. 三套方案分别优化：hot=经典覆盖；niche=自然摄影和合理光线/季节；relax=少景点、大缓冲、透明避峰风险。三套不能只换名字或交换一两个点。
 6. 客流无官方实时数据时只可说 Unknown 或基于节假日/时段的 Prediction；不得宣称已实时避峰。
-7. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
-8. 每套天数严格等于 profile.days；一次输出 hot、niche、relax 完整三套，顺序不得改变。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
+7. crowdRisk.score 是风险概率分值，不是在园人数；relax 优先低风险时段，必去点不可因此删除。hotness 仅表示近期关注度，seasonFit 仅表示时令适配，二者必须分别用于经典/摄影方案排序。
+8. openingAlert 不等于已确认闭园，但必须在调整条件中提示用户核对原文；若候选点存在同类替代点，应给出 alternativeSpotIds。
+9. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
+10. 每套天数严格等于 profile.days；一次输出 hot、niche、relax 完整三套，顺序不得改变。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
 
 function normalizePlannerDraft(value: any, profile: any) {
   const variants = Array.isArray(value?.variants) ? value.variants.slice(0, 3) : [];
@@ -1757,7 +2056,10 @@ function planDayFromDraft(dayDraft: any, dayIndex: number, spotsById: Map<string
         const attractionStart = timeToMinutes(activity.startTime, timeToMinutes(profile.dayStart, 540));
         blocks.push({ type: "leg", from: previousSpot.name, to: base.name, startTime: minutesToTime(Math.max(0, attractionStart - durationMin)), endTime: activity.startTime, durationMin, distanceM: Number(leg?.distanceM || 0), source: cleanText(leg?.source, "交通矩阵"), quality: cleanText(leg?.quality, "estimated"), fetchedAt: leg?.fetchedAt, mode: cleanText(activity.transportFromPrevious?.mode, "公共交通 / 打车") });
       }
-      const item = { ...base, startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, recommendationReason: activity.reason, evidenceRefs: activity.evidenceRefs, alternativeSpotIds: activity.alternativeSpotIds, adjustmentCondition: activity.adjustmentCondition };
+      const item = { ...base, crowd: crowdRiskAtVisitTime(base.crowd, activity.startTime), startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, recommendationReason: activity.reason, evidenceRefs: activity.evidenceRefs, alternativeSpotIds: activity.alternativeSpotIds, adjustmentCondition: activity.adjustmentCondition };
+      if (item.factObservations?.crowd?.length && item.crowd?.score != null) {
+        item.factObservations = { ...item.factObservations, crowd: item.factObservations.crowd.map((observation: any, index: number) => index ? observation : { ...observation, value: { ...observation.value, score: item.crowd.score, probability: item.crowd.riskProbability, label: item.crowd.label, factors: item.crowd.factors } }) };
+      }
       items.push(item); blocks.push({ type: "attraction", item, startTime: item.startTime, endTime: item.endTime, durationMin: item.durationMin }); previousSpot = item;
     } else {
       blocks.push({ type: "rest", mealType: activity.type === "meal" ? (/晚餐/.test(activity.label || "") ? "dinner" : "lunch") : undefined, label: activity.label || (activity.type === "meal" ? "用餐与休息" : "弹性休息"), startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, reason: activity.reason });
@@ -1777,7 +2079,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         extractionModel: aiPrimaryModel(env, "extract"), plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"),
         repairFallbackModel: aiModelCandidates(env, "repair")[1] || null,
         thinking: { planner: "disabled-for-latency", repair: "disabled-for-latency", reasoningContentExposed: false },
-        network: { enabled: true, mode: "后端受控取证", tools: ["Wikimedia 公开检索", "高德地图 / MCP POI 查询", "天气、酒店与交通数据源"] },
+        network: { enabled: true, mode: "后端受控取证", tools: ["Wikimedia 公开检索", "高德地图 / MCP POI 查询", "国内公开热榜", "天气、酒店与交通数据源"] },
         note: "GLM-5 负责需求提取和陪聊咨询，遇到 429 自动回退；DeepSeek V4 Pro 负责三方案规划、决策、冲突修复与重规划，并可调用后端受控联网核验工具。",
       },
       services: [
@@ -1789,8 +2091,10 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
         { name: "中文维基百科景点检索", provider: "Wikimedia", status: "live", note: "公开页面、摘要、坐标与精确页面图片兜底" },
         { name: "OpenStreetMap / Nominatim", provider: "OSM", status: "live", note: "城市和用户必选景点核验兜底" },
         { name: "OSRM", provider: "OSRM", status: "live", note: "地图线路几何；失败时透明估算" },
+        { name: "国内趋势热榜", provider: "百度热搜 / 今日头条 / 哔哩哔哩 / 可选 NewsNow", status: "live", note: "只作为近期关注度弱证据，不能替代景区客流、开放或预约" },
         { name: "双模型智能体", provider: "联通元景 GLM-5 / DeepSeek V4 Pro", status: aiApiKey(env) ? "live" : "offline", note: "GLM 负责理解与陪聊；DeepSeek 负责规划、决策、修复和受控联网核验" },
-        { name: "官方客流与预约", provider: "未接入", status: "offline", note: "保持未知，不由 AI 编造" },
+        { name: "拥挤风险预测", provider: "日期 / 时段 / 天气 / 国内趋势概率模型", status: "live", note: "输出风险概率与置信度，不生成实时人数" },
+        { name: "官方预约余量", provider: "未接入", status: "offline", note: "保持未知，不由 AI 编造" },
       ],
     });
 
@@ -1799,7 +2103,8 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
       spots: { name: "景点", role: "中文维基百科 + OSM + 高德 POI", status: "ready", fallback: "高德免费共享额度不可用时保留精确页面图片和 OSM 核验" },
       route: { name: "道路路线", role: "OSRM 地图几何 + 高德 MCP", status: "ready", fallback: "坐标距离×1.25 透明估算" },
       transit: { name: "公共交通", role: "高德地图 MCP", status: "ready", fallback: "无班次或额度不足时显示道路耗时参考" },
-      crowd: { name: "客流与预约", role: "景区官方来源待接入", status: "unconfigured", fallback: "保持未知" },
+      crowd: { name: "拥挤风险", role: "日期 / 时段 / 天气 / 国内趋势概率模型", status: "ready", fallback: "预测不等于实时人数；官方预约余量保持未知" },
+      trends: { name: "热门与时令", role: "百度 / 头条 / B 站公开热榜 + 近期公开报道 + 可选授权 MCP", status: "ready", fallback: "没有可归因证据时保持未知" },
       hotel: { name: "住宿候选", role: "高德地图官方酒店 POI + MCPMarket 在售产品", status: env?.AMAP_WEB_KEY ? "ready" : "partial", fallback: "仅保留用户住宿区域；没有来源价格时不补写假价" },
       images: { name: "景点图片", role: "高德官方精确 POI + Unsplash + Wikimedia", status: env?.AMAP_WEB_KEY || env?.UNSPLASH_ACCESS_KEY ? "ready" : "unconfigured", fallback: "高德官方无照片时依次使用 Unsplash、高德免费 MCP 和中文维基百科实体图片" },
       aiSearch: { name: "AI 规划证据", role: "后端联网取证 -> 元景模型知识包", status: aiApiKey(env) ? "ready" : "unconfigured", fallback: "模型不可用时仍由后端直接获取数据；降级结果明确标注" },
@@ -1811,6 +2116,20 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
     }
 
     if (url.pathname === "/api/city-search") return json({ cities: await searchCities(cleanText(url.searchParams.get("q")), 8), scope: "中国" });
+
+    if (url.pathname === "/api/travel-signals") {
+      const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
+      const names = cleanText(url.searchParams.get("spots"), "西湖,灵隐寺").split(/[,，]/).map((name) => cleanText(name)).filter(Boolean).slice(0, 12);
+      const spots = names.map((name, index) => ({ id: `signal-${index + 1}`, name }));
+      const [signals, social] = await Promise.all([publicTravelSignals(city, spots), optionalSocialSignals(env, city, spots)]);
+      return json({
+        city: city.name, provider: signals.provider, status: signals.status, fetchedAt: signals.fetchedAt,
+        articleCount: signals.articles?.length || 0,
+        social: { provider: social.provider, status: social.status, fetchedAt: social.fetchedAt, detail: social.detail },
+        spots: spots.map((spot) => ({ name: spot.name, socialMentions: Number(social.bySpot.get(spot.id) || 0), ...(signals.bySpot.get(spot.id) || { mentions: 0, domains: 0, articles: [], seasonal: [], openingAlerts: [] }) })),
+        error: signals.error || null, fallbackError: signals.fallbackError || null,
+      });
+    }
 
     if (url.pathname === "/api/weather") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"));
@@ -1964,8 +2283,8 @@ export async function handleTravelApi(request: Request, env: any, url: URL): Pro
           { id: "weather", label: "天气", provider: "Open-Meteo / 已配置天气服务", state: "loading" },
           { id: "routing", label: "路线与交通时间", provider: "高德路线 / OSRM", state: "waiting", detail: "候选坐标返回后计算" },
           { id: "hotels", label: "住宿候选", provider: "酒店服务 / 高德住宿检索", state: "loading" },
-          { id: "crowd", label: "拥挤与预约", provider: "官方实时接口", state: "unavailable", detail: "当前未连接" },
-          { id: "season", label: "当季景观", provider: "景点页面 / 受控公开信息检索", state: "loading" },
+          { id: "crowd", label: "拥挤与预约", provider: "Crowd Risk 日期 / 天气 / 趋势概率模型", state: "loading", detail: "将输出风险概率与置信度；预约余量没有官方接口时保持 Unknown" },
+          { id: "season", label: "热门与时令", provider: "NewsNow 国内热榜 / 近期公开报道 / 可选授权小红书 MCP", state: "loading", detail: "热门与时令分别取证" },
         ], items: [
           `✓ 已通过中国范围地理服务核验目的地：${envelope.city.displayName || envelope.city.name}`,
           `✓ 已锁定硬约束：${envelope.profile.requiredAttractions.length ? envelope.profile.requiredAttractions.join("、") : "未指定必去景点"}`,
@@ -2025,7 +2344,9 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     if (relatedRequired(spot) && !canonicalRequiredIds.has(spot.id)) return false;
     return true;
   });
-  const ranked = rankSpots(uniqueSpots([...required, ...filtered]), profile);
+  const preRanked = rankSpots(uniqueSpots([...required, ...filtered]), profile);
+  const intelligence = await enrichTravelIntelligence(preRanked, profile, city, weather, env);
+  const ranked = rankSpots(intelligence.spots, profile);
   if (ranked.length < Math.max(profile.days + required.length, 6)) throw new Error(`仅核验到 ${ranked.length} 个有效景点，无法可靠生成 ${profile.days} 天行程`);
 
   const trafficMatrix = await buildTrafficMatrix(profile, city, ranked);
@@ -2041,11 +2362,16 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       id: spot.id, name: canonicalName, officialName: spot.officialName || spot.name, aliases: imageLookupNames(canonicalName, city.name), lat: Number(spot.lat), lng: Number(spot.lng),
       category: spot.category, poiType: spot.category || "旅游景点", cluster: cleanText(spot.district || spot.address, "Unknown"),
       recommendedDurationMin: clamp(spot.durationMin || 120, 60, 240), openingHours: spot.openingHours || null,
-      openingStatus: spot.openingHours ? "estimated" : "unknown", reservation: { status: "unknown", note: "未接入景区指定日期官方预约余量" },
+      openingStatus: spot.openingStatus?.status || (spot.openingHours ? "estimated" : "unknown"), openingAlert: spot.openingStatus?.alert || null,
+      reservation: { status: "unknown", note: "未接入景区指定日期官方预约余量" },
       indoor: /博物馆|展览|纪念馆|美术馆/.test(`${spot.name}${spot.category}`) ? true : /山|湖|园|湿地|古镇|街/.test(`${spot.name}${spot.category}`) ? false : null,
       weatherFit: /博物馆|展览|纪念馆|美术馆/.test(`${spot.name}${spot.category}`) ? ["降雨备选"] : ["无强降雨时优先"],
       bestTimes: tags.includes("夜景") ? ["日落后"] : tags.includes("摄影") ? ["上午柔光", "日落前"] : ["开放时段内"],
-      seasonFit: { status: "unknown", note: profile.seasonalNeeds?.length ? `用户关注 ${profile.seasonalNeeds.join("、")}；尚无景区官方指定日期状态，不能当作确定盛花/秋色` : "未要求季节限定" },
+      seasonFit: spot.seasonality?.score != null
+        ? { status: "predicted", score: spot.seasonality.score, state: spot.seasonality.state, note: spot.seasonality.label, source: spot.seasonality.source, sourceUrl: spot.seasonality.sourceUrl }
+        : { status: "unknown", note: profile.seasonalNeeds?.length ? `用户关注 ${profile.seasonalNeeds.join("、")}；尚无指定日期时令实况证据` : "未取得指定日期时令实况证据" },
+      hotness: spot.hotness,
+      crowdRisk: spot.crowd,
       tags, requiredByUser: Boolean(spot.requiredByUser), sourceName: spot.sourceName || spot.source || "公开地图 / 中文维基百科",
       sourceUrl: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt,
       sources: [{ name: spot.sourceName || spot.source || "公开地图 / 中文维基百科", url: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt, status: spot.openingHours ? "entity-verified" : "entity-only" }],
@@ -2064,7 +2390,8 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       ...(weather.tripForecast.some((day: any) => day.quality === "unavailable") ? ["超出预报窗口的逐日天气"] : []),
       ...(!hotel.pricedCount ? ["指定日期酒店成交价与余房"] : []),
     ],
-    dataPolicy: { verified: "仅来自工具返回", prediction: "必须显示 Prediction 与依据", unknown: "不得升级为 Verified" },
+    dataPolicy: { verified: "仅来自工具返回", prediction: "必须显示 Prediction、概率、依据与不确定性", unknown: "不得升级为 Verified", crowd: "预测拥挤概率，不生成实时人数", trends: "Hotness 与 Seasonality 分离" },
+    intelligence: { news: { status: intelligence.news.status, provider: intelligence.news.provider, fetchedAt: intelligence.news.fetchedAt, articleCount: intelligence.news.articles?.length || 0 }, social: { status: intelligence.social.status, provider: intelligence.social.provider, fetchedAt: intelligence.social.fetchedAt, detail: intelligence.social.detail } },
   };
   const generated = await generatePlannerDraft(profile, knowledge, env, replanContext);
   const spotsById = new Map(spots.map((spot: any) => [spot.id, requiredNameById.has(spot.id) ? { ...spot, name: requiredNameById.get(spot.id), officialName: spot.officialName || spot.name } : spot]));
@@ -2129,7 +2456,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       title: draftVariant?.title || ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex], strategy: draftVariant?.strategy || "依据候选景点知识包与交通矩阵", weather,
       daysPlan, hotelPlan: hotel,
       budgetBreakdown: { knownEstimate: transportEstimate, limit: profile.budget, items: [{ name: "市内交通透明估算", amount: transportEstimate }, { name: "住宿", amount: hotel.pricedCount ? hotel.candidates?.[0]?.price || null : null }, { name: "门票", amount: null }, { name: "餐饮", amount: null }], note: "只汇总有数据来源的金额；缺失价格保持 Unknown" },
-      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", images: "高德官方 / Wikimedia / Unsplash", crowd: "Unknown；节假日风险仅可标记 Prediction", reservations: "Unknown" },
+      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", images: "高德官方 / Wikimedia / Unsplash", crowd: "Crowd Risk 多源概率模型（非实时人数）", hotness: intelligence.news.status === "ready" ? intelligence.news.provider : "Unknown", seasonality: "近期公开报道中的时令实况信号；无证据则 Unknown", social: intelligence.social.status === "ready" ? intelligence.social.provider : "可选社交 MCP 未连接", reservations: "Unknown" },
       generatedAt: fetchedAt,
       planningDecision: { model: generated.modelAudit.plannerModel, repairModel: generated.modelAudit.repairModel, repairRounds: generated.modelAudit.repairRounds, formatRepairs: generated.modelAudit.formatRepairs, networkToolCalls: generated.modelAudit.toolCalls, degraded: generated.modelAudit.degraded, degradationReason: generated.modelAudit.degradationReason || null, draftCompilerIssues: generated.modelAudit.compilerIssues },
       changeScope: replanContext && variantId === replanContext.activeVariant ? { mode: affectedDayIndexes.length ? "minimum-disruption" : "global-with-preservation-guidance", affectedDays: affectedDayIndexes.map((index: number) => index + 1), preservedDays: Array.from({ length: profile.days }, (_, index) => index + 1).filter((day) => !affectedDayIndexes.includes(day - 1)), note: "未受影响日期的稳定景点 ID 与原时间由后端锁定，不交给模型重写。" } : null,
@@ -2160,6 +2487,9 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     `✓ 已核验用户必去景点 ${required.length} 个；三套方案均通过覆盖检查`,
     `✓ 已在核心规划前计算交通矩阵 ${trafficMatrix.legs.length} 条有向路线（${trafficMatrix.source}）`,
     `✓ 天气状态：${providerBundle.weather.status === "ready" ? `由 ${weather.source} 返回` : "Unavailable，未套用其他日期"}`,
+    `✓ 公开趋势：${intelligence.news.status === "ready" ? `${intelligence.news.articles?.length || 0} 条近 7 天公开报道进入 Hotness / Seasonality 取证` : `Unavailable（${intelligence.news.error || "未返回"}）`}`,
+    `${intelligence.social.status === "ready" ? "✓" : "●"} 社交趋势：${intelligence.social.status === "ready" ? `${intelligence.social.provider} 已返回公开热榜数据` : "国内热榜不可用；可选小红书 MCP 未连接，未自动登录或绕过验证码"}`,
+    `✓ 已为 ${spots.filter((spot: any) => spot.crowd?.score != null).length} 个候选生成拥挤风险概率；没有生成景区实时人数`,
     `✓ 酒店状态：${hotel.candidates?.length ? `${hotel.candidates.length} 个候选，${hotel.pricedCount || 0} 个带来源参考价` : "Unknown，未生成假酒店或假价格"}`,
     `✓ ${generated.modelAudit.plannerModel} 已生成完整活动时间轴；联网查询工具实际调用 ${generated.modelAudit.toolCalls.length} 次`,
     `✓ Travel Compiler 检出 ${generated.modelAudit.compilerIssues.length} 项并执行 ${generated.modelAudit.repairRounds} 轮 AI 修复`,
@@ -2176,8 +2506,8 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       { id: "weather", label: "天气", provider: weather.source || "未返回", state: providerBundle.weather.status === "ready" ? "success" : "error", detail: providerBundle.weather.status === "ready" ? "已按出行日期核验" : providerBundle.weather.error },
       { id: "routing", label: "路线与交通时间", provider: trafficMatrix.source, state: trafficMatrix.legs.length ? "success" : "error", detail: `${trafficMatrix.legs.length} 条有向路线` },
       { id: "hotels", label: "住宿候选", provider: hotel.candidates?.length ? "高德地图 / 酒店 MCP" : "未返回", state: hotel.candidates?.length ? "success" : "unavailable", detail: hotel.candidates?.length ? `${hotel.candidates.length} 个候选` : "没有可靠候选" },
-      { id: "crowd", label: "拥挤与预约", provider: "未接官方实时接口", state: "unavailable", detail: "保持暂未核验" },
-      { id: "season", label: "当季景观", provider: "后端取证候选知识包", state: "success", detail: "AI 只读取已获取并标注来源的候选数据" },
+      { id: "crowd", label: "拥挤与预约", provider: "Crowd Risk 日期/天气/趋势概率模型", state: spots.some((spot: any) => spot.crowd?.score != null) ? "success" : "unavailable", detail: "Prediction，不等同实时人数；预约仍保持 Unknown" },
+      { id: "season", label: "热门与时令", provider: intelligence.news.status === "ready" ? `${intelligence.news.provider}${intelligence.social.status === "ready" ? ` + ${intelligence.social.provider}` : ""}` : "公开趋势服务未返回", state: intelligence.news.status === "ready" ? "success" : "unavailable", detail: `${spots.filter((spot: any) => spot.hotness?.score != null).length} 个有趋势信号 · ${spots.filter((spot: any) => spot.seasonality?.score != null).length} 个有时令证据` },
     ],
     formSync: profile,
     collapsible: true,

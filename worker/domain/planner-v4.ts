@@ -28,11 +28,14 @@ export interface PlannerSpot {
   category?: string;
   openingHours?: string | null;
   openingStatus?: "verified" | "estimated" | "unknown" | "conflicting";
+  openingAlert?: string | null;
   reservation?: { status: "verified" | "predicted" | "unknown"; note?: string };
   indoor?: boolean | null;
   recommendedDurationMin?: number;
   bestTimes?: string[];
   seasonFit?: { status: "verified" | "predicted" | "unknown"; note?: string; source?: string };
+  hotness?: { score?: number | null; label?: string; confidence?: number };
+  crowdRisk?: { score?: number | null; label?: string; confidence?: number; uncertainty?: string };
   sources?: Array<{ name: string; url?: string | null; fetchedAt?: string; status?: string }>;
   [key: string]: unknown;
 }
@@ -244,6 +247,10 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
         const open = openingRange(spotMap.get(activity.spotId)?.openingHours);
         if (open && start !== null && end !== null && (start < open[0] || end > open[1])) {
           issues.push({ code: "OPENING_CONFLICT", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spotMap.get(activity.spotId)?.name} 与开放时间冲突` });
+        }
+        const openingAlert = spotMap.get(activity.spotId)?.openingAlert;
+        if (openingAlert) {
+          issues.push({ code: "OPENING_ALERT_REVIEW", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spotMap.get(activity.spotId)?.name} 存在近期开放状态公告，需核对公告日期：${openingAlert}` });
         }
         const previousAttraction = attractionActivities[attractionActivities.indexOf(activity) - 1];
         if (previousAttraction?.spotId && activity.transportFromPrevious && pack.trafficMatrix) {

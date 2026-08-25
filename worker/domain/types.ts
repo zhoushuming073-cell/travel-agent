@@ -158,8 +158,37 @@ export interface ItinerarySpot {
     source?: string;
     confidence?: number;
     updatedAt?: string;
+    riskProbability?: number;
+    uncertainty?: "low" | "medium" | "high";
+    factors?: string[];
   } | null;
-  factObservations?: Partial<Record<"openingHours" | "reservation" | "crowd", FactObservation[]>>;
+  openingStatus?: {
+    status?: "verified" | "estimated" | "unknown" | "conflicting";
+    label?: string;
+    alert?: string | null;
+    sourceUrl?: string | null;
+    updatedAt?: string;
+  } | null;
+  hotness?: {
+    score?: number | null;
+    label?: string;
+    status?: TravelFactStatus;
+    confidence?: number;
+    updatedAt?: string;
+    source?: string;
+    sourceUrl?: string | null;
+  } | null;
+  seasonality?: {
+    score?: number | null;
+    state?: "OFF" | "PRE_SEASON" | "GOOD" | "PEAK" | "POST_PEAK" | "UNKNOWN";
+    label?: string;
+    status?: TravelFactStatus;
+    confidence?: number;
+    updatedAt?: string;
+    source?: string;
+    sourceUrl?: string | null;
+  } | null;
+  factObservations?: Partial<Record<"openingHours" | "reservation" | "crowd" | "hotness" | "seasonality", FactObservation[]>>;
 }
 
 export interface TransitEvidence {

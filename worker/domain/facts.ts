@@ -18,6 +18,8 @@ export const FACT_TTL_MS = {
   hotelPrice: 60 * 60 * 1000,
   openingOfficial: 24 * 60 * 60 * 1000,
   openingPublic: 7 * 24 * 60 * 60 * 1000,
+  hotness: 6 * 60 * 60 * 1000,
+  seasonality: 24 * 60 * 60 * 1000,
 } as const;
 
 function text(value: unknown, fallback = ""): string {
@@ -79,8 +81,8 @@ function source(
 }
 
 function importance(subject: string, field: string, required = false): ImportanceLevel {
-  if (required || /预约|开放/.test(field)) return "high";
-  if (/天气|交通|酒店价格/.test(`${subject}${field}`)) return "medium";
+  if (/预约|开放/.test(field)) return required ? "high" : "medium";
+  if (/天气|交通|酒店价格|拥挤|趋势热度|时令/.test(`${subject}${field}`)) return "medium";
   return "low";
 }
 
@@ -89,6 +91,8 @@ function impact(subject: string, field: string, required = false): string {
   if (/天气/.test(`${subject}${field}`)) return "可能改变户外节点顺序、停留时长与室内替代方案";
   if (/交通/.test(`${subject}${field}`)) return "可能压缩后续景点、用餐与返程缓冲";
   if (/客流|拥挤/.test(field)) return "可能改变到访时段或触发同类型替代点";
+  if (/趋势热度/.test(field)) return "只用于近期关注度排序，不能替代真实客流或预约状态";
+  if (/时令/.test(field)) return "可能改变季节限定景观的优先级与同类型替代点";
   if (/酒店价格/.test(field)) return "可能改变住宿预算，但通常不直接改变日间路线";
   return "对当前路线影响有限";
 }
@@ -218,6 +222,24 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
         ttlMs: openingObservations.some((item) => item.source.type === "official") ? FACT_TTL_MS.openingOfficial : FACT_TTL_MS.openingPublic,
       });
 
+      if (spot.openingStatus?.alert) {
+        add({
+          subject: spot.name,
+          field: "开放状态提醒",
+          value: spot.openingStatus.alert,
+          status: "conflicting",
+          sourceType: "official-publication-signal",
+          sourceName: "近期官方来源相关公告",
+          sourceUrl: spot.openingStatus.sourceUrl ?? spot.sourceUrl ?? null,
+          updatedAt: iso(spot.openingStatus.updatedAt, spotUpdatedAt),
+          confidence: 0.72,
+          importance: importance(spot.name, "开放状态提醒", spot.requiredByUser),
+          uncertaintyReason: "公告标题提示开放规则可能变化，需要打开原文核对生效日期与具体时段",
+          downstreamImpact: impact(spot.name, "开放状态提醒", spot.requiredByUser),
+          ttlMs: FACT_TTL_MS.openingOfficial,
+        });
+      }
+
       const reservationObservations = spot.factObservations?.reservation ?? [];
       add({
         subject: spot.name,
@@ -266,6 +288,44 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
         observations: crowdObservations,
         ttlMs: FACT_TTL_MS.crowd,
       });
+
+      const hotnessObservations = spot.factObservations?.hotness ?? [];
+      const hotnessKnown = spot.hotness?.score !== undefined && spot.hotness?.score !== null;
+      add({
+        subject: spot.name,
+        field: "趋势热度",
+        value: hotnessKnown ? { score: spot.hotness?.score, label: spot.hotness?.label } : hotnessObservations[0]?.value ?? null,
+        status: hotnessKnown ? "predicted" : "unknown",
+        sourceType: hotnessObservations[0]?.source.type ?? "none",
+        sourceName: hotnessObservations[0]?.source.name ?? text(spot.hotness?.source, "近 7 天未取得可归因趋势信号"),
+        sourceUrl: hotnessObservations[0]?.source.url ?? spot.hotness?.sourceUrl ?? null,
+        updatedAt: hotnessObservations[0]?.source.fetchedAt ?? iso(spot.hotness?.updatedAt, spotUpdatedAt),
+        confidence: hotnessObservations[0]?.confidence ?? spot.hotness?.confidence ?? 0,
+        importance: importance(spot.name, "趋势热度"),
+        uncertaintyReason: hotnessKnown ? "公开报道/授权社交信号只表示近期关注度，不等于景区在园人数" : "近 7 天没有取得可归因到该景点的趋势信号",
+        downstreamImpact: impact(spot.name, "趋势热度"),
+        observations: hotnessObservations,
+        ttlMs: FACT_TTL_MS.hotness,
+      });
+
+      const seasonObservations = spot.factObservations?.seasonality ?? [];
+      const seasonKnown = spot.seasonality?.score !== undefined && spot.seasonality?.score !== null;
+      add({
+        subject: spot.name,
+        field: "时令适配",
+        value: seasonKnown ? { score: spot.seasonality?.score, state: spot.seasonality?.state, label: spot.seasonality?.label } : seasonObservations[0]?.value ?? null,
+        status: seasonKnown ? "predicted" : "unknown",
+        sourceType: seasonObservations[0]?.source.type ?? "none",
+        sourceName: seasonObservations[0]?.source.name ?? text(spot.seasonality?.source, "未取得指定日期时令实况证据"),
+        sourceUrl: seasonObservations[0]?.source.url ?? spot.seasonality?.sourceUrl ?? null,
+        updatedAt: seasonObservations[0]?.source.fetchedAt ?? iso(spot.seasonality?.updatedAt, spotUpdatedAt),
+        confidence: seasonObservations[0]?.confidence ?? spot.seasonality?.confidence ?? 0,
+        importance: importance(spot.name, "时令适配"),
+        uncertaintyReason: seasonKnown ? "由近期公开报道提取的时令信号，仍需结合到访日天气复核" : "没有官方花期、秋色、冰雪或候鸟等指定日期实况证据",
+        downstreamImpact: impact(spot.name, "时令适配"),
+        observations: seasonObservations,
+        ttlMs: FACT_TTL_MS.seasonality,
+      });
     }
 
     for (const block of day.blocks.filter((item) => item.type === "leg")) {
@@ -308,4 +368,3 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
 
   return facts;
 }
-

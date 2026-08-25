@@ -52,7 +52,7 @@ export function compileItinerary(
     requiredCoverage: requiredCoverage(plan, profile),
     dayCount: plan.daysPlan.length === profile.days,
     chronology: chronologyValid(plan),
-    openingConflicts: facts.filter((fact) => fact.field === "开放时间" && fact.status === "conflicting").length,
+    openingConflicts: facts.filter((fact) => /开放时间|开放状态提醒/.test(fact.field) && fact.status === "conflicting").length,
     routeContinuity: routeContinuity(plan),
   };
   const issues: CompilerIssue[] = [];
@@ -110,4 +110,3 @@ export function compileItinerary(
     checks,
   };
 }
-
