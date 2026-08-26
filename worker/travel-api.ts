@@ -277,6 +277,7 @@ async function aiRequest(env: any, options: {
   messages: any[];
   jsonMode?: boolean;
   thinking?: boolean;
+  allowReasoningOnly?: boolean;
   maxTokens?: number;
   requestTimeoutMs?: number;
   webTools?: { city: string } | null;
@@ -323,10 +324,12 @@ async function aiRequest(env: any, options: {
         const message = result?.choices?.[0]?.message;
         if (!message) throw new Error(`联通元景 ${model} 没有返回消息`);
         const content = cleanText(message.content);
+        const reasoningContent = cleanText(message.reasoning_content);
         const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
         if (content && (toolLog.length > 0 || !calls.length || cleanText(result?.choices?.[0]?.finish_reason) !== "tool_calls")) {
-          return { content, model: cleanText(result?.model, model), toolLog, attemptedModels: [...failures, model] };
+          return { content, reasoningContent, model: cleanText(result?.model, model), toolLog, attemptedModels: [...failures, model] };
         }
+        if (options.allowReasoningOnly && reasoningContent && !calls.length) return { content: "", reasoningContent, model: cleanText(result?.model, model), toolLog, attemptedModels: [...failures, model] };
         if (!calls.length) throw new Error(`联通元景 ${model} 没有返回内容`);
         messages.push({ role: "assistant", content: message.content ?? "", reasoning_content: message.reasoning_content ?? "", tool_calls: message.tool_calls });
         for (const call of calls.slice(0, 3)) {
@@ -1859,12 +1862,26 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
   }))).filter(Boolean);
   modelAudit.toolCalls.push(...verifiedWebContext);
   const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives, knowledge, verifiedWebContext, replanContext };
+  let decisionMemo = "";
+  try {
+    const deliberation = await aiRequest(env, {
+      purpose: "planner", thinking: true, allowReasoningOnly: true, maxTokens: 1200, requestTimeoutMs: 45000,
+      messages: [
+        { role: "system", content: "你是 DeepSeek V4 Pro 行程决策器。先深度分析约束，只需给后续成稿模型一份精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
+        { role: "user", content: JSON.stringify(plannerInput) },
+      ],
+    });
+    decisionMemo = cleanText(deliberation.content || deliberation.reasoningContent).slice(0, 6000);
+  } catch (error: any) {
+    modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `V4 Pro 深度分析未在 45 秒预算内形成备忘录，继续由同一 V4 Pro 成稿并接受编译器校验：${cleanText(error?.message)}` });
+  }
+  await new Promise(resolve => setTimeout(resolve, 1200));
   const messages = [
-    { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n目标函数：${objectives.map(item => `${item.id}=${item.goal}`).join("\n")}\n后端已在本请求中完成联网取证并把结果写入 verifiedWebContext。你必须结合这些公开证据、天气、交通矩阵与时间语义进行深度决策；未返回的实时客流、预约、开放和价格必须保持 Unknown。` },
+    { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n目标函数：${objectives.map(item => `${item.id}=${item.goal}`).join("\n")}\n后端已在本请求中完成联网取证并把结果写入 verifiedWebContext。你必须结合这些公开证据、天气、交通矩阵与时间语义进行决策；未返回的实时客流、预约、开放和价格必须保持 Unknown。${decisionMemo ? `\nV4 Pro 深度决策备忘录（不是新增事实）：\n${decisionMemo}` : ""}` },
     { role: "user", content: JSON.stringify({ ...plannerInput, instruction: "一次输出 hot、niche、relax 三套完整活动时间轴 JSON；字段简洁，不要写长篇文案。" }) },
   ];
   try {
-    const response = await aiJson(env, { purpose: "planner", thinking: true, maxTokens: 6400, requestTimeoutMs: 210000, messages });
+    const response = await aiJson(env, { purpose: "planner", thinking: false, maxTokens: 6400, requestTimeoutMs: 150000, messages });
     draft = normalizePlannerDraft(response.value, profile);
     modelAudit.plannerModel = response.model;
     if (response.formatRepaired) modelAudit.formatRepairs += 1;
