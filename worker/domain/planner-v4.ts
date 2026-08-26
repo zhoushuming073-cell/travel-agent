@@ -283,7 +283,7 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
             if (!activity.transportFromPrevious) issues.push({ code: "TRANSIT_MISSING", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 未写入相邻地点交通时间` });
             else if (Math.abs(Number(activity.transportFromPrevious.durationMin) - matrixLeg.durationMin) > Math.max(12, matrixLeg.durationMin * 0.45)) issues.push({ code: "TRANSIT_MISMATCH", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 的交通时间与输入矩阵差异过大` });
             const previousEnd = timeToMinutes(previousAttraction.endTime);
-            if (previousEnd !== null && start !== null && start - previousEnd < matrixLeg.durationMin) issues.push({ code: "TRANSIT_GAP", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 没有为 ${spotMap.get(previousAttraction.spotId)?.name} 到 ${spot?.name} 留足交通时间` });
+            if (previousEnd !== null && start !== null && start - previousEnd < matrixLeg.durationMin) issues.push({ code: "TRANSIT_GAP", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 没有为 ${spotMap.get(previousAttraction.spotId)?.name} 到 ${spot?.name} 留足交通时间：矩阵需要 ${matrixLeg.durationMin} 分钟，当前只留 ${Math.max(0, start - previousEnd)} 分钟` });
           }
         }
       }

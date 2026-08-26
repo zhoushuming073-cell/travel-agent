@@ -226,7 +226,31 @@ function poiImageScore(poi: any, wantedNames: string[]) {
 }
 
 function parseJsonObject(text: string) {
-  return parseStrictJsonObject(text);
+  try { return parseStrictJsonObject(text); }
+  catch {
+    const source = String(text ?? "");
+    const start = source.indexOf("{");
+    if (start < 0) throw new Error("DeepSeek 未返回有效 JSON 对象");
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) return parseStrictJsonObject(source.slice(start, index + 1));
+      }
+    }
+    throw new Error("DeepSeek 返回的 JSON 被截断");
+  }
 }
 
 async function searchVerifiedTravelContext(query: string, city: string, env: any) {
@@ -311,6 +335,7 @@ async function aiRequest(env: any, options: {
           stream: false,
           chat_template_kwargs: { enable_thinking: Boolean(options.thinking) },
         };
+        if (options.jsonMode && !options.thinking) payload.response_format = { type: "json_object" };
         if (!options.thinking) payload.temperature = options.jsonMode ? 0.1 : 0.25;
         // One auditable search round is enough: the model may request up to three
         // queries in that round, then it must synthesize from the returned evidence.
@@ -1019,7 +1044,7 @@ function visitSemantics(spot: any, weatherDays: any[] = []) {
   const text = `${cleanText(spot?.name)} ${cleanText(spot?.officialName)} ${cleanText(spot?.category)} ${cleanText(spot?.type)}`;
   const firstSunset = weatherDays.map((day: any) => cleanText(day?.sunset)).find(Boolean) || "18:30";
   if (/饭店|餐厅|酒楼|餐馆|食府|茶楼|小吃/.test(text)) return { role: "meal-landmark", preferredWindows: ["11:30-13:30", "17:30-20:00"], avoidWindows: ["09:00-11:00", "14:00-17:00"], rationale: "餐饮型目的地应进入午餐或晚餐时段，不能当普通上午景点安排" };
-  if (/外滩|夜景|夜游|灯光|江景|滨江|天际线|观景台|电视塔/.test(text)) return { role: "nightscape", preferredWindows: [`${firstSunset}-21:00`], avoidWindows: ["09:00-16:30"], rationale: `夜景型地点应在日落（约 ${firstSunset}）后安排，同时保留返程时间` };
+  if (/外滩|夜景|夜游|灯光秀|天际线|观景台|电视塔/.test(text)) return { role: "nightscape", preferredWindows: [`${firstSunset}-21:00`], avoidWindows: ["09:00-16:30"], rationale: `夜景型地点应在日落（约 ${firstSunset}）后安排，同时保留返程时间` };
   if (/博物馆|美术馆|纪念馆|展览馆|科技馆/.test(text)) return { role: "timed-indoor", preferredWindows: ["09:30-11:30", "13:30-16:30"], avoidWindows: ["12:00-13:00"], rationale: "展馆优先服从开放与预约时段" };
   if (/公园|园|湖|山|湿地|古镇|寺|庙/.test(text)) return { role: "daylight-outdoor", preferredWindows: ["08:30-11:00", `15:30-${firstSunset}`], avoidWindows: ["11:30-14:30"], rationale: "户外与摄影地点优先柔和光线和较低体感时段" };
   return { role: "flexible", preferredWindows: ["09:30-11:30", "14:00-17:00"], avoidWindows: [], rationale: "在开放时间、交通矩阵和用餐缓冲内灵活安排" };
@@ -1836,6 +1861,83 @@ function normalizePlannerDraft(value: any, profile: any) {
   };
 }
 
+function normalizePlannerVariant(value: any, profile: any, variantIndex: number) {
+  const rawVariant = Array.isArray(value?.variants) ? value.variants[0] : value?.variant || value;
+  const normalized = normalizePlannerDraft({ variants: [rawVariant] }, profile).variants[0];
+  if (!normalized) return null;
+  return {
+    ...normalized,
+    id: ["hot", "niche", "relax"][variantIndex],
+    title: cleanText(rawVariant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
+    style: cleanText(rawVariant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
+  };
+}
+
+function bindTrafficMatrixFacts(draft: any, knowledge: any) {
+  const matrix = knowledge?.trafficMatrix;
+  if (!matrix?.legs?.length) return draft;
+  for (const variant of draft.variants || []) {
+    for (const day of variant.days || []) {
+      const spotActivities = (day.activities || [])
+        .filter((activity: any) => Boolean(activity.spotId))
+        .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
+      for (let index = 1; index < spotActivities.length; index += 1) {
+        const previous = spotActivities[index - 1];
+        const current = spotActivities[index];
+        const leg = matrix.legs.find((item: any) => item.fromId === previous.spotId && item.toId === current.spotId)
+          || matrix.legs.find((item: any) => item.fromId === current.spotId && item.toId === previous.spotId);
+        if (!leg || current.transportFromPrevious) continue;
+        current.transportFromPrevious = {
+          mode: "公共交通 / 步行（以地图复核为准）",
+          durationMin: Number(leg.durationMin),
+          matrixKey: `${previous.spotId}->${current.spotId}`,
+        };
+      }
+      day.totalTransportMin = spotActivities.slice(1).reduce((sum: number, activity: any) => sum + Number(activity.transportFromPrevious?.durationMin || 0), 0);
+    }
+  }
+  return draft;
+}
+
+function legalizePlannerTimelines(draft: any, knowledge: any) {
+  const matrix = knowledge?.trafficMatrix;
+  let shiftedActivities = 0;
+  let shiftedMinutes = 0;
+  for (const variant of draft.variants || []) {
+    for (const day of variant.days || []) {
+      const ordered = [...(day.activities || [])]
+        .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
+      let previousEnd = 0;
+      let previousSpot: any = null;
+      for (const activity of ordered) {
+        const originalStart = timeToMinutes(activity.startTime, previousEnd);
+        const originalEnd = timeToMinutes(activity.endTime, originalStart + Number(activity.durationMin || 0));
+        const durationFromTimes = originalEnd - originalStart;
+        const duration = durationFromTimes > 0 ? durationFromTimes : Math.max(15, Number(activity.durationMin || 0));
+        let minimumStart = previousEnd;
+        if (activity.spotId && previousSpot?.spotId && matrix?.legs?.length) {
+          const leg = matrix.legs.find((item: any) => item.fromId === previousSpot.spotId && item.toId === activity.spotId)
+            || matrix.legs.find((item: any) => item.fromId === activity.spotId && item.toId === previousSpot.spotId);
+          if (leg) minimumStart = Math.max(minimumStart, previousSpot.end + Number(leg.durationMin));
+        }
+        const legalizedStart = Math.max(originalStart, minimumStart);
+        if (legalizedStart > originalStart) {
+          shiftedActivities += 1;
+          shiftedMinutes += legalizedStart - originalStart;
+          activity.startTime = minutesToTime(legalizedStart);
+          activity.endTime = minutesToTime(legalizedStart + duration);
+        }
+        activity.durationMin = duration;
+        const legalizedEnd = legalizedStart + duration;
+        previousEnd = legalizedEnd;
+        if (activity.spotId) previousSpot = { spotId: activity.spotId, end: legalizedEnd };
+      }
+      day.activities = ordered;
+    }
+  }
+  return { shiftedActivities, shiftedMinutes };
+}
+
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
   assertPlannerContext(knowledge);
   const modelAudit = { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, degraded: false, degradationReason: "", compilerIssues: [] as any[] };
@@ -1876,43 +1978,77 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
     modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `V4 Pro 深度分析未在 45 秒预算内形成备忘录，继续由同一 V4 Pro 成稿并接受编译器校验：${cleanText(error?.message)}` });
   }
   await new Promise(resolve => setTimeout(resolve, 1200));
-  const messages = [
-    { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n目标函数：${objectives.map(item => `${item.id}=${item.goal}`).join("\n")}\n后端已在本请求中完成联网取证并把结果写入 verifiedWebContext。你必须结合这些公开证据、天气、交通矩阵与时间语义进行决策；未返回的实时客流、预约、开放和价格必须保持 Unknown。${decisionMemo ? `\nV4 Pro 深度决策备忘录（不是新增事实）：\n${decisionMemo}` : ""}` },
-    { role: "user", content: JSON.stringify({ ...plannerInput, instruction: "一次输出 hot、niche、relax 三套完整活动时间轴 JSON；字段简洁，不要写长篇文案。" }) },
-  ];
-  try {
-    const response = await aiJson(env, { purpose: "planner", thinking: false, maxTokens: 6400, requestTimeoutMs: 150000, messages });
-    draft = normalizePlannerDraft(response.value, profile);
-    modelAudit.plannerModel = response.model;
-    if (response.formatRepaired) modelAudit.formatRepairs += 1;
-    if (draft.variants.length !== 3) throw new Error(`模型只返回 ${draft.variants.length} 套方案`);
-  } catch (error: any) {
-    throw new Error(`DeepSeek V4 Pro 未能生成可靠时间轴：${cleanText(error?.message, "主规划模型调用失败")}`);
-  }
-
-  let audit = auditPlannerDraft(draft, knowledge);
-  for (let round = 0; round < 1 && audit.hardIssues.length > 0; round += 1) {
+  draft = { variants: [] };
+  // Generate each alternative separately. This keeps four-day timelines below
+  // upstream output limits while every call still shares the same V4 Pro memo,
+  // evidence pack and already-generated variant summaries.
+  for (let variantIndex = 0; variantIndex < objectives.length; variantIndex += 1) {
+    const objective = objectives[variantIndex];
+    if (variantIndex > 0) await new Promise(resolve => setTimeout(resolve, 900));
     try {
-      const repaired = await aiJson(env, {
-        purpose: "repair", thinking: false, maxTokens: 6800, requestTimeoutMs: 60000,
+      const supplemental = await aiJson(env, {
+        purpose: "planner", thinking: false, maxTokens: 5200, requestTimeoutMs: 120000,
         messages: [
-          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你现在是冲突修复器。只修复问题清单涉及的日期或节点；硬约束不能删除。输出修复后的完整三套方案 JSON，字段保持简洁。` },
-          { role: "user", content: JSON.stringify({ knowledge, draft, issues: audit.issues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, softConstraints: { preferences: profile.preferences, pace: profile.pace }, replanContext }) },
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证，verifiedWebContext、天气和交通矩阵均在输入中。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}，不得输出另外两套。${decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${decisionMemo}` : ""}` },
+          { role: "user", content: JSON.stringify({ ...plannerInput, objective, existingVariantSummaries: draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
         ],
       });
-      draft = normalizePlannerDraft(repaired.value, profile);
-      modelAudit.repairModel = repaired.model;
-      modelAudit.repairRounds += 1;
-      if (repaired.formatRepaired) modelAudit.formatRepairs += 1;
-      audit = auditPlannerDraft(draft, knowledge);
+      const variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
+      if (!variant?.days?.length) throw new Error(`${objective.id} 没有返回完整日期`);
+      draft.variants.push(variant);
+      modelAudit.plannerModel = supplemental.model;
+      if (supplemental.formatRepaired) modelAudit.formatRepairs += 1;
     } catch (error: any) {
-      modelAudit.compilerIssues.push({ code: "REPAIR_FAILED", message: cleanText(error?.message) });
-      break;
+      throw new Error(`DeepSeek V4 Pro 未能补全 ${objective.name} 方案：${cleanText(error?.message, "规划模型调用失败")}`);
     }
+  }
+  if (draft.variants.length !== 3) throw new Error(`DeepSeek V4 Pro 未能生成可靠时间轴：最终只有 ${draft.variants.length} 套方案`);
+  bindTrafficMatrixFacts(draft, knowledge);
+  const initialLegalization = legalizePlannerTimelines(draft, knowledge);
+  if (initialLegalization.shiftedActivities) modelAudit.compilerIssues.push({
+    code: "TIMELINE_LEGALIZED", severity: "warning",
+    message: `Travel Compiler 未改变景点选择或顺序，按交通矩阵顺延 ${initialLegalization.shiftedActivities} 个节点，共 ${initialLegalization.shiftedMinutes} 分钟`,
+  });
+
+  let audit = auditPlannerDraft(draft, knowledge);
+  for (let round = 0; round < 2 && audit.hardIssues.length > 0; round += 1) {
+    const affectedIds = new Set(audit.hardIssues.map((issue: any) => cleanText(issue.variantId)).filter(Boolean));
+    if (!affectedIds.size) affectedIds.add("relax");
+    for (const variantId of affectedIds) {
+      const variantIndex = ["hot", "niche", "relax"].indexOf(variantId);
+      if (variantIndex < 0 || !draft.variants[variantIndex]) continue;
+      const variantIssues = audit.hardIssues.filter((issue: any) => !issue.variantId || issue.variantId === variantId);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 900));
+        const repaired = await aiJson(env, {
+          purpose: "repair", thinking: false, maxTokens: 5600, requestTimeoutMs: 90000,
+          messages: [
+            { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你现在是单方案冲突修复器。只输出 {"variants":[修复后的 ${variantId} 完整方案]}。逐项消除问题清单，保留必去点；不得修改为算法占位或删除正常用餐。` },
+            { role: "user", content: JSON.stringify({ knowledge, variant: draft.variants[variantIndex], otherVariantSummaries: draft.variants.filter((_: any, index: number) => index !== variantIndex).map((variant: any) => ({ id: variant.id, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), issues: variantIssues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, softConstraints: { preferences: profile.preferences, pace: profile.pace }, replanContext }) },
+          ],
+        });
+        const repairedVariant = normalizePlannerVariant(repaired.value, profile, variantIndex);
+        if (!repairedVariant?.days?.length) throw new Error(`${variantId} 修复结果缺少完整日期`);
+        draft.variants[variantIndex] = repairedVariant;
+        bindTrafficMatrixFacts(draft, knowledge);
+        const repairedLegalization = legalizePlannerTimelines(draft, knowledge);
+        if (repairedLegalization.shiftedActivities) modelAudit.compilerIssues.push({
+          code: "TIMELINE_LEGALIZED_AFTER_REPAIR", severity: "warning", variantId,
+          message: `AI 局部修复后按交通矩阵顺延 ${repairedLegalization.shiftedActivities} 个节点，共 ${repairedLegalization.shiftedMinutes} 分钟`,
+        });
+        modelAudit.repairModel = repaired.model;
+        if (repaired.formatRepaired) modelAudit.formatRepairs += 1;
+      } catch (error: any) {
+        modelAudit.compilerIssues.push({ code: "REPAIR_FAILED", variantId, message: cleanText(error?.message) });
+      }
+    }
+    modelAudit.repairRounds += 1;
+    audit = auditPlannerDraft(draft, knowledge);
   }
   modelAudit.compilerIssues.push(...audit.issues);
   if (audit.hardIssues.length) {
-    throw new Error(`DeepSeek V4 Pro 经 ${modelAudit.repairRounds} 轮修复后仍有 ${audit.hardIssues.length} 个时间或约束冲突，系统拒绝返回低质量算法拼接行程`);
+    const summary = audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
+    throw new Error(`DeepSeek V4 Pro 经 ${modelAudit.repairRounds} 轮修复后仍有 ${audit.hardIssues.length} 个时间或约束冲突，系统拒绝返回低质量算法拼接行程${summary ? `。主要问题：${summary}` : ""}`);
   }
   return { draft, audit, modelAudit };
 }
