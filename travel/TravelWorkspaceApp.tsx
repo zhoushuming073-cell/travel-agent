@@ -15,7 +15,7 @@ import { RequirementProfile } from "./components/RequirementProfile.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
-import { explainPlan, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
+import { explainPlan, monitorTrip, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
 import { WORKSPACE_STAGES } from "./state/machine.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
 
@@ -82,6 +82,8 @@ export function TravelWorkspaceApp() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const planningController = useRef<AbortController | null>(null);
+  const monitorEventRef = useRef("");
+  const monitoredReplanRef = useRef<(text: string) => Promise<void>>(async () => undefined);
 
   const activePlan = useMemo(() => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null, [activePlanId, plans]);
   const stageConfig = WORKSPACE_STAGES[stage];
@@ -266,9 +268,9 @@ export function TravelWorkspaceApp() {
     await persist({ state: "READY", activePlanId: planId, versions: nextVersions, progress });
   };
 
-  const sendComposer = async (text: string) => {
+  const sendComposer = async (text: string, origin: "user" | "monitor" = "user") => {
     const createdAt = new Date().toISOString();
-    setMessages((current) => [...current, { id: `user-${Date.now()}`, role: "user", text, createdAt }]);
+    setMessages((current) => [...current, { id: `${origin}-${Date.now()}`, role: origin === "user" ? "user" : "assistant", text: origin === "user" ? text : `执行监控：${text}`, createdAt }]);
     if (!activePlan || !profile) return;
     setBusy(true);
     setError(null);
@@ -309,6 +311,25 @@ export function TravelWorkspaceApp() {
       setStage("READY");
     } finally { setBusy(false); }
   };
+  monitoredReplanRef.current = (text: string) => sendComposer(text, "monitor");
+
+  useEffect(() => {
+    if (stage !== "READY" || reviewStep !== 3 || !activePlan || !profile || busy) return;
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    if (!activePlan.daysPlan.some((day) => day.date === today)) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const result = await monitorTrip(activePlan, profile);
+        if (cancelled || !result.actionable || !result.adjustment || !result.eventKey || result.eventKey === monitorEventRef.current) return;
+        monitorEventRef.current = result.eventKey;
+        await monitoredReplanRef.current(result.adjustment);
+      } catch { /* 途中监控失败不打断用户查看当前行程 */ }
+    };
+    void check();
+    const timer = setInterval(() => void check(), 5 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activePlan, busy, profile, reviewStep, stage]);
 
   const applyPendingChange = async () => {
     if (!pendingChange) return;

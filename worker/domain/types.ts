@@ -35,6 +35,7 @@ export interface TravelProfile {
   returnTime?: string;
   extractionModel?: string;
   extractionFormatRepaired?: boolean;
+  fieldSources?: Record<string, "text-rule" | "ai-text" | "parameter" | "calculated" | "default">;
   pace?: string;
   transport?: string;
   hotelPreference?: string;
@@ -152,6 +153,11 @@ export interface ItinerarySpot {
   website?: string | null;
   fetchedAt?: string;
   requiredByUser?: boolean;
+  reservation?: {
+    relevant?: boolean;
+    status?: string;
+    note?: string;
+  };
   crowd?: {
     score?: number;
     label?: string;
@@ -161,6 +167,13 @@ export interface ItinerarySpot {
     riskProbability?: number;
     uncertainty?: "low" | "medium" | "high";
     factors?: string[];
+    recommendedWindow?: string;
+    avoidWindow?: string;
+    action?: string;
+    visitTime?: string;
+    visitDate?: string;
+    baseDate?: string;
+    timeWindows?: Array<{ time: string; score: number; label: string }>;
   } | null;
   openingStatus?: {
     status?: "verified" | "estimated" | "unknown" | "conflicting";

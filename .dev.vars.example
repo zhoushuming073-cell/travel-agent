@@ -1,11 +1,11 @@
 # 联通元景 OpenAI 兼容接口（服务端使用，切勿把密钥放入前端代码）
 AI_API_KEY=
 AI_API_BASE_URL=https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions
-AI_EXTRACT_MODEL=glm-5
+AI_EXTRACT_MODEL=deepseek-v4-flash
 AI_PLANNER_MODEL=deepseek-v4-pro-0813
 AI_REPAIR_MODEL=deepseek-v4-pro-0813
 AI_REPAIR_FALLBACK_MODEL=
-AI_EXPLAIN_MODEL=glm-5
+AI_EXPLAIN_MODEL=deepseek-v4-flash
 
 # 旧环境变量仍被兼容，新部署建议使用上述 AI_* 变量
 DEEPSEEK_API_KEY=

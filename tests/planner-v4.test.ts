@@ -62,13 +62,12 @@ const knowledge: PlannerKnowledgePack = {
 };
 
 function day(day: number, spotIds: string[]) {
-  const startHour = 9;
   const activities = [
     ...spotIds.map((spotId, index) => ({
       type: "attraction" as const,
       spotId,
-      startTime: `${String(startHour + index * 3).padStart(2, "0")}:00`,
-      endTime: `${String(startHour + index * 3 + 2).padStart(2, "0")}:00`,
+      startTime: index === 0 ? "09:00" : "14:00",
+      endTime: index === 0 ? "11:00" : "16:00",
       durationMin: 120,
       transportFromPrevious: index ? { mode: "公共交通", durationMin: 25, matrixKey: `${spotIds[index - 1]}->${spotId}` } : undefined,
       reason: "依据候选景点标签与交通矩阵",
@@ -117,6 +116,42 @@ test("variant difference metrics reject name-only alternatives", () => {
   identical.variants[2].days = structuredClone(identical.variants[0].days);
   assert.ok(buildDifferenceMetrics(identical).maxJaccard > 0.9);
   assert.ok(auditPlannerDraft(identical, knowledge).issues.some((issue) => issue.code === "VARIANTS_TOO_SIMILAR"));
+});
+
+test("Shanghai meal landmark and nightscape timing are hard constraints", () => {
+  const shanghaiSpots = [
+    { id: "peace-hotel", name: "和平饭店", requiredByUser: true, timeRole: "meal-landmark" as const },
+    { id: "bund", name: "上海外滩", requiredByUser: true, timeRole: "nightscape" as const },
+  ];
+  const shanghaiPack: PlannerKnowledgePack = {
+    profile: { city: "上海", startDate: "2026-08-25", days: 1, dayStart: "09:00", dayEnd: "21:00", requiredAttractions: ["和平饭店", "上海外滩"] },
+    spots: shanghaiSpots,
+    weather: [{ date: "2026-08-25", sunset: "18:24" }],
+    hotel: {},
+    trafficMatrix: {
+      source: "高德/OSRM", fetchedAt: "2026-08-25T08:00:00Z", quality: "routed",
+      nodes: shanghaiSpots.map(({ id, name }) => ({ id, name })),
+      legs: [{ fromId: "peace-hotel", toId: "bund", durationMin: 20, distanceM: 1500, source: "高德/OSRM", quality: "routed", fetchedAt: "2026-08-25T08:00:00Z" }],
+    },
+    unknowns: [],
+  };
+  const invalidDay = {
+    day: 1, theme: "上海经典", returnHotelTime: "19:30", totalActivityMin: 240, totalTransportMin: 20,
+    activities: [
+      { type: "attraction" as const, spotId: "peace-hotel", startTime: "09:30", endTime: "11:00", durationMin: 90, reason: "错误的普通景点安排", evidenceRefs: [] },
+      { type: "meal" as const, startTime: "12:00", endTime: "13:00", durationMin: 60, label: "午餐", reason: "午餐", evidenceRefs: [] },
+      { type: "attraction" as const, spotId: "bund", startTime: "15:00", endTime: "17:00", durationMin: 120, transportFromPrevious: { mode: "步行", durationMin: 20 }, reason: "错误的白天外滩", evidenceRefs: [] },
+      { type: "rest" as const, startTime: "17:00", endTime: "17:30", durationMin: 30, reason: "休息", evidenceRefs: [] },
+    ],
+  };
+  const invalid: PlannerDraft = { variants: [
+    { id: "hot", title: "经典", style: "经典", strategy: "", days: [invalidDay] },
+    { id: "niche", title: "摄影", style: "摄影", strategy: "", days: [structuredClone(invalidDay)] },
+    { id: "relax", title: "轻松", style: "轻松", strategy: "", days: [structuredClone(invalidDay)] },
+  ] };
+  const issues = auditPlannerDraft(invalid, shanghaiPack).issues.map((issue) => issue.code);
+  assert.ok(issues.includes("MEAL_LANDMARK_TIME"));
+  assert.ok(issues.includes("NIGHTSCAPE_TOO_EARLY"));
 });
 
 test("deterministic fields override extraction without promoting preferences to must-go", () => {

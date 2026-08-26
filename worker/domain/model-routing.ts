@@ -4,10 +4,10 @@ export const YUANJING_CHAT_COMPLETIONS =
   "https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions";
 
 const DEFAULT_MODELS: Record<AiPurpose, string[]> = {
-  extract: ["glm-5", "deepseek-v4-pro-0813"],
+  extract: ["deepseek-v4-flash"],
   planner: ["deepseek-v4-pro-0813"],
   repair: ["deepseek-v4-pro-0813"],
-  explain: ["glm-5", "deepseek-v4-pro-0813"],
+  explain: ["deepseek-v4-flash", "deepseek-v4-pro-0813"],
 };
 
 function clean(value: unknown) {
@@ -29,7 +29,8 @@ export function aiModelCandidates(env: Record<string, unknown>, purpose: AiPurpo
     repair: [env.AI_REPAIR_MODEL, env.DEEPSEEK_REPAIR_MODEL, env.AI_REPAIR_FALLBACK_MODEL],
     explain: [env.AI_EXPLAIN_MODEL, env.DEEPSEEK_MODEL, env.AI_PLANNER_MODEL, env.DEEPSEEK_PLANNER_MODEL],
   };
-  return [...new Set([...configured[purpose].map(clean).filter(Boolean), ...DEFAULT_MODELS[purpose]])];
+  return [...new Set([...configured[purpose].map(clean).filter(Boolean), ...DEFAULT_MODELS[purpose]])]
+    .filter((model) => !/^glm(?:-|$)/i.test(model));
 }
 
 export function aiPrimaryModel(env: Record<string, unknown>, purpose: AiPurpose) {
@@ -37,7 +38,6 @@ export function aiPrimaryModel(env: Record<string, unknown>, purpose: AiPurpose)
 }
 
 export function modelFamily(model: string) {
-  if (/^glm-/i.test(model)) return "GLM";
   if (/deepseek/i.test(model)) return "DeepSeek";
   return "AI";
 }

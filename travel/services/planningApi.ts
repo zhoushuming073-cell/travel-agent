@@ -100,6 +100,28 @@ export async function explainPlan(prompt: string, plan: UiPlan, profile: TravelP
   return body.message;
 }
 
+export interface ExecutionMonitorResult {
+  active: boolean;
+  actionable: boolean;
+  checkedAt: string;
+  eventKey?: string;
+  adjustment?: string;
+  note?: string;
+  triggers?: Array<{ code: string; severity: string; subject: string; reason: string; action: string; sourceUrl?: string | null }>;
+}
+
+export async function monitorTrip(plan: UiPlan, profile: TravelProfile): Promise<ExecutionMonitorResult> {
+  const compactPlan = {
+    city: plan.city,
+    daysPlan: plan.daysPlan.map((day) => ({
+      day: day.day, date: day.date,
+      items: day.items.map((item) => ({ id: item.id, name: item.name, lat: item.lat, lng: item.lng, startTime: item.startTime, endTime: item.endTime })),
+      blocks: day.blocks?.filter((block) => block.type === "leg").map((block) => ({ type: block.type, from: block.from, to: block.to, durationMin: block.durationMin })) ?? [],
+    })),
+  };
+  return requestJson<ExecutionMonitorResult>("/api/monitor", { method: "POST", body: JSON.stringify({ profile, plan: compactPlan }) });
+}
+
 export async function loadProviders(): Promise<Record<string, unknown>> {
   return requestJson<Record<string, unknown>>("/api/providers/status");
 }

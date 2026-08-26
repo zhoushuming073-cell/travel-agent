@@ -241,7 +241,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
       }
 
       const reservationObservations = spot.factObservations?.reservation ?? [];
-      add({
+      if (spot.reservation?.relevant !== false) add({
         subject: spot.name,
         field: "预约状态",
         value: reservationObservations[0]?.value ?? null,
@@ -261,7 +261,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
       const crowdKnown = spot.crowd?.score !== undefined && spot.crowd?.score !== null;
       if (!crowdObservations.length && crowdKnown) {
         crowdObservations.push({
-          value: { score: spot.crowd?.score, label: spot.crowd?.label },
+          value: { score: spot.crowd?.score, label: spot.crowd?.label, factors: spot.crowd?.factors, recommendedWindow: spot.crowd?.recommendedWindow, avoidWindow: spot.crowd?.avoidWindow, action: spot.crowd?.action },
           confidence: spot.crowd?.confidence ?? 0.5,
           source: source(
             `source-${spot.id}-crowd`,
@@ -276,7 +276,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
       add({
         subject: spot.name,
         field: "拥挤风险",
-        value: crowdKnown ? { score: spot.crowd?.score, label: spot.crowd?.label } : crowdObservations[0]?.value ?? null,
+        value: crowdKnown ? { score: spot.crowd?.score, label: spot.crowd?.label, factors: spot.crowd?.factors, recommendedWindow: spot.crowd?.recommendedWindow, avoidWindow: spot.crowd?.avoidWindow, action: spot.crowd?.action, visitTime: spot.crowd?.visitTime, visitDate: spot.crowd?.visitDate } : crowdObservations[0]?.value ?? null,
         status: crowdKnown || crowdObservations.length ? "predicted" : "unknown",
         sourceType: crowdObservations[0]?.source.type ?? "none",
         sourceName: crowdObservations[0]?.source.name ?? "无可验证官方客流来源",
@@ -291,7 +291,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
 
       const hotnessObservations = spot.factObservations?.hotness ?? [];
       const hotnessKnown = spot.hotness?.score !== undefined && spot.hotness?.score !== null;
-      add({
+      if (hotnessKnown || hotnessObservations.length) add({
         subject: spot.name,
         field: "趋势热度",
         value: hotnessKnown ? { score: spot.hotness?.score, label: spot.hotness?.label } : hotnessObservations[0]?.value ?? null,
@@ -310,7 +310,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
 
       const seasonObservations = spot.factObservations?.seasonality ?? [];
       const seasonKnown = spot.seasonality?.score !== undefined && spot.seasonality?.score !== null;
-      add({
+      if (seasonKnown || seasonObservations.length) add({
         subject: spot.name,
         field: "时令适配",
         value: seasonKnown ? { score: spot.seasonality?.score, state: spot.seasonality?.state, label: spot.seasonality?.label } : seasonObservations[0]?.value ?? null,

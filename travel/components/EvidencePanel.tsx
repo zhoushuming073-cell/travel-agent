@@ -3,7 +3,7 @@
 import type { TravelFactStatus } from "../../worker/domain/types.ts";
 import type { UiPlan } from "../types.ts";
 
-const labels: Record<TravelFactStatus, string> = { verified: "Verified", estimated: "Estimated", predicted: "Prediction", unknown: "Unknown", conflicting: "Conflicting", stale: "Stale" };
+const labels: Record<TravelFactStatus, string> = { verified: "已核验", estimated: "公开参考", predicted: "预测", unknown: "暂无证据", conflicting: "需复核", stale: "已过期" };
 
 export function EvidencePanel({ plan }: { plan: UiPlan }) {
   const counts = plan.travelFacts?.reduce<Record<string, number>>((result, fact) => ({ ...result, [fact.status]: (result[fact.status] ?? 0) + 1 }), {}) ?? {};

@@ -11,13 +11,14 @@ import {
 
 test("defaults to the documented Yuanjing endpoint and tested DeepSeek planner", () => {
   assert.equal(aiEndpoint({}), YUANJING_CHAT_COMPLETIONS);
-  assert.equal(aiPrimaryModel({}, "extract"), "glm-5");
+  assert.equal(aiPrimaryModel({}, "extract"), "deepseek-v4-flash");
   assert.equal(aiPrimaryModel({}, "planner"), "deepseek-v4-pro-0813");
 });
 
-test("uses GLM for extraction and chat, with DeepSeek fallbacks for rate limits", () => {
-  assert.deepEqual(aiModelCandidates({}, "extract"), ["glm-5", "deepseek-v4-pro-0813"]);
-  assert.deepEqual(aiModelCandidates({}, "explain"), ["glm-5", "deepseek-v4-pro-0813"]);
+test("uses V4 Flash for extraction and chat and rejects stale GLM configuration", () => {
+  assert.deepEqual(aiModelCandidates({}, "extract"), ["deepseek-v4-flash"]);
+  assert.deepEqual(aiModelCandidates({}, "explain"), ["deepseek-v4-flash", "deepseek-v4-pro-0813"]);
+  assert.deepEqual(aiModelCandidates({ AI_EXTRACT_MODEL: "glm-5" }, "extract"), ["deepseek-v4-flash"]);
 });
 
 test("keeps planning, decision and repair on DeepSeek V4 Pro", () => {

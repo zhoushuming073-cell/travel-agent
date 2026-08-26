@@ -36,6 +36,10 @@ export interface PlannerSpot {
   seasonFit?: { status: "verified" | "predicted" | "unknown"; note?: string; source?: string };
   hotness?: { score?: number | null; label?: string; confidence?: number };
   crowdRisk?: { score?: number | null; label?: string; confidence?: number; uncertainty?: string };
+  timeRole?: "meal-landmark" | "nightscape" | "timed-indoor" | "daylight-outdoor" | "flexible";
+  preferredWindows?: string[];
+  avoidWindows?: string[];
+  timeRationale?: string;
   sources?: Array<{ name: string; url?: string | null; fetchedAt?: string; status?: string }>;
   [key: string]: unknown;
 }
@@ -227,12 +231,19 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
       if (!allIds.includes(required.id)) issues.push({ code: "REQUIRED_MISSING", severity: "error", variantId: variant.id, spotId: required.id, message: `${variant.title} 缺少必去景点 ${required.name}` });
     }
     for (const day of variant.days) {
-      const attractionActivities = day.activities.filter((activity) => activity.type === "attraction");
+      const spotActivities = day.activities.filter((activity) => Boolean(activity.spotId));
       const meals = day.activities.filter((activity) => activity.type === "meal");
       const rests = day.activities.filter((activity) => activity.type === "rest");
       if (!meals.length) issues.push({ code: "MEAL_MISSING", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天缺少正常用餐` });
+      if (!meals.some((activity) => { const start = timeToMinutes(activity.startTime); return start !== null && start >= 11 * 60 && start <= 13 * 60 + 30; })) issues.push({ code: "LUNCH_MISSING", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天没有在 11:00—13:30 安排午餐` });
       if (!rests.length) issues.push({ code: "REST_MISSING", severity: "warning", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天缺少弹性休息` });
-      for (const activity of attractionActivities) {
+      const chronologically = [...day.activities].sort((left, right) => (timeToMinutes(left.startTime) ?? 0) - (timeToMinutes(right.startTime) ?? 0));
+      for (let index = 1; index < chronologically.length; index += 1) {
+        const previousEnd = timeToMinutes(chronologically[index - 1].endTime);
+        const currentStart = timeToMinutes(chronologically[index].startTime);
+        if (previousEnd !== null && currentStart !== null && currentStart < previousEnd) issues.push({ code: "ACTIVITY_OVERLAP", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天存在活动时间重叠` });
+      }
+      for (const activity of spotActivities) {
         const start = timeToMinutes(activity.startTime);
         const end = timeToMinutes(activity.endTime);
         if (!activity.spotId || !spotMap.has(activity.spotId)) {
@@ -252,14 +263,27 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
         if (openingAlert) {
           issues.push({ code: "OPENING_ALERT_REVIEW", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spotMap.get(activity.spotId)?.name} 存在近期开放状态公告，需核对公告日期：${openingAlert}` });
         }
-        const previousAttraction = attractionActivities[attractionActivities.indexOf(activity) - 1];
-        if (previousAttraction?.spotId && activity.transportFromPrevious && pack.trafficMatrix) {
+        const spot = spotMap.get(activity.spotId);
+        if (spot?.timeRole === "meal-landmark") {
+          const inMealWindow = start !== null && ((start >= 11 * 60 + 30 && start <= 13 * 60 + 30) || (start >= 17 * 60 + 30 && start <= 20 * 60));
+          if (activity.type !== "meal" || !inMealWindow) issues.push({ code: "MEAL_LANDMARK_TIME", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spot.name} 是餐饮型目的地，必须作为午餐或晚餐安排` });
+        }
+        if (spot?.timeRole === "nightscape") {
+          const sunset = timeToMinutes((pack.weather as Array<{ sunset?: string }>)?.[day.day - 1]?.sunset ?? "18:00") ?? 1080;
+          if (start !== null && start < sunset) issues.push({ code: "NIGHTSCAPE_TOO_EARLY", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spot.name} 应安排在当日日落后` });
+        }
+        const currentIndex = spotActivities.indexOf(activity);
+        const previousAttraction = spotActivities[currentIndex - 1];
+        if (previousAttraction?.spotId && pack.trafficMatrix) {
           const matrixLeg = pack.trafficMatrix.legs.find((leg) => leg.fromId === previousAttraction.spotId && leg.toId === activity.spotId)
             ?? pack.trafficMatrix.legs.find((leg) => leg.fromId === activity.spotId && leg.toId === previousAttraction.spotId);
           if (!matrixLeg) {
             issues.push({ code: "MATRIX_LEG_MISSING", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 的相邻景点不在交通矩阵中` });
-          } else if (Math.abs(Number(activity.transportFromPrevious.durationMin) - matrixLeg.durationMin) > Math.max(12, matrixLeg.durationMin * 0.45)) {
-            issues.push({ code: "TRANSIT_MISMATCH", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 的交通时间与输入矩阵差异过大` });
+          } else {
+            if (!activity.transportFromPrevious) issues.push({ code: "TRANSIT_MISSING", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 未写入相邻地点交通时间` });
+            else if (Math.abs(Number(activity.transportFromPrevious.durationMin) - matrixLeg.durationMin) > Math.max(12, matrixLeg.durationMin * 0.45)) issues.push({ code: "TRANSIT_MISMATCH", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 的交通时间与输入矩阵差异过大` });
+            const previousEnd = timeToMinutes(previousAttraction.endTime);
+            if (previousEnd !== null && start !== null && start - previousEnd < matrixLeg.durationMin) issues.push({ code: "TRANSIT_GAP", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 没有为 ${spotMap.get(previousAttraction.spotId)?.name} 到 ${spot?.name} 留足交通时间` });
           }
         }
       }
