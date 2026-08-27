@@ -494,26 +494,56 @@ async function extractProfile(input: any, env: any) {
   return { ...mergeTravelProfile(input, merged), extractionModel: extracted.model, extractionFormatRepaired: extracted.formatRepaired, extractionFallbackReason: extracted.fallbackReason || "" };
 }
 
+function adminBaseName(value: unknown) {
+  return cleanText(value).replace(/(?:特别行政区|壮族自治区|回族自治区|维吾尔自治区|自治区|自治州|地区|市|区|县|盟|旗)$/u, "");
+}
+
+export function selectBestAmapDistrict(query: string, districts: any[]) {
+  const wanted = cleanText(query);
+  const wantedBase = adminBaseName(wanted);
+  const explicitSuffix = /(?:特别行政区|自治区|自治州|地区|市|区|县|盟|旗)$/u.test(wanted);
+  return [...districts]
+    .filter((row) => cleanText(row?.name) && cleanText(row?.center))
+    .map((row) => {
+      const name = cleanText(row.name);
+      const level = cleanText(row.level);
+      const exact = name === wanted;
+      const cityForm = name === `${wantedBase}市`;
+      const sameBase = adminBaseName(name) === wantedBase;
+      const levelScore = explicitSuffix
+        ? (exact ? 80 : 0)
+        : level === "city" ? 45 : level === "province" ? 25 : level === "district" ? 5 : 0;
+      return { row, score: (exact ? 100 : 0) + (cityForm ? 70 : 0) + (sameBase ? 50 : 0) + levelScore };
+    })
+    .sort((left, right) => right.score - left.score)[0]?.row || null;
+}
+
 async function searchCities(query: string, limit = 8, env: any = null) {
   if (cleanText(query).length < 2) return [];
   const normalizedQuery = cleanText(query).replace(/市$/, "");
-  const cached = await persistentCacheGet("china-city", normalizedQuery).catch(() => null);
+  const cached = await persistentCacheGet("china-city-v3", normalizedQuery).catch(() => null);
   if (Array.isArray(cached) && cached.length) return cached.slice(0, limit);
   const officialKey = cleanText(env?.AMAP_WEB_KEY);
   if (officialKey) {
     try {
-      const districtParams = new URLSearchParams({ key: officialKey, keywords: normalizedQuery, subdistrict: "0", extensions: "base" });
-      const districtData = await fetchJson(`https://restapi.amap.com/v3/config/district?${districtParams}`, {}, 12000, "高德行政区查询");
-      const district = (districtData?.districts || []).find((row: any) => normalizeName(row.name) === normalizeName(normalizedQuery)) || districtData?.districts?.[0];
+      const queryVariants = /(?:特别行政区|自治区|自治州|地区|市|区|县|盟|旗)$/u.test(cleanText(query))
+        ? [cleanText(query)]
+        : [`${normalizedQuery}市`, normalizedQuery];
+      const districtResponses = await Promise.allSettled(queryVariants.map(async (keywords) => {
+        const districtParams = new URLSearchParams({ key: officialKey, keywords, subdistrict: "0", extensions: "base" });
+        return fetchJson(`https://restapi.amap.com/v3/config/district?${districtParams}`, {}, 12000, `高德行政区查询“${keywords}”`);
+      }));
+      const districts = districtResponses.flatMap((result: any) => result.status === "fulfilled" && String(result.value?.status) === "1" ? result.value?.districts || [] : []);
+      const district = selectBestAmapDistrict(cleanText(query), districts);
       const [lng, lat] = cleanText(district?.center).split(",").map(Number);
-      if (String(districtData?.status) === "1" && district && Number.isFinite(lat) && Number.isFinite(lng)) {
+      if (district && Number.isFinite(lat) && Number.isFinite(lng)) {
         const result = [{
           name: cleanText(district.name).replace(/市$/, ""), displayName: `${cleanText(district.name)}，中国`,
           lat, lng, zoom: district.level === "district" ? 12 : 11, countryCode: "cn",
           adcode: cleanText(district.adcode), citycode: cleanText(district.citycode), administrativeLevel: cleanText(district.level),
           source: "高德地图官方行政区数据库",
         }];
-        await persistentCachePut("china-city", normalizedQuery, result, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
+        await persistentCachePut("china-city-v3", normalizedQuery, result, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
         return result;
       }
     } catch { /* 继续使用常用城市与公开地理服务 */ }
@@ -521,7 +551,7 @@ async function searchCities(query: string, limit = 8, env: any = null) {
   const common = COMMON_CHINA_CITIES.find(([name]) => name === normalizedQuery);
   if (common) {
     const result = [{ name: common[0], displayName: `${common[0]}，中国`, lat: common[1], lng: common[2], zoom: 11, countryCode: "cn", adcode: null, source: "常用城市稳定坐标" }];
-    await persistentCachePut("china-city", normalizedQuery, result, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
+    await persistentCachePut("china-city-v3", normalizedQuery, result, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
     return result;
   }
   const geoParams = new URLSearchParams({ name: cleanText(query), count: String(limit), language: "zh", format: "json", countryCode: "CN" });
@@ -538,7 +568,7 @@ async function searchCities(query: string, limit = 8, env: any = null) {
     };
   }).filter((row: any) => row.name && Number.isFinite(row.lat) && !seen.has(row.name) && seen.add(row.name));
   if (cities.length) {
-    await persistentCachePut("china-city", normalizedQuery, cities, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
+    await persistentCachePut("china-city-v3", normalizedQuery, cities, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
     return cities;
   }
   const params = new URLSearchParams({ q: `${query}, 中国`, format: "jsonv2", addressdetails: "1", limit: String(Math.min(limit, 5)), countrycodes: "cn", "accept-language": "zh-CN" });
@@ -549,7 +579,7 @@ async function searchCities(query: string, limit = 8, env: any = null) {
     const name = cleanText(address.city || address.town || address.county || address.state_district || row.name || query).replace(/市$/, "");
     return { name, displayName: cleanText(row.display_name), lat: Number(row.lat), lng: Number(row.lon), zoom: 11, countryCode: "cn", osmType: row.osm_type, osmId: row.osm_id, source: "OSM Nominatim" };
   }).filter((row: any) => row.name && Number.isFinite(row.lat) && !seen.has(row.name) && seen.add(row.name));
-  await persistentCachePut("china-city", normalizedQuery, results, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
+  await persistentCachePut("china-city-v3", normalizedQuery, results, 7 * 24 * 60 * 60 * 1000).catch(() => undefined);
   return results;
 }
 
@@ -697,11 +727,21 @@ function wikiPageToSpot(page: any, city: any, requiredNames: string[], preferenc
   };
 }
 
-function fallbackPoiCategory(value: string) {
-  if (/公园|湖|山|湿地|自然|风景|植物/.test(value)) return "自然景观";
+export function fallbackPoiCategory(value: string) {
   if (/博物馆|美术馆|展览|纪念馆/.test(value)) return "博物展馆";
-  if (/寺|庙|塔|古迹|遗址|故居|历史|文化/.test(value)) return "历史文化";
+  if (/寺|庙|塔|古迹|遗址|故居|历史|文化|城墙|钟楼|鼓楼|古城/.test(value)) return "历史文化";
+  if (/公园|湖|山|湿地|自然|风景|植物/.test(value)) return "自然景观";
   return "城市景观";
+}
+
+export function isExcludedCandidatePoi(name: string, poiType: string, requiredByUser = false) {
+  if (requiredByUser) return false;
+  const text = `${cleanText(name)} ${cleanText(poiType)}`;
+  if (/建设中|施工中|暂未开放|尚未开放|永久关闭|停止营业/.test(text)) return true;
+  if (/学校|幼儿园|小学|中学|大学|学院|培训机构|教育辅导|驾校/.test(text)) return true;
+  if (/停车场|卫生间|售票处|游客中心|服务区|入口广场|主入口|出口|打卡地/.test(text)) return true;
+  if (/购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType)) return true;
+  return false;
 }
 
 function amapCandidateRecord(row: any, city: any, requiredNames: string[]) {
@@ -710,18 +750,20 @@ function amapCandidateRecord(row: any, city: any, requiredNames: string[]) {
   const location = cleanText(row?.location);
   const [lng, lat] = location.split(",").map(Number);
   if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || haversine(city.lat, city.lng, lat, lng) > 80000) return null;
-  if (/生活服务|摄影冲印|购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType) && !/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|寺|庙|塔|湖|山|湿地|街区/.test(name)) return null;
-  if (/照相馆|摄影工作室|眼镜|密室|剧本杀|购物城.*店|商场.*店|公司$|医院$|诊所$/.test(name)) return null;
   const requiredByUser = requiredNames.some(required => {
     const wanted = normalizeName(required), actual = normalizeName(name);
     return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
   });
+  if (isExcludedCandidatePoi(name, poiType, requiredByUser)) return null;
+  if (/生活服务|摄影冲印|购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType) && !/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|寺|庙|塔|湖|山|湿地|街区/.test(name)) return null;
+  if (/照相馆|摄影工作室|眼镜|密室|剧本杀|购物城.*店|商场.*店|公司$|医院$|诊所$/.test(name)) return null;
+  const rating = Number(row?.biz_ext?.rating || row?.business?.rating || row?.rating || 0) || null;
   return {
     id: `amap-${cleanText(row.id, `${lat}-${lng}`)}`, name, lat, lng,
     category: requiredByUser ? "用户必选" : fallbackPoiCategory(`${name} ${poiType}`), poiType,
     durationMin: /博物馆|美术馆|纪念馆/.test(name) ? 120 : /公园|湖|山|湿地|风景/.test(name) ? 110 : 90,
-    openingHours: cleanText(row.business?.opentime_today || row.opentime || row.opening_hours),
-    website: cleanText(row.website), staticPoiQuality: "高德 POI 坐标已核验",
+    openingHours: cleanText(row.business?.opentime_today || row.opentime || row.opening_hours), rating,
+    website: cleanText(row.website), staticPoiQuality: rating && rating >= 4 ? "较高" : "一般",
     sourceUrl: row.id ? `https://www.amap.com/place/${encodeURIComponent(row.id)}` : "https://www.amap.com/",
     fetchedAt: new Date().toISOString(), requiredByUser,
     crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
@@ -759,11 +801,17 @@ async function fallbackCandidateSpots(city: any, requiredNames: string[], prefer
   const keywords = [...requiredNames, "旅游景点", "公园", "博物馆", "历史文化", ...preferences.slice(0, 2)].filter(Boolean);
   const officialKey = cleanText(env?.AMAP_WEB_KEY);
   const officialCalls = officialKey ? keywords.map(keyword => {
-    const params = new URLSearchParams({ key: officialKey, keywords: keyword, city: city.adcode || city.name, citylimit: "true", types: "110000|110100|110200|140000", extensions: "all", offset: "25", page: "1" });
+    const params = new URLSearchParams({ key: officialKey, keywords: keyword, city: city.adcode || city.name, citylimit: "true", types: "110000|110100|110200|140100|140200|140400|140600|140700", extensions: "all", offset: "25", page: "1" });
     return fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, `高德官方景点兜底“${keyword}”`);
   }) : [];
   const officialResults = await Promise.allSettled(officialCalls);
-  const officialSpots = officialResults.flatMap(result => result.status === "fulfilled" && String(result.value?.status) === "1" ? amapPoiRows(result.value) : []).map(row => amapCandidateRecord(row, city, requiredNames)).filter(Boolean);
+  const officialSpots = officialResults
+    .flatMap(result => result.status === "fulfilled" && String(result.value?.status) === "1" ? amapPoiRows(result.value) : [])
+    .map((row, providerRank) => {
+      const spot = amapCandidateRecord(row, city, requiredNames);
+      return spot ? { ...spot, providerRank } : null;
+    })
+    .filter(Boolean);
   const officialUnique = uniqueSpots(officialSpots);
   if (officialUnique.length >= Math.max(12, requiredNames.length + 6)) return officialUnique;
 
@@ -778,7 +826,13 @@ async function fallbackCandidateSpots(city: any, requiredNames: string[], prefer
   const [amapResults, nominatimResults] = await Promise.all([
     Promise.allSettled(amapCalls), Promise.allSettled(nominatimCalls),
   ]);
-  const amapSpots = amapResults.flatMap(result => result.status === "fulfilled" ? amapPoiRows(result.value) : []).map(row => amapCandidateRecord(row, city, requiredNames)).filter(Boolean);
+  const amapSpots = amapResults
+    .flatMap(result => result.status === "fulfilled" ? amapPoiRows(result.value) : [])
+    .map((row, providerRank) => {
+      const spot = amapCandidateRecord(row, city, requiredNames);
+      return spot ? { ...spot, providerRank } : null;
+    })
+    .filter(Boolean);
   const nominatimSpots = nominatimResults.flatMap(result => result.status === "fulfilled" && Array.isArray(result.value) ? result.value : []).map(row => nominatimCandidateRecord(row, city, requiredNames)).filter(Boolean);
   return uniqueSpots([...officialUnique, ...amapSpots, ...nominatimSpots]);
 }
@@ -915,7 +969,8 @@ function scoreSpot(spot: any, profile: any) {
     return terms.some(term => text.includes(term));
   });
   const preference = preferences.length ? Math.round(45 + 55 * matched.length / preferences.length) : 60;
-  const quality = spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
+  const rating = Number(spot.rating || 0);
+  const quality = rating >= 4.5 ? 96 : rating >= 4 ? 88 : rating >= 3.5 ? 76 : spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
   const completeness = Math.min(100, 45 + (spot.sourceUrl ? 15 : 0) + (spot.lat && spot.lng ? 20 : 0) + (spot.extract ? 12 : 0) + (spot.openingHours ? 8 : 0));
   const season = spot.seasonality?.score == null ? 50 : Number(spot.seasonality.score);
   const crowdProbability = spot.crowd?.score == null ? 50 : Number(spot.crowd.score);
@@ -940,7 +995,11 @@ function rankSpots(spots: any[], profile: any) {
       recommendationReasons.push(`本地可解释评分 ${score.final} 分`);
       return { ...spot, plannerScore: score.final, scoreBreakdown: score.breakdown, scoreBasis: score.basis, matchedPreferences: score.matched, recommendationReasons: [...new Set(recommendationReasons)].slice(0, 4) };
     })
-    .sort((a, b) => Number(b.requiredByUser) - Number(a.requiredByUser) || b.plannerScore - a.plannerScore || a.name.localeCompare(b.name, "zh-CN"));
+    .sort((a, b) => Number(b.requiredByUser) - Number(a.requiredByUser)
+      || b.plannerScore - a.plannerScore
+      || Number(b.rating || 0) - Number(a.rating || 0)
+      || Number(a.providerRank ?? Number.MAX_SAFE_INTEGER) - Number(b.providerRank ?? Number.MAX_SAFE_INTEGER)
+      || a.name.localeCompare(b.name, "zh-CN"));
 }
 
 function officialDomain(value: unknown) {
@@ -2431,7 +2490,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
     if (url.pathname === "/api/spots") {
       const city = await resolveCity(cleanText(url.searchParams.get("city"), "杭州"), env);
       const spots = await wikipediaSpots(city, clamp(url.searchParams.get("limit"), 1, 50), [], [], env);
-      return json({ city: city.name, spots, count: spots.length, source: "中文维基百科公开页面与坐标", fetchedAt: new Date().toISOString() });
+      return json({ city: city.name, adcode: city.adcode || null, spots, count: spots.length, source: "高德地图官方 POI 优先；中文维基百科与 OSM 仅作可追溯补充", fetchedAt: new Date().toISOString() });
     }
 
     if (url.pathname === "/api/image") {
@@ -2631,6 +2690,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     if (!spot?.id || !spot?.name || !Number.isFinite(Number(spot.lat)) || !Number.isFinite(Number(spot.lng))) return false;
     if (excludedNames.some((excluded: string) => normalizeName(spot.name).includes(excluded))) return false;
     const entityText = `${spot.name || ""} ${spot.category || ""} ${spot.poiType || ""} ${spot.type || ""}`;
+    if (isExcludedCandidatePoi(spot.name, entityText, canonicalRequiredIds.has(spot.id))) return false;
     if (/商务住宅|购物服务|公司企业|汽车服务|生活服务|医疗保健|大型商场/.test(entityText)) return false;
     if (/片场|摄影棚|摄影基地|总店|旗舰店|购物中心|商场|售楼处|影楼/.test(spot.name)) return false;
     if (/(?:北馆|南馆|东馆|西馆|分馆)$/.test(spot.name) && rawSpots.some((candidate: any) => normalizeName(candidate.name) === normalizeName(spot.name.replace(/(?:北馆|南馆|东馆|西馆|分馆)$/, "")))) return false;
