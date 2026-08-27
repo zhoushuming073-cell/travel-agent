@@ -30,6 +30,7 @@ const EMPTY_FORM: TravelFormState = {
   pace: "medium",
   transport: "公共交通优先",
   hotelPreference: "",
+  deepReasoning: true,
 };
 const REVIEW_LABELS = ["理解需求", "联网取证", "生成方案", "校验完成"] as const;
 
@@ -54,6 +55,7 @@ function profileToForm(profile: TravelProfile, fallback: TravelFormState = EMPTY
     pace: profile.pace ?? fallback.pace,
     transport: profile.transport ?? fallback.transport,
     hotelPreference: profile.hotelPreference ?? fallback.hotelPreference,
+    deepReasoning: profile.deepReasoning ?? fallback.deepReasoning,
   };
 }
 
@@ -191,6 +193,7 @@ export function TravelWorkspaceApp() {
     pace: form.pace,
     transport: form.transport,
     hotelPreference: form.hotelPreference,
+    deepReasoning: form.deepReasoning,
     partySize: form.partySize,
     freeText,
     replanContext,

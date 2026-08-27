@@ -53,3 +53,25 @@ test("past yearless date rolls to the next year", () => {
   assert.equal(hints.city, "西安");
   assert.equal(hints.days, 2);
 });
+
+test("Suzhou relaxed trip keeps text values ahead of conflicting form defaults", () => {
+  const merged = mergeTravelProfile(
+    { city: "重庆", startDate: "2026-09-01", days: 7, partySize: 6, deepReasoning: false, freeText: "9月12日去苏州玩两天，一个人，想去拙政园" },
+    { city: "苏州", startDate: "2026-09-12", days: 2, partySize: 1, requiredAttractions: ["拙政园"] },
+    now,
+  );
+  assert.equal(merged.city, "苏州");
+  assert.equal(merged.startDate, "2026-09-12");
+  assert.equal(merged.days, 2);
+  assert.equal(merged.partySize, 1);
+  assert.equal(merged.deepReasoning, false);
+});
+
+test("Harbin winter request extracts date, duration and must-go place", () => {
+  const hints = deterministicProfileHints("两个人，2027年1月8日去哈尔滨玩四天，必须去冰雪大世界", now);
+  assert.equal(hints.city, "哈尔滨");
+  assert.equal(hints.startDate, "2027-01-08");
+  assert.equal(hints.days, 4);
+  assert.equal(hints.partySize, 2);
+  assert.deepEqual(hints.requiredAttractions, ["冰雪大世界"]);
+});

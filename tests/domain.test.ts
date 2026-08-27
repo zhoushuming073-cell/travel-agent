@@ -99,6 +99,9 @@ test("Travel intelligence keeps crowd, hotness, seasonality and opening alerts a
   const season = facts.find((fact) => fact.subject === "西湖" && fact.field === "时令适配");
   const opening = facts.find((fact) => fact.subject === "西湖" && fact.field === "开放状态提醒");
   assert.equal(crowd?.status, "predicted");
+  assert.equal(crowd?.nature, "prediction");
+  assert.ok(crowd?.fetchedAt);
+  assert.ok(crowd?.expiresAt);
   assert.equal(hotness?.status, "predicted");
   assert.equal(hotness?.importance, "medium");
   assert.equal(season?.status, "predicted");

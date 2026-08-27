@@ -22,6 +22,7 @@ export interface UiHotelCandidate {
   source?: string;
   sourceUrl?: string | null;
   rating?: string;
+  priceVerifiedForDates?: boolean;
 }
 
 export type UiPlan = Omit<ItineraryPlan, "hotelPlan" | "daysPlan"> & {
@@ -110,4 +111,5 @@ export interface TravelFormState {
   pace: string;
   transport: string;
   hotelPreference: string;
+  deepReasoning: boolean;
 }

@@ -106,6 +106,8 @@ interface FactInput {
   sourceName: string;
   sourceUrl?: string | null;
   updatedAt: string;
+  observedAt?: string | null;
+  nature?: TravelFact["nature"];
   confidence?: number;
   importance: ImportanceLevel;
   uncertaintyReason?: string | null;
@@ -120,6 +122,8 @@ function makeFact(index: number, input: FactInput, now: number): TravelFact {
     : input.status !== "unknown" && isStale(input.updatedAt, input.ttlMs, now)
       ? "stale"
       : input.status;
+  const fetchedAt = input.updatedAt;
+  const nature = input.nature ?? (status === "predicted" ? "prediction" : status === "estimated" ? "public-reference" : status === "unknown" ? "unknown" : "observation");
   return {
     id: `fact-${index}`,
     subject: input.subject,
@@ -130,6 +134,10 @@ function makeFact(index: number, input: FactInput, now: number): TravelFact {
     sourceName: input.sourceName,
     sourceUrl: input.sourceUrl ?? null,
     updatedAt: input.updatedAt,
+    observedAt: input.observedAt ?? null,
+    fetchedAt,
+    expiresAt: new Date(Date.parse(fetchedAt) + input.ttlMs).toISOString(),
+    nature,
     confidence: input.confidence ?? confidenceFor(status),
     importance: input.importance,
     uncertaintyReason: status === "conflicting"
@@ -163,12 +171,14 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
         temperatureMax: day.weather?.temperatureMax,
         precipitationProbability: day.weather?.precipitationProbability,
       } : null,
-      status: weatherReady ? "verified" : "unknown",
+      status: weatherReady ? "predicted" : "unknown",
+      nature: weatherReady ? "forecast" : "unknown",
+      observedAt: weatherReady ? `${day.date}T12:00:00+08:00` : null,
       sourceType: weatherReady ? "weather-service" : "none",
       sourceName: weatherReady ? text(plan.weather?.source, "天气服务") : "预报范围外或服务未返回",
       updatedAt: weatherUpdatedAt,
       importance: "medium",
-      uncertaintyReason: weatherReady ? null : text(day.weather?.note, "没有可用于该日期的预报"),
+      uncertaintyReason: weatherReady ? "天气来源已成功返回，但数据性质仍是会随时间更新的预报，不是已发生事实" : text(day.weather?.note, "没有可用于该日期的预报"),
       downstreamImpact: impact("天气", "逐日预报"),
       ttlMs: FACT_TTL_MS.weather,
     });
@@ -213,7 +223,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
         status: spot.openingHours || openingObservations.length ? "estimated" : "unknown",
         sourceType: openingObservations[0]?.source.type ?? "none",
         sourceName: openingObservations[0]?.source.name ?? "未取得景区官方当日公告",
-        sourceUrl: openingObservations[0]?.source.url ?? spot.sourceUrl ?? null,
+        sourceUrl: openingObservations[0]?.source.url ?? spot.officialVerification?.officialSiteUrl ?? spot.officialVerification?.openingSearchUrl ?? spot.sourceUrl ?? null,
         updatedAt: openingObservations[0]?.source.fetchedAt ?? spotUpdatedAt,
         importance: importance(spot.name, "开放时间", spot.requiredByUser),
         uncertaintyReason: spot.openingHours ? "公开规则不等同于出行当日临时公告" : "公开数据未标注开放时间",
@@ -248,7 +258,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
         status: reservationObservations.length ? "verified" : "unknown",
         sourceType: reservationObservations[0]?.source.type ?? "none",
         sourceName: reservationObservations[0]?.source.name ?? "景区官方预约接口未接入",
-        sourceUrl: reservationObservations[0]?.source.url ?? spot.website ?? spot.sourceUrl ?? null,
+        sourceUrl: reservationObservations[0]?.source.url ?? spot.officialVerification?.reservationSearchUrl ?? spot.officialVerification?.officialSiteUrl ?? spot.website ?? spot.sourceUrl ?? null,
         updatedAt: reservationObservations[0]?.source.fetchedAt ?? spotUpdatedAt,
         importance: importance(spot.name, "预约状态", spot.requiredByUser),
         uncertaintyReason: reservationObservations.length ? null : "没有可验证的指定日期预约余量",
@@ -352,7 +362,7 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
     const hotel = pricedHotel ?? fallbackHotel;
     add({
       subject: text(hotel?.name, "住宿候选"),
-      field: "酒店价格",
+      field: "住宿参考价",
       value: pricedHotel?.price ?? null,
       status: pricedHotel ? "estimated" : "unknown",
       sourceType: pricedHotel ? "hotel-or-map-service" : "none",
@@ -360,8 +370,8 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
       sourceUrl: pricedHotel?.sourceUrl ?? null,
       updatedAt: iso(pricedHotel?.fetchedAt, generatedAt),
       importance: "medium",
-      uncertaintyReason: pricedHotel ? "为来源参考价，指定日期房态与成交价仍需下单复核" : "候选酒店未返回可追溯价格",
-      downstreamImpact: impact("酒店", "酒店价格"),
+      uncertaintyReason: pricedHotel ? "只展示来源参考价，不纳入已知预算；指定日期房态、税费与成交价仍需下单复核" : "候选酒店未返回可追溯价格",
+      downstreamImpact: "仅用于缩小住宿候选范围，不参与预算可行性判断",
       ttlMs: FACT_TTL_MS.hotelPrice,
     });
   }

@@ -117,7 +117,7 @@ function timeToMinutes(value: unknown): number | null {
   return minutes >= 0 && minutes < 1440 ? minutes : null;
 }
 
-function openingRange(value: unknown): [number, number] | null {
+export function openingRange(value: unknown): [number, number] | null {
   const matches = String(value ?? "").match(/(\d{1,2}):(\d{2})\s*[-—至]\s*(\d{1,2}):(\d{2})/);
   if (!matches) return null;
   return [Number(matches[1]) * 60 + Number(matches[2]), Number(matches[3]) * 60 + Number(matches[4])];
@@ -250,7 +250,7 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
           issues.push({ code: "UNKNOWN_SPOT", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 使用了候选池外景点` });
           continue;
         }
-        if (used.has(activity.spotId)) issues.push({ code: "DUPLICATE_SPOT", severity: "warning", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 重复安排 ${spotMap.get(activity.spotId)?.name}` });
+        if (used.has(activity.spotId)) issues.push({ code: "DUPLICATE_SPOT", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 重复安排 ${spotMap.get(activity.spotId)?.name}` });
         used.add(activity.spotId);
         if (start === null || end === null || start < startLimit || end > endLimit || end <= start) {
           issues.push({ code: "TIME_RANGE", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${variant.title} 第 ${day.day} 天活动超出用户每日时段` });
@@ -274,7 +274,7 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
         }
         const currentIndex = spotActivities.indexOf(activity);
         const previousAttraction = spotActivities[currentIndex - 1];
-        if (previousAttraction?.spotId && pack.trafficMatrix) {
+        if (previousAttraction?.spotId && previousAttraction.spotId !== activity.spotId && pack.trafficMatrix) {
           const matrixLeg = pack.trafficMatrix.legs.find((leg) => leg.fromId === previousAttraction.spotId && leg.toId === activity.spotId)
             ?? pack.trafficMatrix.legs.find((leg) => leg.fromId === activity.spotId && leg.toId === previousAttraction.spotId);
           if (!matrixLeg) {

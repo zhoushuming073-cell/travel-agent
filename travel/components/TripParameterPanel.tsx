@@ -33,6 +33,7 @@ export function TripParameterPanel({ form, onChange, onClose }: Props) {
       <div className="parameter-field"><span>出行节奏</span><div className="segmented">{PACES.map(([value,label]) => <button key={value} type="button" className={form.pace === value ? "active" : ""} onClick={() => set("pace", value)}>{label}</button>)}</div></div>
       <label className="parameter-field"><span>交通方式</span><div className="select-wrap"><select value={form.transport} onChange={(event) => set("transport", event.target.value)}><option>公共交通优先</option><option>道路距离优先</option><option>少换区优先</option></select></div></label>
       <label className="parameter-field"><span>住宿偏好</span><div className="select-wrap"><select value={form.hotelPreference} onChange={(event) => set("hotelPreference", event.target.value)}><option value="">未设置</option><option>交通方便</option><option>景区附近</option><option>预算优先</option><option>品质优先</option></select></div></label>
+      <label className="parameter-field reasoning-toggle"><span>规划模式</span><button type="button" role="switch" aria-checked={form.deepReasoning} className={form.deepReasoning ? "active" : ""} onClick={() => set("deepReasoning", !form.deepReasoning)}><i></i><b>{form.deepReasoning ? "深度规划" : "快速规划"}</b></button><small>{form.deepReasoning ? "V4 Pro 先做限时约束推理，再生成并校验方案" : "跳过独立推理备忘录，仍由 V4 Pro 生成并校验"}</small></label>
     </div>
   </section>;
 }

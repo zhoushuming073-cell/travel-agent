@@ -23,7 +23,7 @@ export function ItineraryTimeline({ plan, selectedDay, selectedSpotId, onSelectD
         key={spot.id}
         type="button"
         onClick={() => onSelectSpot(spot.id, day.day)}
-      ><time>{spot.startTime ?? "待定"}</time><span className="timeline-line"><i>{index + 1}</i></span><SpotImage name={spot.name} city={plan.city} lat={spot.lat} lng={spot.lng}/><span className="stop-copy"><b>{spot.name}</b><small>{spot.category ?? "已核验景点"}{spot.requiredByUser ? " · 用户必选" : ""}</small><em>预计 {spot.durationMin ?? 90} 分钟</em></span><span className="stop-risk"><small>拥挤风险</small><b>{spot.crowd?.label ?? "暂未核验"}</b></span><span className="stop-arrow"><Icon name="chevronRight"/></span></button>)}</div>}
+      ><time>{spot.startTime ?? "待定"}</time><span className="timeline-line"><i>{index + 1}</i></span><SpotImage name={spot.name} city={plan.city} lat={spot.lat} lng={spot.lng}/><span className="stop-copy"><b>{spot.name}</b><small>{spot.category ?? "地图实体已核验"}{spot.requiredByUser ? " · 用户必选" : ""}</small><em>预计 {spot.durationMin ?? 90} 分钟</em></span><span className="stop-risk"><small>拥挤风险预测</small><b>{spot.crowd?.label ?? "暂未生成"}</b></span><span className="stop-arrow"><Icon name="chevronRight"/></span></button>)}</div>}
     </article>;
   })}</div>;
 }

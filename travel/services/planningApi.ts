@@ -2,6 +2,16 @@ import type { PlanningProgress, PlanningResult, TravelProfile, UiPlan } from "..
 
 interface ErrorEnvelope { error?: { message?: string } | string }
 
+function waitWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const finish = () => { signal?.removeEventListener("abort", cancel); resolve(); };
+    const cancel = () => { window.clearTimeout(timer); signal?.removeEventListener("abort", cancel); reject(new DOMException("Aborted", "AbortError")); };
+    const timer = window.setTimeout(finish, milliseconds);
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+  });
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -25,6 +35,7 @@ export interface PlanningInput {
   pace: string;
   transport: string;
   hotelPreference: string;
+  deepReasoning: boolean;
   freeText: string;
   partySize?: number;
   replanContext?: {
@@ -68,13 +79,16 @@ export async function runPlanningJob(
   onProgress: (progress: PlanningProgress) => void,
   signal?: AbortSignal,
 ): Promise<PlanningResult> {
-  const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), signal });
+  const idempotencyKey = crypto.randomUUID();
+  const jobToken = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
+  const jobHeaders = { "x-idempotency-key": idempotencyKey, "x-travel-job-token": jobToken };
+  const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), headers: jobHeaders, signal });
   onProgress(started.progress);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(started.jobId)}`, { signal });
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(started.jobId)}`, { headers: { "x-travel-job-token": jobToken }, signal });
     if (status.status === "working") {
       onProgress(status.progress);
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await waitWithSignal(1500, signal);
       continue;
     }
     if (status.status === "done") return status.result;
@@ -122,6 +136,24 @@ export async function monitorTrip(plan: UiPlan, profile: TravelProfile): Promise
   return requestJson<ExecutionMonitorResult>("/api/monitor", { method: "POST", body: JSON.stringify({ profile, plan: compactPlan }) });
 }
 
-export async function loadProviders(): Promise<Record<string, unknown>> {
-  return requestJson<Record<string, unknown>>("/api/providers/status");
+export interface ProviderRuntimeStatus {
+  provider: string;
+  status: "healthy" | "degraded" | "unavailable" | "unknown";
+  latencyMs?: number | null;
+  totalRequests?: number;
+  successCount?: number;
+  failureCount?: number;
+  rateLimitedCount?: number;
+  cacheHits?: number;
+  updatedAt?: string;
+}
+
+export interface ProviderStatusResponse {
+  providers: ProviderRuntimeStatus[];
+  metrics: { persistence?: string; activeJobs?: number; cacheEntries?: number; cacheHits?: number; requests24h?: number };
+  note?: string;
+}
+
+export async function loadProviders(): Promise<ProviderStatusResponse> {
+  return requestJson<ProviderStatusResponse>("/api/providers/status");
 }

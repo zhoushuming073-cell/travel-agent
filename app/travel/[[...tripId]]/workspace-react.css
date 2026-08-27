@@ -168,6 +168,13 @@
   .ready-lower-grid { grid-template-columns: 1fr; }
   .trust-dashboard { grid-template-columns: repeat(2,1fr); }
 }
+.reasoning-toggle > button { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 7px 10px; border: 1px solid #dce7e2; border-radius: 10px; background: #f5f8f7; color: #53645e; }
+.reasoning-toggle > button i { position: relative; width: 32px; height: 18px; border-radius: 20px; background: #bdc9c4; transition: background .2s ease; }
+.reasoning-toggle > button i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px #0002; transition: transform .2s ease; }
+.reasoning-toggle > button.active { border-color: #b9d8cb; background: #edf7f2; color: #19634b; }
+.reasoning-toggle > button.active i { background: #2d8a68; }
+.reasoning-toggle > button.active i::after { transform: translateX(14px); }
+.reasoning-toggle > small { margin-top: 5px; color: #81918a; font-size: 10px; line-height: 1.45; }
 @media (max-width:900px) {
   .react-sidebar { transform: translateX(-105%); }
   .react-workspace-canvas { margin-left: 0 !important; }

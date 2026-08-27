@@ -5,6 +5,7 @@ import { handleTravelApi } from "./travel-api";
 
 interface Env {
   ASSETS: Fetcher;
+  DB?: import("./persistence.ts").D1DatabaseLike;
   AI_API_KEY?: string;
   AI_API_BASE_URL?: string;
   AI_EXTRACT_MODEL?: string;
@@ -52,7 +53,7 @@ const worker = {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      const response = await handleTravelApi(request, env, url);
+      const response = await handleTravelApi(request, env, url, ctx);
       if (response) return response;
     }
 

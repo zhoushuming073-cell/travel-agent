@@ -179,6 +179,7 @@ export function mergeTravelProfile(input: Record<string, unknown>, extracted: Re
     avoid: [...new Set(list(extracted.avoid))].slice(0, 8), requiredAttractions,
     pace: clean(pickTextFirst("pace", "medium")) || "medium",
     transport: clean(pickTextFirst("transport", "公共交通优先")) || "公共交通优先",
+    deepReasoning: input.deepReasoning !== false,
     hotelPreference: explicit(pickTextFirst("hotelPreference")), lodgingArea: explicit(pickTextFirst("lodgingArea")),
     dayStart: explicit(pickTextFirst("dayStart", "09:00")) || "09:00", dayEnd: explicit(pickTextFirst("dayEnd", "21:00")) || "21:00",
     mealPreference: explicit(pickTextFirst("mealPreference", "每天 1—2 个当地特色美食，顺路安排")) || "每天 1—2 个当地特色美食，顺路安排",

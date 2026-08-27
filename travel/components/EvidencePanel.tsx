@@ -3,7 +3,7 @@
 import type { TravelFactStatus } from "../../worker/domain/types.ts";
 import type { UiPlan } from "../types.ts";
 
-const labels: Record<TravelFactStatus, string> = { verified: "已核验", estimated: "公开参考", predicted: "预测", unknown: "暂无证据", conflicting: "需复核", stale: "已过期" };
+const labels: Record<TravelFactStatus, string> = { verified: "已核验事实", estimated: "公开参考", predicted: "预测/信号", unknown: "暂无证据", conflicting: "需复核", stale: "已过期" };
 
 export function EvidencePanel({ plan }: { plan: UiPlan }) {
   const counts = plan.travelFacts?.reduce<Record<string, number>>((result, fact) => ({ ...result, [fact.status]: (result[fact.status] ?? 0) + 1 }), {}) ?? {};
@@ -19,6 +19,6 @@ export function EvidencePanel({ plan }: { plan: UiPlan }) {
   return <div className="react-evidence-panel">
     <div className="evidence-overview">{(["verified","estimated","predicted","unknown","conflicting","stale"] as TravelFactStatus[]).map((status) => <article key={status} data-status={status}><b>{counts[status] ?? 0}</b><span>{labels[status]}</span></article>)}</div>
     <section className="evidence-graph-summary"><div><strong>Evidence Graph</strong><span>Source → Fact → Itinerary Node</span></div><b>{plan.evidenceGraph?.sourceCount ?? 0}<small>来源</small></b><b>{plan.evidenceGraph?.factCount ?? 0}<small>事实</small></b><b>{plan.evidenceGraph?.itineraryNodeCount ?? 0}<small>节点</small></b></section>
-    <div className="fact-list">{visibleFacts.map((fact) => <article key={fact.id}><i data-status={fact.status}></i><div><b>{fact.subject} · {fact.field}</b><span>{fact.sourceName}</span><small>{fact.uncertaintyReason ?? fact.downstreamImpact}</small>{fact.sourceUrl ? <a href={fact.sourceUrl} target="_blank" rel="noreferrer">打开来源</a> : null}</div><em data-status={fact.status}>{labels[fact.status]}</em></article>)}</div>
+    <div className="fact-list">{visibleFacts.map((fact) => <article key={fact.id}><i data-status={fact.status}></i><div><b>{fact.subject} · {fact.field}</b><span>{fact.sourceName}</span><small>{fact.uncertaintyReason ?? fact.downstreamImpact}</small><small>性质：{fact.nature ?? "旧版记录"} · 抓取：{new Date(fact.fetchedAt || fact.updatedAt).toLocaleString("zh-CN")} · 有效至：{fact.expiresAt ? new Date(fact.expiresAt).toLocaleString("zh-CN") : "未记录"}</small>{fact.sourceUrl ? <a href={fact.sourceUrl} target="_blank" rel="noreferrer">打开来源 / 官方核验入口</a> : null}</div><em data-status={fact.status}>{labels[fact.status]}</em></article>)}</div>
   </div>;
 }

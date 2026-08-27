@@ -38,6 +38,7 @@ export interface TravelProfile {
   fieldSources?: Record<string, "text-rule" | "ai-text" | "parameter" | "calculated" | "default">;
   pace?: string;
   transport?: string;
+  deepReasoning?: boolean;
   hotelPreference?: string;
   lodgingArea?: string;
   dayStart?: string;
@@ -72,6 +73,10 @@ export interface TravelFact {
   sourceName: string;
   sourceUrl: string | null;
   updatedAt: string;
+  observedAt?: string | null;
+  fetchedAt?: string;
+  expiresAt?: string;
+  nature?: "observation" | "forecast" | "prediction" | "public-reference" | "unknown";
   confidence: number;
   importance: ImportanceLevel;
   uncertaintyReason: string | null;
@@ -158,6 +163,14 @@ export interface ItinerarySpot {
     status?: string;
     note?: string;
   };
+  officialVerification?: {
+    officialSiteUrl?: string | null;
+    openingSearchUrl?: string;
+    reservationSearchUrl?: string;
+    openingNature: "map-rule" | "official" | "unknown";
+    reservationAvailability: "unknown" | "verified";
+    note: string;
+  };
   crowd?: {
     score?: number;
     label?: string;
@@ -193,7 +206,7 @@ export interface ItinerarySpot {
   } | null;
   seasonality?: {
     score?: number | null;
-    state?: "OFF" | "PRE_SEASON" | "GOOD" | "PEAK" | "POST_PEAK" | "UNKNOWN";
+    state?: "OFF" | "PRE_SEASON" | "GOOD" | "PEAK" | "POST_PEAK" | "RECENT_SIGNAL" | "FORWARD_REFERENCE" | "UNKNOWN";
     label?: string;
     status?: TravelFactStatus;
     confidence?: number;
