@@ -65,14 +65,63 @@ export interface PlanningInput {
 
 interface StartResponse {
   jobId: string;
-  status: "working";
+  status: "queued" | "working";
   progress: PlanningProgress;
 }
 
 type StatusResponse =
-  | { status: "working"; progress: PlanningProgress }
-  | { status: "done"; result: PlanningResult; progress?: PlanningProgress }
-  | { status: "error"; error: { message?: string } };
+  | { jobId: string; status: "queued" | "working" | "needs_input"; progress: PlanningProgress; currentStep?: string; heartbeatAt?: string }
+  | { jobId: string; status: "done"; result: PlanningResult; progress?: PlanningProgress }
+  | { jobId: string; status: "error" | "cancelled"; error: { message?: string; code?: string }; progress?: PlanningProgress };
+
+const ACTIVE_JOB_KEY = "smart-travel-active-job-v29";
+interface StoredJob { jobId: string; input: PlanningInput; createdAt: number; progress?: PlanningProgress }
+
+function readStoredJob(): StoredJob | null {
+  try { return JSON.parse(sessionStorage.getItem(ACTIVE_JOB_KEY) || "null") as StoredJob | null; } catch { return null; }
+}
+
+function writeStoredJob(value: StoredJob | null) {
+  try {
+    if (value) sessionStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(value));
+    else sessionStorage.removeItem(ACTIVE_JOB_KEY);
+  } catch { /* session storage is a convenience, not authority */ }
+}
+
+async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: (progress: PlanningProgress) => void, signal?: AbortSignal): Promise<PlanningResult> {
+  let transientFailures = 0;
+  for (let attempt = 0; attempt < 650; attempt += 1) {
+    try {
+      const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(jobId)}`, { signal });
+      transientFailures = 0;
+      if (status.progress) {
+        onProgress(status.progress);
+        writeStoredJob({ jobId, input, createdAt: readStoredJob()?.createdAt || Date.now(), progress: status.progress });
+      }
+      if (status.status === "queued" || status.status === "working") {
+        await waitWithSignal(1800, signal);
+        continue;
+      }
+      if (status.status === "done") {
+        writeStoredJob(null);
+        return status.result;
+      }
+      if (status.status === "needs_input") { const error = new Error(status.progress?.items?.[0] || "需要补充旅行信息"); error.name = "PlanningTerminalError"; throw error; }
+      writeStoredJob(null);
+      const terminalStatus = status as Extract<StatusResponse, { status: "error" | "cancelled" }>;
+      const terminal = new Error(terminalStatus.error.message || (terminalStatus.status === "cancelled" ? "规划任务已取消" : "规划任务没有完成"));
+      terminal.name = "PlanningTerminalError";
+      throw terminal;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (error instanceof Error && error.name === "PlanningTerminalError") throw error;
+      transientFailures += 1;
+      if (transientFailures > 10) throw error;
+      await waitWithSignal(Math.min(12_000, 1200 * transientFailures), signal);
+    }
+  }
+  throw new Error("规划任务超过 20 分钟仍未完成，服务端会自动终止并给出明确状态");
+}
 
 export async function runPlanningJob(
   input: PlanningInput,
@@ -80,22 +129,34 @@ export async function runPlanningJob(
   signal?: AbortSignal,
 ): Promise<PlanningResult> {
   const idempotencyKey = crypto.randomUUID();
-  const jobToken = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
-  const jobHeaders = { "x-idempotency-key": idempotencyKey, "x-travel-job-token": jobToken };
+  const jobHeaders = { "x-idempotency-key": idempotencyKey };
   const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), headers: jobHeaders, signal });
   onProgress(started.progress);
-  for (let attempt = 0; attempt < 600; attempt += 1) {
-    const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(started.jobId)}`, { headers: { "x-travel-job-token": jobToken }, signal });
-    if (status.status === "working") {
-      onProgress(status.progress);
-      await waitWithSignal(1500, signal);
-      continue;
-    }
-    if (status.status === "done") return status.result;
-    throw new Error(status.error.message || "规划任务没有完成");
-  }
-  throw new Error("规划任务等待超时，请重试");
+  writeStoredJob({ jobId: started.jobId, input, createdAt: Date.now(), progress: started.progress });
+  return pollPlanningJob(started.jobId, input, onProgress, signal);
 }
+
+export async function reconnectPlanningJob(onProgress: (progress: PlanningProgress) => void, signal?: AbortSignal): Promise<{ result: PlanningResult; input: PlanningInput } | null> {
+  const active = await requestJson<{ active: boolean; jobId?: string; progress?: PlanningProgress }>("/api/plan/active", { signal });
+  if (!active.active || !active.jobId) { writeStoredJob(null); return null; }
+  const stored = readStoredJob();
+  const input = stored?.input || ({ freeText: "", city: "", startDate: "", days: 3, budget: 0, style: "", preferences: [], pace: "medium", transport: "公共交通优先", hotelPreference: "", deepReasoning: true, partySize: 2 } as PlanningInput);
+  if (active.progress) onProgress(active.progress);
+  writeStoredJob({ jobId: active.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: active.progress });
+  return { result: await pollPlanningJob(active.jobId, input, onProgress, signal), input };
+}
+
+export async function cancelPlanningJob(): Promise<boolean> {
+  const stored = readStoredJob();
+  if (!stored?.jobId) return false;
+  const result = await requestJson<{ cancelled: boolean }>("/api/plan/cancel", { method: "POST", body: JSON.stringify({ jobId: stored.jobId }) });
+  writeStoredJob(null);
+  return result.cancelled;
+}
+
+export function abandonPlanningJob(): void { writeStoredJob(null); }
+
+export function hasStoredPlanningJob(): boolean { return Boolean(readStoredJob()?.jobId); }
 
 export async function explainPlan(prompt: string, plan: UiPlan, profile: TravelProfile): Promise<string> {
   const context = {

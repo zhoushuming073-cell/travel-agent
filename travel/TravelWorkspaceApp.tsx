@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appendItineraryVersion, restoreItineraryVersion } from "../worker/domain/versioning.ts";
+import { deterministicProfileHints } from "../worker/domain/profile-extraction.ts";
 import type { AgentEvent, AgentState, ItineraryVersion } from "../worker/domain/types.ts";
 import { AgentActivity } from "./components/AgentActivity.tsx";
 import { ChangePreview } from "./components/ChangePreview.tsx";
@@ -15,7 +16,7 @@ import { RequirementProfile } from "./components/RequirementProfile.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
-import { explainPlan, monitorTrip, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
+import { abandonPlanningJob, cancelPlanningJob, explainPlan, monitorTrip, reconnectPlanningJob, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
 import { WORKSPACE_STAGES } from "./state/machine.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
 
@@ -155,6 +156,22 @@ export function TravelWorkspaceApp() {
   }, [loadWorkspace, refreshWorkspaces]);
 
   useEffect(() => {
+    if (!draft.trim()) return;
+    const timer = window.setTimeout(() => {
+      const hints = deterministicProfileHints(draft);
+      setForm((current) => ({
+        ...current,
+        city: typeof hints.city === "string" ? hints.city : current.city,
+        startDate: typeof hints.startDate === "string" ? hints.startDate : current.startDate,
+        days: typeof hints.days === "number" ? hints.days : current.days,
+        partySize: typeof hints.partySize === "number" ? hints.partySize : current.partySize,
+        preferences: Array.isArray(hints.preferences) ? hints.preferences as string[] : current.preferences,
+      }));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [draft]);
+
+  useEffect(() => {
     const onPopState = () => {
       const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
       if (pathId && pathId !== "index.html") void loadWorkspace(pathId, false);
@@ -212,6 +229,50 @@ export function TravelWorkspaceApp() {
     if (next.phase === "route") setStage("GENERATING_ITINERARY");
   }, [id]);
 
+  const applyPlanningResult = useCallback(async (result: Awaited<ReturnType<typeof runPlanningJob>>) => {
+    setProfile(result.request);
+    setForm((current) => profileToForm(result.request, current));
+    setPlans(result.alternatives);
+    setActivePlanId(result.activeId);
+    setEvents(result.agentEvents ?? []);
+    setProgress(result.progress ?? null);
+    setStage("VALIDATING_ITINERARY");
+    await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages, progress: result.progress ?? null }));
+    await refreshWorkspaces();
+  }, [draft, form, messages, refreshWorkspaces, snapshot]);
+
+  const reconnectPlanning = useCallback(async (quiet = false) => {
+    if (busy) return;
+    setBusy(true);
+    if (!quiet) setError(null);
+    const controller = new AbortController();
+    planningController.current = controller;
+    try {
+      const resumed = await reconnectPlanningJob(handleProgress, controller.signal);
+      if (!resumed) {
+        if (!quiet) setError("没有可重新连接的后台规划任务");
+        return;
+      }
+      if (resumed.input.freeText) setDraft(resumed.input.freeText);
+      await applyPlanningResult(resumed.result);
+    } catch (caught) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError") && !quiet) {
+        setError(caught instanceof Error ? caught.message : "重新连接任务失败");
+        setStage("ERROR");
+      }
+    } finally {
+      setBusy(false);
+      if (planningController.current === controller) planningController.current = null;
+    }
+  }, [applyPlanningResult, busy, handleProgress]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { if (stage === "EMPTY" && !busy) void reconnectPlanning(true); }, 250);
+    return () => window.clearTimeout(timer);
+  // only attempt automatic cookie/session recovery once after mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const startPlanning = async () => {
     if (!draft.trim() || busy) return;
     setBusy(true);
@@ -228,15 +289,7 @@ export function TravelWorkspaceApp() {
     planningController.current = controller;
     try {
       const result = await runPlanningJob(planningInput(draft), handleProgress, controller.signal);
-      setProfile(result.request);
-      setForm((current) => profileToForm(result.request, current));
-      setPlans(result.alternatives);
-      setActivePlanId(result.activeId);
-      setEvents(result.agentEvents ?? []);
-      setProgress(result.progress ?? null);
-      setStage("VALIDATING_ITINERARY");
-      await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages, progress: result.progress ?? null }));
-      await refreshWorkspaces();
+      await applyPlanningResult(result);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") {
         setStage("EMPTY");
@@ -251,12 +304,19 @@ export function TravelWorkspaceApp() {
     }
   };
 
-  const cancelPlanning = () => {
+  const cancelPlanning = async () => {
+    try { await cancelPlanningJob(); } catch (caught) { setError(caught instanceof Error ? caught.message : "服务端取消失败"); return; }
     planningController.current?.abort();
     setBusy(false);
     setProgress(null);
     setStage("EMPTY");
     setParametersOpen(true);
+  };
+
+  const abandonPlanning = () => {
+    planningController.current?.abort();
+    abandonPlanningJob();
+    setBusy(false); setProgress(null); setStage("EMPTY"); setParametersOpen(true); setError(null);
   };
 
   const enterReady = async (planId: string) => {
@@ -415,12 +475,12 @@ export function TravelWorkspaceApp() {
         <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>
       )}
       {["FETCHING_DATA","ASSESSING_EVIDENCE","GENERATING_ITINERARY"].includes(stage) && (
-        <DataAcquisition request={draft} profile={profile} progress={progress} onCancel={cancelPlanning}/>
+        <DataAcquisition request={draft} profile={profile} progress={progress} onCancel={() => void cancelPlanning()}/>
       )}
       {stage === "VALIDATING_ITINERARY" && (
         <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
       )}
-      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划工具暂时不可用</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={editRequirements}>修改旅行需求</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并重试</span><Icon name="arrow"/></button></div></section>}
+      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => void reconnectPlanning()}>重新连接任务</button><button className="secondary-button" type="button" onClick={abandonPlanning}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并新建</span><Icon name="arrow"/></button></div></section>}
       {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>}
       {readyForReview && reviewStep === 1 && <DataAcquisition request={draft} profile={profile} progress={progress}/>}
       {readyForReview && reviewStep === 2 && <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => { setActivePlanId(planId); setReviewStep(3); void persist({ activePlanId: planId }); }}/>}

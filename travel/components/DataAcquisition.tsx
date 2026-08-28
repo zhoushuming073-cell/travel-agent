@@ -9,7 +9,7 @@ const expectedSources = [
   ["spots", "景点实体与常规开放信息"],
   ["weather", "天气预报"],
   ["routing", "规划前公共交通矩阵"],
-  ["hotels", "住宿候选"],
+  ["hotels", "住宿候选（非指定日期实时价格）"],
   ["crowd", "拥挤风险预测"],
   ["season", "近期趋势与时令报道信号"],
 ];

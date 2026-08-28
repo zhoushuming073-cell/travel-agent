@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo } from "react";
+import { deterministicProfileHints } from "../../worker/domain/profile-extraction.ts";
 import type { TravelFormState } from "../types.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { TripParameterPanel } from "./TripParameterPanel.tsx";
@@ -22,12 +24,13 @@ const examples = [
 ];
 
 export function EmptyTripHero({ value, form, busy, onChange, onFormChange, onSubmit, parametersOpen, onToggleParameters }: Props) {
+  const localHints = useMemo(() => deterministicProfileHints(value), [value]);
   const preference = form.preferences.join("、") || form.style || "未设置";
-  const quickParams: Array<[IconName, string, string, string]> = [
-    ["mapPin", "目的地", form.city || "未设置", form.city ? "已补充" : "等待文字识别"],
-    ["calendar", "日期", form.startDate || "未设置", form.startDate ? "已补充" : "等待文字识别"],
-    ["clock", "天数", `${form.days}天`, "系统默认"],
-    ["users", "人数", `${form.partySize}人`, "系统默认"],
+  const quickParams: Array<[IconName, string, string, string, boolean]> = [
+    ["mapPin", "目的地", form.city || "未设置", localHints.city ? "文本即时识别，等待 AI 校正" : form.city ? "参数设置" : "等待文字识别", Boolean(localHints.city)],
+    ["calendar", "日期", form.startDate || "未设置", localHints.startDate ? "文本即时识别，等待 AI 校正" : form.startDate ? "参数设置" : "等待文字识别", Boolean(localHints.startDate)],
+    ["clock", "天数", `${form.days}天`, localHints.days ? "文本即时识别，等待 AI 校正" : "参数设置（默认 3 天）", Boolean(localHints.days)],
+    ["users", "人数", `${form.partySize}人`, localHints.partySize ? "文本即时识别，等待 AI 校正" : "参数设置（默认 2 人）", Boolean(localHints.partySize)],
   ];
   return <section className="empty-stage react-empty-stage" aria-labelledby="hero-title">
     <div className="empty-copy"><h1 id="hero-title">智能旅游助手</h1><p>从一句想法，到一份 <strong>真正能出发的行程</strong></p><div className="hero-capabilities"><span><Icon name="search"/>联网查找真实景点</span><span><Icon name="check"/>标明信息可信度</span><span><Icon name="sparkles"/>生成三套差异路线</span><span><Icon name="mapPin"/>检查时间与交通</span></div></div>
@@ -38,7 +41,7 @@ export function EmptyTripHero({ value, form, busy, onChange, onFormChange, onSub
       </div></div>
       <div className="city-illustration" aria-hidden="true"><img className="jiangnan-hero-art" src="/travel/assets/jiangnan-hero-v1.png" alt=""/></div>
     </div>
-    <div className="quick-param-grid" aria-label="快捷旅行参数">{quickParams.map(([icon,label,strong,source]) => <button type="button" onClick={onToggleParameters} aria-expanded={parametersOpen} key={label}><i><Icon name={icon}/></i><span>{label}<strong>{strong}</strong><small>{source}</small></span></button>)}<button className={`more-params${parametersOpen ? " active" : ""}`} type="button" onClick={onToggleParameters} aria-expanded={parametersOpen}><i><Icon name="settings"/></i><span>更多参数<strong>{preference} · {form.budget ? `¥${form.budget}` : "预算未设置"}</strong><small>偏好、预算、交通与住宿</small></span><Icon name={parametersOpen ? "chevronUp" : "chevronRight"}/></button></div>
+    <div className="quick-param-shell"><div className="quick-param-grid" aria-label="快捷旅行参数">{quickParams.map(([icon,label,strong,source,detected]) => <button className={detected ? "text-detected" : ""} type="button" onClick={onToggleParameters} aria-expanded={parametersOpen} key={label}><i><Icon name={icon}/></i><span>{label}<strong key={`${label}-${strong}`}>{strong}</strong><small>{source}</small></span></button>)}<button className={`more-params${parametersOpen ? " active" : ""}`} type="button" onClick={onToggleParameters} aria-expanded={parametersOpen}><i><Icon name="settings"/></i><span>更多参数<strong>{preference} · {form.budget ? `¥${form.budget}` : "预算未设置"}</strong><small>偏好、预算、交通与住宿</small></span><Icon name={parametersOpen ? "chevronUp" : "chevronRight"}/></button></div><span className="quick-param-swipe-hint">左右滑动查看更多</span></div>
     {parametersOpen ? <TripParameterPanel form={form} onChange={onFormChange} onClose={onToggleParameters}/> : null}
     <section className="try-say"><h2>试试这样说</h2><div className="prompt-suggestions concept-examples">{examples.map(([art,title,detail,prompt]) => <button type="button" key={title} onClick={() => onChange(prompt)}><span className={`example-art ${art}`}></span><b>{title}</b><small>{detail}</small><i><Icon name="arrow"/></i></button>)}</div></section>
     <p className="generation-disclaimer">没有可靠来源的信息会显示“暂未核验”，不会由 AI 补写。</p>

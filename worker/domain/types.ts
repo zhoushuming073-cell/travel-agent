@@ -146,6 +146,7 @@ export interface VerificationItem {
 export interface ItinerarySpot {
   id: string;
   name: string;
+  officialName?: string;
   lat?: number;
   lng?: number;
   category?: string;

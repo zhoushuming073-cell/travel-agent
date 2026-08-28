@@ -22,21 +22,35 @@ import {
   type AiPurpose,
 } from "./domain/model-routing.ts";
 import { deterministicProfileHints, mergeTravelProfile } from "./domain/profile-extraction.ts";
+import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
 import {
+  acquireTravelJobLease,
+  addTravelJobEvent,
   activeJobCount,
   configurePersistence,
   consumeRateLimit,
   createTravelJob,
+  findActiveTravelJob,
+  getTravelJobArtifact,
   getTravelJob,
+  listJobProviderAttempts,
+  listJobsForOrchestrator,
+  listTravelJobEvents,
   persistentCacheGet,
   persistentCachePut,
   providerHealthSnapshot,
+  putTravelJobArtifact,
+  recordJobProviderAttempt,
   recordProviderHealth,
+  releaseTravelJobLease,
+  renewTravelJobLease,
+  requestTravelJobCancellation,
   requestClientHash,
   runtimeMetrics,
   sha256,
   updateTravelJob,
 } from "./persistence.ts";
+import { verifySignedRequest } from "./signing.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -283,13 +297,14 @@ function poiMatchScore(actualName: unknown, wantedNames: string[]) {
   }, 0);
 }
 
-function poiImageScore(poi: any, wantedNames: string[]) {
+export function poiImageScore(poi: any, wantedNames: string[]) {
   const match = poiMatchScore(poi?.name, wantedNames);
   if (!match) return 0;
   const type = cleanText(poi?.type || poi?.typeName || poi?.category);
   if (/商务住宅|公司企业|餐饮服务|政府机构|医疗保健|汽车服务|生活服务/.test(type)) return 0;
-  if (/风景名胜|公园广场|科教文化服务|特色商业街|自然地名|文物古迹/.test(type)) return match + 25;
-  return match === 100 ? match : 0;
+  const childPenalty = /(?:内园|艺术中心|分馆|售票处|游客中心|服务中心|停车场|入口|出口)$/i.test(cleanText(poi?.name)) ? 38 : 0;
+  if (/风景名胜|公园广场|科教文化服务|特色商业街|自然地名|文物古迹/.test(type)) return match + 25 - childPenalty;
+  return match === 100 ? match - childPenalty : 0;
 }
 
 function parseJsonObject(text: string) {
@@ -1404,17 +1419,33 @@ async function amapPoiForSpot(name: string, city: string) {
   return { id: cleanText(poi.id), name: cleanText(poi.name), location, photo, raw: detail };
 }
 
-async function amapOfficialImage(env: any, name: string, city: string) {
+async function amapOfficialImage(env: any, name: string, city: string, poiId = "", targetLat?: number, targetLng?: number) {
   const key = cleanText(env?.AMAP_WEB_KEY);
   if (!key || !name) return null;
   const lookupNames = imageLookupNames(name, city);
+  const exactId = cleanText(poiId).replace(/^amap-/, "");
+  if (exactId && !/^-?\d+(?:\.\d+)?--?\d/.test(exactId)) {
+    try {
+      const detailParams = new URLSearchParams({ key, id: exactId, extensions: "all" });
+      const detailRaw = await fetchJson(`https://restapi.amap.com/v3/place/detail?${detailParams}`, {}, 15000, "高德地图官方 POI 详情");
+      const poi = detailRaw?.pois?.[0];
+      const photo = (poi?.photos || []).map((item: any) => secureImageUrl(item?.url)).find(Boolean);
+      const [lng, lat] = cleanText(poi?.location).split(",").map(Number);
+      const distanceM = Number.isFinite(targetLat) && Number.isFinite(targetLng) && Number.isFinite(lat) && Number.isFinite(lng) ? haversine(targetLat, targetLng, lat, lng) : 0;
+      if (photo && (!distanceM || distanceM <= 1200)) return { found: true, url: photo, source: "高德地图官方 POI ID 精确照片", provider: "amap-official", sourceUrl: `https://www.amap.com/place/${encodeURIComponent(exactId)}`, verifiedName: cleanText(poi?.name, name), matchQuality: "amap-official-poi-id", distanceM: Math.round(distanceM) };
+    } catch { /* 精确 ID 不可用时继续名称和坐标回退 */ }
+  }
   for (const lookupName of lookupNames) {
     const params = new URLSearchParams({ key, keywords: lookupName, city, citylimit: "true", extensions: "all", offset: "20", page: "1" });
     const raw = await fetchJson(`https://restapi.amap.com/v3/place/text?${params}`, {}, 15000, "高德地图官方 Web 服务");
     if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德地图官方接口未返回成功状态"));
     const ranked = [...(raw?.pois || [])]
-      .map((poi: any) => ({ poi, score: poiImageScore(poi, lookupNames), photo: (poi?.photos || []).map((item: any) => secureImageUrl(item?.url)).find(Boolean) }))
-      .filter((item: any) => item.score > 0 && item.photo)
+      .map((poi: any) => {
+        const [lng, lat] = cleanText(poi?.location).split(",").map(Number);
+        const distanceM = Number.isFinite(targetLat) && Number.isFinite(targetLng) && Number.isFinite(lat) && Number.isFinite(lng) ? haversine(targetLat, targetLng, lat, lng) : 0;
+        return { poi, distanceM, score: poiImageScore(poi, lookupNames) - (distanceM ? Math.min(50, distanceM / 120) : 0), photo: (poi?.photos || []).map((item: any) => secureImageUrl(item?.url)).find(Boolean) };
+      })
+      .filter((item: any) => item.score > 0 && item.photo && (!item.distanceM || item.distanceM <= 1200))
       .sort((a: any, b: any) => b.score - a.score);
     const best = ranked[0];
     if (!best) continue;
@@ -1422,7 +1453,7 @@ async function amapOfficialImage(env: any, name: string, city: string) {
     return {
       found: true, url: best.photo, source: "高德地图官方 POI 精确照片", provider: "amap-official",
       sourceUrl: id ? `https://www.amap.com/place/${encodeURIComponent(id)}` : "https://www.amap.com/",
-      verifiedName: cleanText(best.poi.name, name), matchQuality: poiMatchScore(best.poi.name, lookupNames) === 100 ? "amap-official-exact-poi" : "amap-official-related-poi",
+      verifiedName: cleanText(best.poi.name, name), matchQuality: poiMatchScore(best.poi.name, lookupNames) === 100 ? "amap-official-exact-poi" : "amap-official-related-poi", distanceM: Math.round(best.distanceM || 0),
     };
   }
   return null;
@@ -1542,18 +1573,20 @@ async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
   }
 }
 
-async function enrichDayTransit(day: any, city: any, env: any) {
+async function enrichDayTransit(day: any, city: any, env: any, exactCache = new Map<string, Promise<any>>()) {
   const byName = new Map(day.items.map((item: any) => [item.name, item]));
   await Promise.all(day.blocks.filter((block: any) => block.type === "leg").map(async (block: any) => {
     const from = byName.get(block.from), to = byName.get(block.to);
     if (!from || !to) return;
-    const result: any = await amapTransitFor(from, to, city, env);
+    const key = `${Number(from.lng).toFixed(5)},${Number(from.lat).toFixed(5)}->${Number(to.lng).toFixed(5)},${Number(to.lat).toFixed(5)}`;
+    if (!exactCache.has(key)) exactCache.set(key, amapTransitFor(from, to, city, env));
+    const result: any = await exactCache.get(key);
     if (result.status === "ready") {
       block.mcpTransport = result;
       if (result.durationMin) {
         block.durationMin = result.durationMin;
         block.source = result.source;
-        block.quality = "routed";
+        block.quality = "verified";
         block.fetchedAt = result.fetchedAt;
       }
     } else block.mcpStatus = result;
@@ -1758,7 +1791,7 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
       if (pairKeys.has(key)) return false;
       pairKeys.add(key);
       return true;
-    }).slice(0, 28);
+    }).slice(0, 6);
     const exact = await mapWithConcurrency(queryLegs, 4, async (leg: any) => ({
       leg,
       result: await amapTransitFor(nodeById.get(leg.fromId), nodeById.get(leg.toId), city, env),
@@ -1771,7 +1804,7 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
       target.durationMin = settled.value.result.durationMin;
       target.distanceM = settled.value.result.distanceM || target.distanceM;
       target.source = `${settled.value.result.source}（规划前）`;
-      target.quality = "routed";
+      target.quality = "verified";
       target.fetchedAt = settled.value.result.fetchedAt || fetchedAt;
       verifiedLegCount += 1;
     }
@@ -2295,6 +2328,119 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
   return { draft, audit, modelAudit };
 }
 
+const WORKFLOW_OBJECTIVES = [
+  { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；不要把购物 POI 当景点。" },
+  { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；恶劣天气给候选池内室内替代。" },
+  { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功。" },
+];
+
+function newWorkflowPlannerState(profile: any, env: any) {
+  return {
+    verifiedWebContext: [], decisionMemo: "", draft: { variants: [] }, audit: null,
+    modelAudit: { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] },
+  };
+}
+
+async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: any, env: any, replanContext: any, previousState?: any) {
+  assertPlannerContext(knowledge);
+  const state = previousState || newWorkflowPlannerState(profile, env);
+  const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives: WORKFLOW_OBJECTIVES, knowledge, verifiedWebContext: state.verifiedWebContext, replanContext };
+  if (stage === "planner_research") {
+    const verificationQueries = [...new Set([
+      ...list(profile.requiredAttractions).slice(0, 3),
+      ...(list(profile.seasonalNeeds).length ? [`${profile.city} ${list(profile.seasonalNeeds).slice(0, 2).join(" ")}`] : []),
+    ])].slice(0, 3);
+    state.verifiedWebContext = (await Promise.all(verificationQueries.map(async (query) => {
+      try {
+        const output = await searchVerifiedTravelContext(query, profile.city, env);
+        return { tool: "search_verified_travel_context", query, resultCount: output.sources?.length || 0, fetchedAt: output.fetchedAt || new Date().toISOString(), sources: (output.sources || []).slice(0, 8), unavailable: output.unavailable || [] };
+      } catch (error: any) {
+        return { tool: "search_verified_travel_context", query, resultCount: 0, fetchedAt: new Date().toISOString(), sources: [], unavailable: [{ name: "network", reason: cleanText(error?.message) }] };
+      }
+    }))).filter(Boolean);
+    state.modelAudit.toolCalls = state.verifiedWebContext;
+    return state;
+  }
+  if (stage === "planner_memo") {
+    if (profile.deepReasoning === false) return state;
+    try {
+      const deliberation = await aiRequest(env, {
+        purpose: "planner", thinking: true, allowReasoningOnly: true, maxTokens: 1200, requestTimeoutMs: 150000,
+        messages: [
+          { role: "system", content: "你是 DeepSeek V4 Pro 行程决策器。形成精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
+          { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext }) },
+        ],
+      });
+      state.decisionMemo = cleanText(deliberation.content || deliberation.reasoningContent).slice(0, 6000);
+    } catch (error: any) {
+      state.modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `V4 Pro 深度分析未形成备忘录，继续由同一模型成稿：${cleanText(error?.message)}` });
+    }
+    return state;
+  }
+  if (stage.startsWith("variant_")) {
+    const variantId = stage.slice("variant_".length);
+    const variantIndex = WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === variantId);
+    const objective = WORKFLOW_OBJECTIVES[variantIndex];
+    if (!objective) throw new Error(`未知方案阶段：${stage}`);
+    if (state.draft.variants.some((variant: any) => variant.id === variantId)) return state;
+    const supplemental = await aiJson(env, {
+      purpose: "planner", thinking: false, maxTokens: 5200, requestTimeoutMs: 150000,
+      messages: [
+        { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
+        { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
+      ],
+    });
+    const variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
+    if (!variant?.days?.length) throw new Error(`${objective.name}没有返回完整日期`);
+    state.draft.variants.push(variant);
+    state.draft.variants.sort((left: any, right: any) => WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === left.id) - WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === right.id));
+    state.modelAudit.plannerModel = supplemental.model;
+    if (supplemental.formatRepaired) state.modelAudit.formatRepairs += 1;
+    return state;
+  }
+  if (stage.startsWith("audit_")) {
+    if (state.draft.variants.length !== 3) throw new Error(`V4 Pro 方案检查点不完整：${state.draft.variants.length}/3`);
+    bindTrafficMatrixFacts(state.draft, knowledge);
+    const legalization = legalizePlannerTimelines(state.draft, knowledge);
+    if (legalization.shiftedActivities) state.modelAudit.compilerIssues.push({ code: "TIMELINE_LEGALIZED", severity: "warning", message: `Travel Compiler 按交通矩阵顺延 ${legalization.shiftedActivities} 个节点，共 ${legalization.shiftedMinutes} 分钟` });
+    state.audit = auditPlannerDraft(state.draft, knowledge);
+    if (stage === "audit_final") {
+      state.modelAudit.compilerIssues.push(...state.audit.issues);
+      if (state.audit.hardIssues.length) {
+        const summary = state.audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
+        throw new Error(`V4 Pro 经两轮修复后仍有 ${state.audit.hardIssues.length} 个硬冲突${summary ? `：${summary}` : ""}`);
+      }
+    }
+    return state;
+  }
+  if (stage.startsWith("repair_round_")) {
+    if (!state.audit) state.audit = auditPlannerDraft(state.draft, knowledge);
+    if (!state.audit.hardIssues.length) return state;
+    const affectedIds = new Set(state.audit.hardIssues.map((issue: any) => cleanText(issue.variantId)).filter(Boolean));
+    if (!affectedIds.size) affectedIds.add("relax");
+    for (const variantId of affectedIds) {
+      const variantIndex = WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === variantId);
+      if (variantIndex < 0 || !state.draft.variants[variantIndex]) continue;
+      const issues = state.audit.hardIssues.filter((issue: any) => !issue.variantId || issue.variantId === variantId);
+      const repaired = await aiJson(env, {
+        purpose: "repair", thinking: false, maxTokens: 5600, requestTimeoutMs: 150000,
+        messages: [
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你是单方案冲突修复器。只输出 {"variants":[修复后的 ${variantId} 完整方案]}。逐项消除问题并保留必去点和正常用餐。` },
+          { role: "user", content: JSON.stringify({ knowledge, variant: state.draft.variants[variantIndex], issues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, replanContext }) },
+        ],
+      });
+      const repairedVariant = normalizePlannerVariant(repaired.value, profile, variantIndex);
+      if (!repairedVariant?.days?.length) throw new Error(`${variantId} 修复结果缺少完整日期`);
+      state.draft.variants[variantIndex] = repairedVariant;
+      state.modelAudit.repairModel = repaired.model;
+      if (repaired.formatRepaired) state.modelAudit.formatRepairs += 1;
+    }
+    state.modelAudit.repairRounds += 1;
+    return state;
+  }
+  return state;
+}
+
 function planDayFromDraft(dayDraft: any, dayIndex: number, spotsById: Map<string, any>, matrix: any, weather: any, profile: any) {
   const blocks: any[] = [];
   const items: any[] = [];
@@ -2372,35 +2518,174 @@ function liveProgress(profile: any, city: any, title: string, items: string[], s
   return { phase, title, items, sources, formSync: profile, generatedAt: new Date().toISOString(), collapsible: true, city: city.name };
 }
 
-async function executeDurablePlanningJob(jobId: string, envelope: any, env: any) {
-  const report: PlanningProgressUpdate = async (progress) => {
-    const status = progress.phase === "route" ? "route" : "live";
-    await updateTravelJob(jobId, { status, progress });
+const SESSION_COOKIE = "smart_travel_session";
+const WORKFLOW_STAGES = ["parse_profile", "collect_sources", "build_knowledge", "build_matrix", "planner_research", "planner_memo", "variant_hot", "variant_niche", "variant_relax", "audit_initial", "repair_round_1", "audit_round_1", "repair_round_2", "audit_final", "final_transit", "compile_result"];
+const stageLabels: Record<string, string> = {
+  parse_profile: "正在由 V4 Flash 正式理解需求", collect_sources: "正在并行获取天气、景点与住宿候选", build_knowledge: "正在核验必选实体、趋势、时令与拥挤风险", build_matrix: "正在建立透明交通候选矩阵", planner_research: "V4 Pro 正在联网核验关键资料", planner_memo: "V4 Pro 正在形成深度决策备忘录", variant_hot: "正在生成经典覆盖方案", variant_niche: "正在生成自然摄影方案", variant_relax: "正在生成轻松避峰方案", audit_initial: "正在执行第一轮硬约束审计", repair_round_1: "正在修复第一轮硬冲突", audit_round_1: "正在复核第一轮修复", repair_round_2: "正在进行最后一轮定向修复", audit_final: "正在执行最终硬约束审计", final_transit: "正在核验最终相邻交通段并重排时间", compile_result: "正在编译可信度与最终结果",
+};
+
+function cookieValue(request: Request, name: string): string {
+  const raw = request.headers.get("cookie") || "";
+  for (const part of raw.split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(value.join("="));
+  }
+  return "";
+}
+
+async function taskSession(request: Request, env: any, create = false) {
+  let value = cookieValue(request, SESSION_COOKIE);
+  let setCookie = "";
+  if (!value && create) {
+    value = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
+    setCookie = `${SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=Strict`;
+  }
+  const hash = value ? await sha256(`${cleanText(env?.RATE_LIMIT_SALT, "smart-travel-public")}|session|${value}`) : "";
+  return { hash, setCookie };
+}
+
+function sanitizeReplanContext(input: any) {
+  const replanInput = input?.replanContext;
+  return replanInput && Array.isArray(replanInput.days) ? {
+    adjustment: cleanText(replanInput.adjustment).slice(0, 800),
+    activeVariant: ["relax", "hot", "niche"].includes(cleanText(replanInput.activeVariant)) ? cleanText(replanInput.activeVariant) : "relax",
+    days: replanInput.days.slice(0, 7).map((day: any, index: number) => ({
+      day: Number(day?.day || index + 1), spotIds: Array.isArray(day?.spotIds) ? day.spotIds.map((value: any) => cleanText(value)).filter(Boolean).slice(0, 5) : [],
+      items: Array.isArray(day?.items) ? day.items.slice(0, 5).map((item: any) => ({ id: cleanText(item?.id), name: cleanText(item?.name), lat: Number.isFinite(Number(item?.lat)) ? Number(item.lat) : undefined, lng: Number.isFinite(Number(item?.lng)) ? Number(item.lng) : undefined, category: cleanText(item?.category), startTime: cleanText(item?.startTime), endTime: cleanText(item?.endTime), durationMin: clamp(item?.durationMin, 20, 360), openingHours: cleanText(item?.openingHours) || null, sourceName: cleanText(item?.sourceName), sourceUrl: cleanText(item?.sourceUrl) || null, fetchedAt: cleanText(item?.fetchedAt), requiredByUser: Boolean(item?.requiredByUser) })).filter((item: any) => item.id && item.name) : [],
+    })),
+  } : null;
+}
+
+async function progressForStage(jobId: string, stage: string, envelope: any, extra: string[] = []) {
+  const completed = WORKFLOW_STAGES.indexOf(stage);
+  const profile = envelope?.profile;
+  const sources = await listJobProviderAttempts(jobId);
+  return {
+    phase: stage === "parse_profile" ? "analysis" : stage.startsWith("variant_") || stage.startsWith("audit_") || stage.startsWith("repair_") || stage === "final_transit" || stage === "compile_result" ? "route" : "live",
+    title: stageLabels[stage] || "正在规划",
+    items: [`✓ 已完成 ${Math.max(0, completed)}/${WORKFLOW_STAGES.length} 个持久阶段`, ...extra, `● 当前检查点：${stage}`],
+    sources: sources.map((attempt, index) => ({ id: /天气/.test(attempt.capability) ? "weather" : /景点/.test(attempt.capability) ? "spots" : /住宿|酒店/.test(attempt.capability) ? "hotels" : /交通|矩阵/.test(attempt.capability) ? "routing" : /拥挤/.test(attempt.capability) ? "crowd" : /时令|趋势/.test(attempt.capability) ? "season" : `${attempt.capability}-${index}`, label: attempt.capability, provider: attempt.provider, state: attempt.status === "success" ? "success" : attempt.status === "failed" || attempt.status === "rate_limited" ? "error" : "unavailable", detail: [attempt.code, attempt.detail, attempt.resultCount == null ? "" : `${attempt.resultCount} 条`].filter(Boolean).join(" · ") })),
+    formSync: profile, generatedAt: new Date().toISOString(), collapsible: true,
+  };
+}
+
+async function runInternalPlanStage(jobId: string, stage: string, workflowId: string, env: any) {
+  if (!WORKFLOW_STAGES.includes(stage)) throw new Error(`未知规划阶段：${stage}`);
+  const job = await getTravelJob(jobId);
+  if (!job) throw new Error("规划任务不存在");
+  if (job.status === "cancelled" || job.cancelRequestedAt) return { cancelled: true };
+  if (job.status === "done") return { done: true };
+  if (Date.now() - job.createdAt > 20 * 60 * 1000) {
+    await updateTravelJob(jobId, { status: "error", errorCode: "HARD_DEADLINE", errorMessage: "规划超过 20 分钟硬截止", completedAt: Date.now() });
+    return { done: true, status: "error" };
+  }
+  if (await getTravelJobArtifact(jobId, `stage:${stage}`)) return { ok: true, skipped: true, stage };
+  const owner = workflowId || `workflow-${jobId}`;
+  const nonce = crypto.randomUUID();
+  if (!await acquireTravelJobLease(jobId, owner, nonce)) throw new Error("任务阶段租约暂不可用");
+  await updateTravelJob(jobId, { status: "working", workflowId: owner, currentStep: stage, heartbeatAt: Date.now(), progress: await progressForStage(jobId, stage, await getTravelJobArtifact(jobId, "envelope") || job.payload) });
+  await addTravelJobEvent({ jobId, eventType: "stage_started", step: stage, message: stageLabels[stage] || stage, createdAt: Date.now() });
+  const heartbeat = setInterval(() => { renewTravelJobLease(jobId, owner, nonce).catch(() => undefined); }, 15_000);
+  const assertCommitAllowed = async () => {
+    const current = await getTravelJob(jobId);
+    if (!current || current.status === "cancelled" || current.cancelRequestedAt) throw new Error("TASK_CANCELLED");
+    if (current.leaseOwner !== owner || current.leaseNonce !== nonce || Number(current.leaseExpiresAt || 0) < Date.now()) throw new Error("LEASE_LOST");
   };
   try {
-    await report(liveProgress(envelope.profile, envelope.city, "正在启动真实数据查询……", [
-      `✓ 已核验目的地：${envelope.city.displayName || envelope.city.name}`,
-      `✓ 已锁定硬约束：${envelope.profile.requiredAttractions.length ? envelope.profile.requiredAttractions.join("、") : "未指定必去景点"}`,
-      "● 天气、景点与酒店查询已在服务端实际启动",
-    ], [
-      { id: "spots", label: "景点实体与常规开放信息", provider: "等待真实返回", state: "loading" },
-      { id: "weather", label: "天气预报", provider: "等待真实返回", state: "loading" },
-      { id: "routing", label: "公共交通矩阵", provider: "候选返回后开始", state: "waiting" },
-      { id: "hotels", label: "住宿候选与参考价", provider: "等待真实返回", state: "loading" },
-      { id: "crowd", label: "拥挤风险预测", provider: "基础事实返回后计算", state: "waiting" },
-      { id: "season", label: "近期趋势与时令报道信号", provider: "候选返回后查询", state: "waiting" },
-    ]));
-    const result = await buildPlan(envelope.profile, envelope.city, env, envelope.replanContext, report);
-    await updateTravelJob(jobId, { status: "done", progress: result.progress, result });
-  } catch (error: any) {
-    const message = cleanText(error?.message, "规划任务执行失败");
-    await updateTravelJob(jobId, { status: "error", errorMessage: message, progress: { phase: "route", title: "规划未通过可靠性检查", items: [message], sources: [], formSync: envelope.profile, generatedAt: new Date().toISOString() } });
+    let envelope: any = await getTravelJobArtifact(jobId, "envelope");
+    if (stage === "parse_profile") {
+      const input = job.payload;
+      const profile = await extractProfile(input, env);
+      if (profile.clarificationNeeded) {
+        await updateTravelJob(jobId, { status: "needs_input", currentStep: stage, progress: { phase: "analysis", title: "需要补充信息", items: [profile.clarificationQuestion || "请明确主要目的地"], formSync: profile } });
+        return { done: true, status: "needs_input" };
+      }
+      const city = await resolveCity(profile.city, env);
+      profile.city = city.name;
+      envelope = { version: 4, createdAt: job.createdAt, profile, city, replanContext: sanitizeReplanContext(input) };
+      await assertCommitAllowed();
+      await putTravelJobArtifact(jobId, "envelope", envelope);
+    } else if (!envelope) throw new Error("需求解析检查点缺失");
+
+    if (stage === "collect_sources") {
+      const started = Date.now();
+      const prepared = await preparePlanKnowledge(envelope.profile, envelope.city, env);
+      await assertCommitAllowed();
+      await putTravelJobArtifact(jobId, "prepared", prepared);
+      const branches = [
+        { provider: prepared.weather?.mcpStatus === "ready" ? "MCPMarket 天气查询" : "Open-Meteo 直连兜底", capability: "天气", ok: prepared.providerBundle.weather.status === "ready", count: prepared.weather?.tripForecast?.length || 0, detail: prepared.weather?.mcpStatus === "fallback" ? `天气 MCP 失败：${prepared.weather?.mcpNote || "未返回"}；Open-Meteo 已兜底` : "天气 MCP 成功；Open-Meteo 补充日照时间" },
+        { provider: "高德官方 / Wikimedia / OSM", capability: "景点", ok: prepared.providerBundle.spots.status === "ready", count: prepared.rawSpots?.length || 0, detail: prepared.providerBundle.spots.error },
+        { provider: prepared.hotel?.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "住宿数据源", capability: "住宿候选（非指定日期实时价格）", ok: prepared.providerBundle.hotels.status === "ready", count: prepared.hotel?.candidates?.length || 0, detail: `${prepared.hotel?.note || prepared.providerBundle.hotels.error || "候选已返回"}；指定日期房态、税费、房型、取消政策保持未知` },
+      ];
+      for (const branch of branches) await recordJobProviderAttempt(jobId, stage, { provider: branch.provider, capability: branch.capability, status: branch.ok ? "success" : "failed", detail: branch.detail || (branch.ok ? "本次任务已返回" : "本次任务未返回"), latencyMs: Date.now() - started, resultCount: branch.count });
+    }
+    if (stage === "build_knowledge" || stage === "build_matrix") {
+      const prepared: any = await getTravelJobArtifact(jobId, "prepared");
+      if (!prepared) throw new Error("实时数据检查点缺失");
+      await putTravelJobArtifact(jobId, stage === "build_knowledge" ? "knowledge_summary" : "matrix_summary", stage === "build_knowledge" ? { spotCount: prepared.plannerSpots?.length || 0, unknowns: prepared.knowledge?.unknowns || [], intelligence: prepared.knowledge?.intelligence } : { total: prepared.trafficMatrix?.legs?.length || 0, verified: prepared.trafficMatrix?.legs?.filter((leg: any) => leg.quality === "verified").length || 0, estimated: prepared.trafficMatrix?.legs?.filter((leg: any) => leg.quality !== "verified").length || 0, source: prepared.trafficMatrix?.source });
+      if (stage === "build_knowledge") {
+        await recordJobProviderAttempt(jobId, stage, { provider: "日期 / 时段 / 天气 / 公开趋势风险模型", capability: "拥挤风险预测", status: prepared.plannerSpots?.some((spot: any) => spot.crowdRisk?.score != null) ? "success" : "degraded", detail: "概率预测，不是官方实时人数", resultCount: prepared.plannerSpots?.filter((spot: any) => spot.crowdRisk?.score != null).length || 0 });
+        await recordJobProviderAttempt(jobId, stage, { provider: prepared.intelligence?.news?.provider || "公开趋势服务", capability: "热门与时令信号", status: prepared.intelligence?.news?.status === "ready" ? "success" : "degraded", detail: prepared.intelligence?.news?.error || "仅使用可归因公开报道", resultCount: prepared.intelligence?.news?.articles?.length || 0 });
+      } else {
+        const total = prepared.trafficMatrix?.legs?.length || 0;
+        const verified = Number(prepared.trafficMatrix?.verifiedLegCount || 0);
+        await recordJobProviderAttempt(jobId, stage, { provider: prepared.trafficMatrix?.source || "交通矩阵", capability: "候选交通矩阵", status: total ? "success" : "failed", detail: `高德核验 ${verified} 段 / 模型估算 ${Math.max(0, total - verified)} 段`, resultCount: total });
+      }
+    }
+    if (stage === "planner_research" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("audit_") || stage.startsWith("repair_")) {
+      const prepared: any = await getTravelJobArtifact(jobId, "prepared");
+      if (!prepared?.knowledge) throw new Error("规划知识包检查点缺失");
+      const plannerState = await runPlannerWorkflowStage(stage, envelope.profile, prepared.knowledge, env, envelope.replanContext, await getTravelJobArtifact(jobId, "planner_state"));
+      await assertCommitAllowed();
+      await putTravelJobArtifact(jobId, "planner_state", plannerState);
+      if (stage.startsWith("variant_")) await putTravelJobArtifact(jobId, stage, plannerState.draft.variants.find((variant: any) => variant.id === stage.slice(8)));
+    }
+    if (stage === "final_transit") {
+      const prepared: any = await getTravelJobArtifact(jobId, "prepared");
+      const plannerState: any = await getTravelJobArtifact(jobId, "planner_state");
+      if (!prepared || !plannerState?.audit || plannerState.audit.hardIssues?.length) throw new Error("最终审计检查点未通过");
+      const result = await buildPlan(envelope.profile, envelope.city, env, envelope.replanContext, async (progress) => updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), progress }), prepared, { draft: plannerState.draft, audit: plannerState.audit, modelAudit: plannerState.modelAudit });
+      await assertCommitAllowed();
+      await putTravelJobArtifact(jobId, "final_result", result);
+    }
+    if (stage === "compile_result") {
+      const result = await getTravelJobArtifact(jobId, "final_result");
+      if (!result) throw new Error("最终结果检查点缺失");
+      assertPlanContract(result);
+      await assertCommitAllowed();
+      await updateTravelJob(jobId, { status: "done", currentStep: stage, heartbeatAt: Date.now(), result, progress: (result as any).progress, completedAt: Date.now() });
+    }
+    await assertCommitAllowed();
+    await putTravelJobArtifact(jobId, `stage:${stage}`, { completedAt: new Date().toISOString(), workflowId: owner });
+    await addTravelJobEvent({ jobId, eventType: "stage_completed", step: stage, message: `${stageLabels[stage] || stage}已完成`, createdAt: Date.now() });
+    if (stage !== "compile_result") await updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), progress: await progressForStage(jobId, stage, envelope) });
+    return { ok: true, stage, done: stage === "compile_result" };
+  } finally {
+    clearInterval(heartbeat);
+    await releaseTravelJobLease(jobId, owner, nonce);
   }
+}
+
+async function handleInternalPlanApi(request: Request, env: any, url: URL) {
+  if (!await verifySignedRequest(request, cleanText(env?.ORCHESTRATOR_SHARED_SECRET))) return json({ error: { message: "内部签名无效" } }, 401);
+  const body = await request.json().catch(() => ({}));
+  if (url.pathname === "/api/internal/plan/stage" && request.method === "POST") return json(await runInternalPlanStage(cleanText(body.jobId), cleanText(body.stage), cleanText(body.workflowId), env));
+  if (url.pathname === "/api/internal/plan/error" && request.method === "POST") {
+    await updateTravelJob(cleanText(body.jobId), { status: "error", errorCode: cleanText(body.code, "WORKFLOW_FAILED"), errorMessage: cleanText(body.message, "Workflow 规划失败"), completedAt: Date.now() });
+    return json({ ok: true });
+  }
+  if (url.pathname === "/api/internal/plan/dispatch" && request.method === "POST") {
+    const jobs = await listJobsForOrchestrator(20);
+    return json({ queued: jobs.queued.map((job) => job.id), cancelled: jobs.cancelled.map((job) => job.workflowId || job.id), stale: jobs.stale.map((job) => job.workflowId || job.id) });
+  }
+  return json({ error: { message: "内部接口不存在" } }, 404);
 }
 
 function rateLimitPolicy(pathname: string, method: string) {
   if (pathname === "/api/plan/start" && method === "POST") return { endpoint: "plan-start", limit: 6, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/plan/status") return { endpoint: "plan-status", limit: 3600, windowMs: 60 * 60 * 1000 };
+  if (pathname === "/api/plan/active") return { endpoint: "plan-active", limit: 600, windowMs: 60 * 60 * 1000 };
+  if (pathname === "/api/plan/cancel") return { endpoint: "plan-cancel", limit: 60, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/agent") return { endpoint: "agent", limit: 30, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/image") return { endpoint: "image", limit: 180, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/monitor") return { endpoint: "monitor", limit: 30, windowMs: 60 * 60 * 1000 };
@@ -2410,6 +2695,7 @@ function rateLimitPolicy(pathname: string, method: string) {
 export async function handleTravelApi(request: Request, env: any, url: URL, ctx?: { waitUntil(promise: Promise<unknown>): void }): Promise<Response | null> {
   try {
     configurePersistence(env?.DB);
+    if (url.pathname.startsWith("/api/internal/plan/")) return handleInternalPlanApi(request, env, url);
     const clientHash = await requestClientHash(request, cleanText(env?.RATE_LIMIT_SALT, "smart-travel-public"));
     const policy = rateLimitPolicy(url.pathname, request.method);
     const quota = await consumeRateLimit(clientHash, policy.endpoint, policy.limit, policy.windowMs);
@@ -2498,18 +2784,22 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const wikipedia = cleanText(url.searchParams.get("wikipedia"));
       const name = cleanText(url.searchParams.get("name"));
       const cityName = cleanText(url.searchParams.get("city"));
+      const officialName = cleanText(url.searchParams.get("officialName"), name);
+      const poiId = cleanText(url.searchParams.get("poiId"));
+      const targetLat = Number(url.searchParams.get("lat"));
+      const targetLng = Number(url.searchParams.get("lng"));
       const excluded = new Set(cleanText(url.searchParams.get("exclude")).split(",").filter(Boolean));
-      const imageCacheKey = JSON.stringify({ imageUrl, wikipedia, name, cityName, excluded: [...excluded].sort() });
-      const cachedImage = await persistentCacheGet("spot-image", imageCacheKey);
+      const imageCacheKey = JSON.stringify({ imageUrl, wikipedia, name, officialName, poiId, cityName, targetLat: Number.isFinite(targetLat) ? targetLat : null, targetLng: Number.isFinite(targetLng) ? targetLng : null, excluded: [...excluded].sort() });
+      const cachedImage = await persistentCacheGet("spot-image-v29", imageCacheKey);
       if (cachedImage && typeof cachedImage === "object") return json(cachedImage);
       const imageResponse = async (value: any) => {
-        await persistentCachePut("spot-image", imageCacheKey, value, value?.found ? 7 * 24 * 60 * 60 * 1000 : 10 * 60 * 1000);
+        await persistentCachePut("spot-image-v29", imageCacheKey, value, value?.found ? 7 * 24 * 60 * 60 * 1000 : 10 * 60 * 1000);
         return json(value);
       };
       const attempts: string[] = [];
       if (name && cityName && !excluded.has("amap-official")) {
         try {
-          const official = await amapOfficialImage(env, name, cityName);
+          const official = await amapOfficialImage(env, officialName || name, cityName, poiId, Number.isFinite(targetLat) ? targetLat : undefined, Number.isFinite(targetLng) ? targetLng : undefined);
           if (official) return await imageResponse(official);
           attempts.push("高德官方未找到匹配照片");
         } catch (error: any) { attempts.push(`高德官方：${cleanText(error?.message, "不可用")}`); }
@@ -2570,74 +2860,67 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
     if (url.pathname === "/api/monitor" && request.method === "POST") return json(await monitorExecution(await request.json(), env));
 
     if (url.pathname === "/api/plan/start" && request.method === "POST") {
-      const hourlyJobs = await activeJobCount(clientHash);
+      const session = await taskSession(request, env, true);
+      const existingActive = await findActiveTravelJob(session.hash);
+      if (existingActive) return json({ error: { message: "您已有一个规划任务正在执行，可重新连接或先取消", code: "CONCURRENT_JOB_LIMIT", jobId: existingActive.id } }, 409, { "set-cookie": session.setCookie, "cache-control": "no-store" });
       const globalJobs = await activeJobCount();
-      if (hourlyJobs >= 1) return json({ error: { message: "您已有一个规划任务正在执行，请等待其完成后再提交", code: "CONCURRENT_JOB_LIMIT" } }, 429, { "retry-after": "15" });
       if (globalJobs >= 4) return json({ error: { message: "当前规划队列繁忙，请稍后再试", code: "GLOBAL_CONCURRENCY_LIMIT" } }, 503, { "retry-after": "20" });
       const dailyQuota = await consumeRateLimit("global", "plan-daily", clamp(env?.DAILY_PLAN_QUOTA || 100, 20, 1000), 24 * 60 * 60 * 1000);
       if (!dailyQuota.allowed) return json({ error: { message: "今日公开规划额度已用完，请明日再试", code: "DAILY_QUOTA_EXCEEDED" } }, 429, { "retry-after": String(dailyQuota.retryAfterSeconds) });
       const input = await request.json();
-      const profile = await extractProfile(input, env);
-      if (profile.clarificationNeeded) return json({ error: { message: profile.clarificationQuestion || "请先明确一个主要目的城市或区县，再生成行程。" }, profile }, 409);
-      const city = await resolveCity(profile.city, env);
-      profile.city = city.name;
-      const replanInput = input?.replanContext;
-      const replanContext = replanInput && Array.isArray(replanInput.days) ? {
-        adjustment: cleanText(replanInput.adjustment).slice(0, 800),
-        activeVariant: ["relax", "hot", "niche"].includes(cleanText(replanInput.activeVariant)) ? cleanText(replanInput.activeVariant) : "relax",
-        days: replanInput.days.slice(0, 7).map((day: any, index: number) => ({
-          day: Number(day?.day || index + 1),
-          spotIds: Array.isArray(day?.spotIds) ? day.spotIds.map((value: any) => cleanText(value)).filter(Boolean).slice(0, 5) : [],
-          items: Array.isArray(day?.items) ? day.items.slice(0, 5).map((item: any) => ({
-            id: cleanText(item?.id), name: cleanText(item?.name),
-            lat: Number.isFinite(Number(item?.lat)) ? Number(item.lat) : undefined,
-            lng: Number.isFinite(Number(item?.lng)) ? Number(item.lng) : undefined,
-            category: cleanText(item?.category), startTime: cleanText(item?.startTime), endTime: cleanText(item?.endTime),
-            durationMin: clamp(item?.durationMin, 20, 360), openingHours: cleanText(item?.openingHours) || null,
-            sourceName: cleanText(item?.sourceName), sourceUrl: cleanText(item?.sourceUrl) || null,
-            fetchedAt: cleanText(item?.fetchedAt), requiredByUser: Boolean(item?.requiredByUser),
-          })).filter((item: any) => item.id && item.name) : [],
-        })),
-      } : null;
-      const envelope = { version: 3, createdAt: Date.now(), profile, city, replanContext };
       const idempotencyKey = cleanText(request.headers.get("x-idempotency-key"));
-      const accessToken = cleanText(request.headers.get("x-travel-job-token"));
-      if (idempotencyKey.length < 16 || accessToken.length < 24) return json({ error: { message: "缺少安全任务凭证，请刷新页面后重试", code: "JOB_CREDENTIAL_REQUIRED" } }, 400);
+      if (idempotencyKey.length < 16) return json({ error: { message: "缺少幂等请求标识，请刷新页面后重试", code: "IDEMPOTENCY_KEY_REQUIRED" } }, 400, { "set-cookie": session.setCookie });
       const jobId = crypto.randomUUID();
-      const accessTokenHash = await sha256(accessToken);
-      const progress = { phase: "analysis", title: "正在分析您的需求……", items: [
-        `✓ 已识别目的地：${profile.city}`,
-        `✓ 已识别旅行时长：${profile.days}天${profile.nights}晚`,
-        `✓ 出行人数：${profile.partySize}人`,
-        `✓ 偏好：${profile.preferences.length ? profile.preferences.join(" / ") : profile.style || "未指定"}`,
-        `✓ 必选景点：${profile.requiredAttractions.length ? profile.requiredAttractions.join(" / ") : "未指定"}`,
-        `✓ 每日时段：${profile.dayStart === "Unknown" ? "待确认" : profile.dayStart}—${profile.dayEnd === "Unknown" ? "待确认" : profile.dayEnd}`,
-        `✓ 需求解析模型：${profile.extractionModel || aiPrimaryModel(env, "extract")}`,
-      ], formSync: profile };
-      if (!ctx) return json({ error: { message: "当前运行环境不支持后台规划任务", code: "BACKGROUND_TASK_UNAVAILABLE" } }, 503);
+      const progress = { phase: "queued", title: "规划任务已进入持久队列", items: ["● 等待 Workflow 启动", "● 即使刷新或关闭页面，后台仍会继续"], generatedAt: new Date().toISOString() };
+      const now = Date.now();
       const created = await createTravelJob({
-        id: jobId, idempotencyKey, clientHash, accessTokenHash, status: "analysis", payload: envelope,
-        progress, result: null, errorMessage: null, createdAt: Date.now(), updatedAt: Date.now(), expiresAt: Date.now() + 30 * 60 * 1000,
+        id: jobId, idempotencyKey, clientHash, accessTokenHash: "", status: "queued", payload: input,
+        progress, result: null, errorMessage: null, createdAt: now, updatedAt: now, expiresAt: now + 24 * 60 * 60 * 1000,
+        workflowId: null, engineVersion: "v29-workflow", currentStep: "queued", heartbeatAt: now, leaseOwner: null, leaseNonce: null, leaseExpiresAt: null, cancelRequestedAt: null, attemptCount: 0, errorCode: null, completedAt: null, sessionHash: session.hash,
       });
-      if (created.job.accessTokenHash !== accessTokenHash) return json({ error: { message: "幂等任务凭证不匹配", code: "JOB_TOKEN_MISMATCH" } }, 409);
       if (created.created) {
-        ctx.waitUntil(executeDurablePlanningJob(jobId, envelope, env));
+        try {
+          await updateTravelJob(jobId, { status: "queued", workflowId: jobId, currentStep: "queued", heartbeatAt: Date.now() });
+          await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "任务已进入 Workflow 持久队列，私有调度器将在一分钟内领取", detail: { workflowId: jobId }, createdAt: Date.now() });
+        } catch (error: any) { throw error; }
       }
-      return json({ jobId: created.job.id, status: "working", progress: created.job.progress || progress }, 202, { "cache-control": "no-store" });
+      return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v29-workflow" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/plan/status") {
       const id = cleanText(url.searchParams.get("id"));
       if (!id) return json({ error: { message: "缺少规划任务 ID" } }, 400);
-      const token = cleanText(request.headers.get("x-travel-job-token"));
-      if (token.length < 24) return json({ error: { message: "缺少任务访问凭证", code: "JOB_TOKEN_REQUIRED" } }, 401);
+      const session = await taskSession(request, env);
+      if (!session.hash) return json({ error: { message: "任务会话已失效", code: "JOB_SESSION_REQUIRED" } }, 401);
       const job = await getTravelJob(id);
       if (!job) return json({ status: "error", error: { message: "规划任务不存在或已清理" } }, 404);
-      if (job.accessTokenHash !== await sha256(token)) return json({ status: "error", error: { message: "无权访问该规划任务" } }, 403);
+      if (job.sessionHash !== session.hash) return json({ status: "error", error: { message: "无权访问该规划任务" } }, 403);
       if (Date.now() > job.expiresAt) return json({ status: "error", error: { message: "规划任务已过期，请重新生成" } }, 410);
-      if (job.status === "done" && job.result) return json({ status: "done", result: job.result, progress: job.progress }, 200, { "cache-control": "no-store" });
-      if (job.status === "error") return json({ status: "error", error: { message: job.errorMessage || "规划任务执行失败" }, progress: job.progress }, 500, { "cache-control": "no-store" });
-      return json({ status: "working", progress: job.progress }, 200, { "cache-control": "no-store", "retry-after": "2" });
+      const [events, providerAttempts] = await Promise.all([listTravelJobEvents(id), listJobProviderAttempts(id)]);
+      const common = { jobId: id, status: job.status, progress: job.progress, currentStep: job.currentStep, heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null, events, providerAttempts, engineVersion: job.engineVersion };
+      if (job.status === "done" && job.result) return json({ ...common, result: job.result }, 200, { "cache-control": "no-store" });
+      if (job.status === "error") return json({ ...common, error: { message: job.errorMessage || "规划任务执行失败", code: job.errorCode } }, 200, { "cache-control": "no-store" });
+      if (job.status === "cancelled") return json({ ...common, error: { message: "规划任务已取消", code: "USER_CANCELLED" } }, 200, { "cache-control": "no-store" });
+      return json(common, 200, { "cache-control": "no-store", "retry-after": "2" });
+    }
+
+    if (url.pathname === "/api/plan/active" && request.method === "GET") {
+      const session = await taskSession(request, env);
+      if (!session.hash) return json({ active: false }, 200, { "cache-control": "no-store" });
+      const job = await findActiveTravelJob(session.hash);
+      return json(job ? { active: true, jobId: job.id, status: job.status, progress: job.progress, currentStep: job.currentStep, heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null, createdAt: new Date(job.createdAt).toISOString() } : { active: false }, 200, { "cache-control": "no-store" });
+    }
+
+    if (url.pathname === "/api/plan/cancel" && request.method === "POST") {
+      const session = await taskSession(request, env);
+      const body = await request.json().catch(() => ({}));
+      const id = cleanText(body.jobId);
+      if (!id || !session.hash) return json({ error: { message: "缺少任务或会话" } }, 400);
+      const job = await getTravelJob(id);
+      if (!job || job.sessionHash !== session.hash) return json({ error: { message: "任务不存在或无权访问" } }, 404);
+      const cancelled = await requestTravelJobCancellation(id, session.hash);
+      if (cancelled) await addTravelJobEvent({ jobId: id, eventType: "job_cancelled", step: job.currentStep, message: "用户已取消后台规划；私有调度器将终止 Workflow，阶段租约已禁止提交", createdAt: Date.now() });
+      return json({ cancelled, jobId: id, status: cancelled ? "cancelled" : job.status }, 200, { "cache-control": "no-store" });
     }
 
     return null;
@@ -2646,7 +2929,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
   }
 }
 
-async function buildPlan(profile: any, city: any, env: any, replanContext: any = null, report?: PlanningProgressUpdate) {
+async function preparePlanKnowledge(profile: any, city: any, env: any, report?: PlanningProgressUpdate) {
   const providerBundle = await settleTravelProviders({
     weather: weatherFor(city, profile.startDate, profile.days),
     spots: wikipediaSpots(city, 48, profile.requiredAttractions, profile.preferences, env),
@@ -2755,6 +3038,21 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     dataPolicy: { verified: "仅来自工具返回", prediction: "必须显示 Prediction、概率、依据与不确定性", unknown: "不得升级为 Verified", crowd: "预测拥挤概率，不生成实时人数", trends: "Hotness 与 Seasonality 分离" },
     intelligence: { news: { status: intelligence.news.status, provider: intelligence.news.provider, fetchedAt: intelligence.news.fetchedAt, articleCount: intelligence.news.articles?.length || 0 }, social: { status: intelligence.social.status, provider: intelligence.social.provider, fetchedAt: intelligence.social.fetchedAt, detail: intelligence.social.detail } },
   };
+  return {
+    providerBundle, weather, hotel, rawSpots, required,
+    requiredNameEntries: [...requiredNameById.entries()],
+    intelligence: {
+      news: { status: intelligence.news.status, provider: intelligence.news.provider, fetchedAt: intelligence.news.fetchedAt, articles: intelligence.news.articles || [], error: intelligence.news.error || null },
+      social: { status: intelligence.social.status, provider: intelligence.social.provider, fetchedAt: intelligence.social.fetchedAt, detail: intelligence.social.detail, error: intelligence.social.error || null },
+    },
+    ranked, trafficMatrix, spots, fetchedAt, plannerSpots, knowledge,
+  };
+}
+
+async function buildPlan(profile: any, city: any, env: any, replanContext: any = null, report?: PlanningProgressUpdate, preparedInput?: any, generatedInput?: any) {
+  const prepared = preparedInput || await preparePlanKnowledge(profile, city, env, report);
+  const { providerBundle, weather, hotel, rawSpots, required, intelligence, ranked, trafficMatrix, spots, fetchedAt, plannerSpots, knowledge } = prepared;
+  const requiredNameById = new Map(prepared.requiredNameEntries || []);
   await report?.(liveProgress(profile, city, "公共交通矩阵已建立，V4 Pro 正在生成三套方案……", [
     `✓ 候选景点知识包：${plannerSpots.length} 个实体`,
     `✓ 规划前交通矩阵：${trafficMatrix.legs.length} 条路线`,
@@ -2768,7 +3066,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     { id: "crowd", label: "拥挤风险预测", provider: "日期 / 时段 / 天气 / 趋势模型", state: "success", detail: "预测概率，不是官方实时人数" },
     { id: "season", label: "近期趋势与时令报道信号", provider: intelligence.news.status === "ready" ? intelligence.news.provider : "未返回", state: intelligence.news.status === "ready" ? "success" : "unavailable", detail: "仅使用可归因公开报道" },
   ], "route"));
-  const generated = await generatePlannerDraft(profile, knowledge, env, replanContext);
+  const generated = generatedInput || await generatePlannerDraft(profile, knowledge, env, replanContext);
   const plannerSpotById = new Map(plannerSpots.map((spot: any) => [spot.id, spot]));
   const spotsById = new Map(spots.map((spot: any) => {
     const plannerSpot: any = plannerSpotById.get(spot.id);
@@ -2776,6 +3074,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     return [spot.id, requiredNameById.has(spot.id) ? { ...merged, name: requiredNameById.get(spot.id), officialName: spot.officialName || spot.name } : merged];
   }));
   const alternatives: any[] = [];
+  const finalTransitCache = new Map<string, Promise<any>>();
   const affectedDayIndexes = replanContext ? adjustmentDayIndexes(replanContext.adjustment, profile.days) : [];
 
   for (let variantIndex = 0; variantIndex < 3; variantIndex += 1) {
@@ -2802,7 +3101,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     }
     for (const day of daysPlan) {
       day.route = await routeFor(day.items);
-      await enrichDayTransit(day, city, env);
+      await enrichDayTransit(day, city, env, finalTransitCache);
       reflowDayAfterTransit(day, profile);
       day.dining = await Promise.all(day.blocks.filter((block: any) => block.type === "rest" && block.mealType && block.anchor).map((block: any) => diningFor(city.name, block.anchor.lat, block.anchor.lng, block.mealType)));
     }
@@ -2838,11 +3137,29 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     throw new Error(`最终编译器拒绝返回：至少一套方案缺少用户必去景点；实际必去节点 ${details}`);
   }
   const transitLegs = alternatives.flatMap((plan: any) => plan.daysPlan).flatMap((day: any) => day.blocks).filter((block: any) => block.type === "leg");
-  const amapVerifiedLegs = transitLegs.filter((block: any) => block.mcpTransport).length;
+  const uniqueTransitLegs = [...new Map(transitLegs.map((block: any) => [`${normalizeName(block.from)}->${normalizeName(block.to)}`, block])).values()] as any[];
+  const amapVerifiedLegs = uniqueTransitLegs.filter((block: any) => block.mcpTransport).length;
+  const candidateVerifiedLegs = Number(trafficMatrix.verifiedLegCount || 0);
+  const candidateCoverageSummary = summarizeTrafficCoverage(trafficMatrix.legs.length, candidateVerifiedLegs);
+  const finalCoverageSummary = summarizeTrafficCoverage(uniqueTransitLegs.length, amapVerifiedLegs);
+  const candidateEstimatedLegs = candidateCoverageSummary.estimated;
+  const candidateCoverage = candidateCoverageSummary.coveragePercent;
+  const finalTransitCoverage = finalCoverageSummary.coveragePercent;
+  for (const plan of alternatives) {
+    plan.transportCoverage = {
+      candidate: { total: trafficMatrix.legs.length, amapVerified: candidateVerifiedLegs, estimated: candidateEstimatedLegs, coveragePercent: candidateCoverage },
+      final: { total: uniqueTransitLegs.length, amapVerified: amapVerifiedLegs, estimated: finalCoverageSummary.estimated, coveragePercent: finalTransitCoverage, status: finalCoverageSummary.status },
+      note: finalTransitCoverage < 60 ? "最终行程高德核验覆盖率低于 60%，交通数据已标记降级" : "最终行程相邻段优先使用高德官方公交接口，高德 MCP 仅兜底",
+    };
+    if (finalTransitCoverage < 60) {
+      plan.planningDecision.degraded = true;
+      plan.planningDecision.degradationReason = [plan.planningDecision.degradationReason, "最终交通高德核验覆盖率低于 60%"].filter(Boolean).join("；");
+    }
+  }
   const progressItems = [
     `✓ 实际获取候选景点 ${rawSpots.length} 个，过滤后进入知识包 ${spots.length} 个`,
     `✓ 已核验用户必去景点 ${required.length} 个；三套方案均通过覆盖检查`,
-    `✓ 已在核心规划前计算交通矩阵 ${trafficMatrix.legs.length} 条有向路线（${trafficMatrix.source}）`,
+    `✓ 候选交通矩阵：总计 ${trafficMatrix.legs.length} 段，高德核验 ${candidateVerifiedLegs} 段，模型估算 ${candidateEstimatedLegs} 段，覆盖率 ${candidateCoverage}%`,
     `✓ 天气状态：${providerBundle.weather.status === "ready" ? `由 ${weather.source} 返回` : "Unavailable，未套用其他日期"}`,
     `✓ 公开趋势：${intelligence.news.status === "ready" ? `${intelligence.news.articles?.length || 0} 条近 7 天公开报道进入 Hotness / Seasonality 取证` : `Unavailable（${intelligence.news.error || "未返回"}）`}`,
     `${intelligence.social.status === "ready" ? "✓" : "●"} 社交趋势：${intelligence.social.status === "ready" ? `${intelligence.social.provider} 已返回公开热榜数据` : "国内热榜不可用；可选小红书 MCP 未连接，未自动登录或绕过验证码"}`,
@@ -2850,7 +3167,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     `✓ 酒店状态：${hotel.candidates?.length ? `${hotel.candidates.length} 个候选，${hotel.pricedCount || 0} 个带来源参考价` : "Unknown，未生成假酒店或假价格"}`,
     `✓ ${generated.modelAudit.plannerModel} 已生成完整活动时间轴；联网查询工具实际调用 ${generated.modelAudit.toolCalls.length} 次`,
     `✓ Travel Compiler 检出 ${generated.modelAudit.compilerIssues.length} 项并执行 ${generated.modelAudit.repairRounds} 轮 AI 修复`,
-    `✓ 高德 MCP 校验 ${amapVerifiedLegs}/${transitLegs.length} 个最终交通段；其余保留矩阵来源`,
+    `${finalTransitCoverage >= 80 ? "✓" : "●"} 最终行程去重交通段：高德核验 ${amapVerifiedLegs} 段，估算 ${uniqueTransitLegs.length - amapVerifiedLegs} 段，覆盖率 ${finalTransitCoverage}%`,
     `✓ 三套方案差异检查：最大 Jaccard ${Number(generated.audit.differences.maxJaccard || 0).toFixed(2)}`,
     generated.modelAudit.degraded ? `● 当前为透明降级结果：${generated.modelAudit.degradationReason}` : "✓ 最终方案通过硬约束核验",
   ];
@@ -2861,7 +3178,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     sources: [
       { id: "spots", label: "景点与开放信息", provider: "中文维基百科 / 高德地图 / OSM", state: providerBundle.spots.status === "ready" ? "success" : "error", detail: providerBundle.spots.status === "ready" ? `${spots.length} 个进入候选池` : providerBundle.spots.error },
       { id: "weather", label: "天气", provider: weather.source || "未返回", state: providerBundle.weather.status === "ready" ? "success" : "error", detail: providerBundle.weather.status === "ready" ? "已按出行日期核验" : providerBundle.weather.error },
-      { id: "routing", label: "路线与交通时间", provider: trafficMatrix.source, state: trafficMatrix.legs.length ? "success" : "error", detail: `${trafficMatrix.legs.length} 条有向路线` },
+      { id: "routing", label: "路线与交通时间", provider: trafficMatrix.source, state: trafficMatrix.legs.length ? "success" : "error", detail: `候选 ${candidateVerifiedLegs}/${trafficMatrix.legs.length} 段高德核验；最终去重 ${amapVerifiedLegs}/${uniqueTransitLegs.length} 段高德核验` },
       { id: "hotels", label: "住宿候选", provider: hotel.candidates?.length ? "高德地图 / 酒店 MCP" : "未返回", state: hotel.candidates?.length ? "success" : "unavailable", detail: hotel.candidates?.length ? `${hotel.candidates.length} 个候选` : "没有可靠候选" },
       { id: "crowd", label: "拥挤与预约", provider: "Crowd Risk 日期/时段/天气/趋势概率模型", state: spots.some((spot: any) => spot.crowd?.score != null) ? "success" : "unavailable", detail: "已生成按到访时段变化的风险概率、置信度和避峰动作；不冒充实时人数" },
       { id: "season", label: "热门与时令", provider: intelligence.news.status === "ready" ? `${intelligence.news.provider}${intelligence.social.status === "ready" ? ` + ${intelligence.social.provider}` : ""}` : "公开趋势服务未返回", state: intelligence.news.status === "ready" ? "success" : "unavailable", detail: `${spots.filter((spot: any) => spot.hotness?.score != null).length} 个有趋势信号 · ${spots.filter((spot: any) => spot.seasonality?.score != null).length} 个有时令证据` },
@@ -2890,7 +3207,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
         implementation: "DeepSeek function calls -> server-side Wikimedia / 高德核验；天气 / 酒店 / 交通由后端先行取证",
         actualToolCalls: generated.modelAudit.toolCalls,
       },
-      trafficMatrix: { readyBeforePlanner: true, source: trafficMatrix.source, legCount: trafficMatrix.legs.length, fetchedAt: trafficMatrix.fetchedAt },
+      trafficMatrix: { readyBeforePlanner: true, source: trafficMatrix.source, legCount: trafficMatrix.legs.length, verifiedLegCount: candidateVerifiedLegs, estimatedLegCount: candidateEstimatedLegs, coveragePercent: candidateCoverage, finalVerifiedLegCount: amapVerifiedLegs, finalLegCount: uniqueTransitLegs.length, finalCoveragePercent: finalTransitCoverage, fetchedAt: trafficMatrix.fetchedAt },
       repairRounds: generated.modelAudit.repairRounds,
       degraded: generated.modelAudit.degraded,
       stages: [

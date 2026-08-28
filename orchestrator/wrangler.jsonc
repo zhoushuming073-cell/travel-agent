@@ -1,0 +1,23 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "smart-travel-planner-orchestrator",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-27",
+  "workers_dev": false,
+  "workflows": [
+    {
+      "name": "smart-travel-planning-v29",
+      "binding": "TRAVEL_WORKFLOW",
+      "class_name": "TravelPlanningWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "SITE_BASE_URL": "https://smart-travel-cn-2026.zhoushuming.chatgpt.site"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
