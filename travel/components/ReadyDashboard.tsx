@@ -5,7 +5,7 @@ import type { AgentEvent, PlanningProgress, UiPlan } from "../types.ts";
 import { AgentActivity } from "./AgentActivity.tsx";
 import { EvidencePanel } from "./EvidencePanel.tsx";
 import { ExecutionMode } from "./ExecutionMode.tsx";
-import { Icon } from "./Icon.tsx";
+import { Icon, type IconName } from "./Icon.tsx";
 import { ItineraryTimeline } from "./ItineraryTimeline.tsx";
 import { MapPanel } from "./MapPanel.tsx";
 import { SpotImage } from "./SpotImage.tsx";
@@ -23,13 +23,13 @@ interface Props {
 }
 
 function paceLabel(value?: string): string { return value === "relax" || value === "slow" ? "轻松" : value === "tight" ? "紧凑" : "适中"; }
-function weatherIcon(code?: number): string { return code === undefined ? "◌" : code <= 1 ? "☀" : code <= 3 ? "⛅" : code >= 51 ? "☂" : "☁"; }
+function weatherIcon(code?: number): IconName { return code === undefined ? "cloud" : code <= 1 ? "sun" : code <= 3 ? "cloudSun" : code >= 51 ? "rain" : "cloud"; }
 function variantLabel(id: string): string { return id === "relax" ? "舒适版" : id === "hot" ? "精华版" : "错峰版"; }
 function stabilityLabel(score?: number): string { return score === undefined ? "暂未核验" : score <= 35 ? "较稳定" : score <= 65 ? "一般" : "需关注"; }
 
 function Weather({ plan, selectedDay }: { plan: UiPlan; selectedDay: number | null }) {
   const selected = plan.daysPlan.find((day) => day.day === selectedDay) ?? plan.daysPlan[0];
-  return <section className="ready-weather-card"><header><b>{plan.city} · 逐日天气</b><span>超过预报范围则保持待核验</span></header><div className="weather-forecast-row">{plan.daysPlan.map((day) => { const weather = day.weather; return <article className={selected?.day === day.day ? "active" : ""} key={day.day}><small>第 {day.day} 天</small><i>{weatherIcon(weather?.weatherCode)}</i><strong>{weather?.quality === "forecast" ? `${weather.temperatureMin ?? "—"}° / ${weather.temperatureMax ?? "—"}°` : "待核验"}</strong><span>{weather?.quality === "forecast" ? `降雨 ${weather.precipitationProbability ?? "—"}%` : "未用今日天气代替"}</span></article>; })}</div>{selected && <p className="weather-note"><b>{selected.date}</b>{selected.weather?.quality === "forecast" ? Number(selected.weather.precipitationProbability ?? 0) >= 60 ? "降雨概率较高，建议保留室内备选。" : "当前预报未触发强降雨替换规则。" : "出行日期可能超过当前预报范围，临近出发时再复核。"}</p>}</section>;
+  return <section className="ready-weather-card"><header><b>{plan.city} · 逐日天气</b><span>超过预报范围则保持待核验</span></header><div className="weather-forecast-row">{plan.daysPlan.map((day) => { const weather = day.weather; return <article className={selected?.day === day.day ? "active" : ""} key={day.day}><small>第 {day.day} 天</small><i><Icon name={weatherIcon(weather?.weatherCode)}/></i><strong>{weather?.quality === "forecast" ? `${weather.temperatureMin ?? "—"}° / ${weather.temperatureMax ?? "—"}°` : "待核验"}</strong><span>{weather?.quality === "forecast" ? `降雨 ${weather.precipitationProbability ?? "—"}%` : "未用今日天气代替"}</span></article>; })}</div>{selected && <p className="weather-note"><b>{selected.date}</b>{selected.weather?.quality === "forecast" ? Number(selected.weather.precipitationProbability ?? 0) >= 60 ? "降雨概率较高，建议保留室内备选。" : "当前预报未触发强降雨替换规则。" : "出行日期可能超过当前预报范围，临近出发时再复核。"}</p>}</section>;
 }
 
 function Crowd({ plan }: { plan: UiPlan }) {

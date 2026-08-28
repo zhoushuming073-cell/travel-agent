@@ -2,6 +2,7 @@
 
 import { WORKSPACE_STAGES } from "../state/machine.ts";
 import type { AgentState } from "../types.ts";
+import { Icon } from "./Icon.tsx";
 
 const steps = ["理解需求", "联网取证", "生成方案", "校验完成"];
 
@@ -20,7 +21,7 @@ export function StageProgress({ state, selectedStep, onSelect }: Props) {
       const available = Boolean(onSelect) && completed;
       return <li className={`${completed ? "done " : ""}${selected ? "active selected" : ""}`.trim()} key={label}>
         <button type="button" disabled={!available} aria-current={selected ? "step" : undefined} onClick={() => onSelect?.(index)} title={available ? `回看：${label}` : undefined}>
-          <i>{completed ? "✓" : index + 1}</i><span>{label}</span>{available ? <small>可回看</small> : null}
+          <i>{completed ? <Icon name="check"/> : index + 1}</i><span>{label}</span>{available ? <small>可回看</small> : null}
         </button>
       </li>;
     })}

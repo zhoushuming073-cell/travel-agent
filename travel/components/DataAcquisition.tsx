@@ -29,7 +29,7 @@ export function DataAcquisition({ request, profile, progress, onCancel }: Props)
         const source = actual.get(id);
         const state = source?.state ?? "loading";
         const completedLabel = state === "success" && id === "crowd" ? "已生成预测" : state === "success" && id === "season" ? "已取得公开信号" : stateLabel[state];
-        return <article key={id} className={state}><i>{state === "success" ? "✓" : state === "error" ? "!" : "●"}</i><div><b>{label}</b><span>{source?.provider || "等待实际提供方返回"}</span><small>{completedLabel}{source?.detail ? " · " + source.detail : ""}</small></div></article>;
+        return <article key={id} className={state}><i><Icon name={state === "success" ? "check" : state === "error" ? "alert" : "more"}/></i><div><b>{label}</b><span>{source?.provider || "等待实际提供方返回"}</span><small>{completedLabel}{source?.detail ? " · " + source.detail : ""}</small></div></article>;
       })}</div>
       <div className="data-truth-grid">
         <section><Icon name="search"/><div><strong>先核验实体</strong><p>景点名称、坐标和来源返回后才进入候选池。</p></div></section>
