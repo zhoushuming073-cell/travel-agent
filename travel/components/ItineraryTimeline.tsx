@@ -23,7 +23,7 @@ export function ItineraryTimeline({ plan, selectedDay, selectedSpotId, onSelectD
         key={spot.id}
         type="button"
         onClick={() => onSelectSpot(spot.id, day.day)}
-      ><time>{spot.startTime ?? "待定"}</time><span className="timeline-line"><i>{index + 1}</i></span><SpotImage name={spot.name} officialName={spot.officialName} poiId={spot.id} city={plan.city} lat={spot.lat} lng={spot.lng}/><span className="stop-copy"><b>{spot.name}</b><small>{spot.category ?? "地图实体已核验"}{spot.requiredByUser ? " · 用户必选" : ""}</small><em>预计 {spot.durationMin ?? 90} 分钟</em></span><span className="stop-risk"><small>拥挤风险预测</small><b>{spot.crowd?.label ?? "暂未生成"}</b></span><span className="stop-arrow"><Icon name="chevronRight"/></span></button>)}</div>}
+      ><time>{spot.startTime ?? "待定"}</time><span className="timeline-line"><i>{index + 1}</i></span><SpotImage name={spot.name} officialName={spot.officialName} poiId={spot.id} city={plan.city} lat={spot.lat} lng={spot.lng}/><span className="stop-copy"><b>{spot.name}</b><small>{spot.category ?? "地图实体已核验"}{spot.requiredByUser ? " · 用户必选" : ""}</small><em>预计 {spot.durationMin ?? 90} 分钟</em></span><span className="stop-risk"><small>拥挤风险预测</small><b>{spot.crowd?.label ?? "暂未生成"}{spot.crowd?.forecastBand ? ` ${spot.crowd.forecastBand.low}–${spot.crowd.forecastBand.high}%` : ""}</b><em>{spot.crowd?.confidenceLabel ? `置信度${spot.crowd.confidenceLabel}` : "非实时人数"}</em></span><span className="stop-arrow"><Icon name="chevronRight"/></span></button>)}</div>}
     </article>;
   })}</div>;
 }

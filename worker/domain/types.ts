@@ -181,13 +181,32 @@ export interface ItinerarySpot {
     riskProbability?: number;
     uncertainty?: "low" | "medium" | "high";
     factors?: string[];
+    factorContributions?: Array<{
+      id: string;
+      label: string;
+      impact: number;
+      direction: "up" | "down" | "neutral";
+      evidence: string;
+      nature: "calendar" | "place-prior" | "forecast" | "public-trend" | "map-signal";
+    }>;
+    forecastBand?: { low: number; high: number };
+    confidenceLabel?: "较高" | "中等" | "较低";
+    evidenceCoverage?: number;
+    freshnessHours?: number | null;
+    modelVersion?: string;
+    nature?: "prediction";
+    officialRealtime?: false;
+    crowdRole?: "nightscape" | "meal-landmark" | "timed-indoor" | "religious" | "theme-park" | "broad-outdoor" | "heritage-core" | "flexible";
+    baseWeatherRainProbability?: number | null;
     recommendedWindow?: string;
+    recommendedWindows?: string[];
     avoidWindow?: string;
+    peakWindow?: string;
     action?: string;
     visitTime?: string;
     visitDate?: string;
     baseDate?: string;
-    timeWindows?: Array<{ time: string; score: number; label: string }>;
+    timeWindows?: Array<{ time: string; score: number; label: string; delta?: number }>;
   } | null;
   openingStatus?: {
     status?: "verified" | "estimated" | "unknown" | "conflicting";
