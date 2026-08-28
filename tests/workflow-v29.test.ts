@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { summarizeTrafficCoverage } from "../worker/domain/traffic-coverage.ts";
-import { poiImageScore } from "../worker/travel-api.ts";
+import { applyFinalTimelineSafetyRepair, poiImageScore } from "../worker/travel-api.ts";
 
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
@@ -24,6 +24,30 @@ test("all three V4 Pro variants have independent durable D1 checkpoints", () => 
   assert.match(apiSource, /putTravelJobArtifact\(jobId, stage/);
   assert.match(apiSource, /requestTimeoutMs: 150000/);
   assert.match(apiSource, /attempt:\$\{stage\}/);
+});
+
+test("final compiler adds lunch, preserves required places and removes only flexible overtime stops", () => {
+  const draft = { variants: [{ id: "hot", days: [{ day: 1, returnHotelTime: "22:30", activities: [
+    { type: "attraction", spotId: "museum", label: "博物馆", startTime: "09:00", endTime: "13:00", durationMin: 240 },
+    { type: "attraction", spotId: "garden", label: "花园", startTime: "13:00", endTime: "17:00", durationMin: 240 },
+    { type: "attraction", spotId: "tower", label: "观景台", startTime: "16:00", endTime: "18:00", durationMin: 120 },
+    { type: "attraction", spotId: "gallery", label: "画廊", startTime: "16:30", endTime: "18:30", durationMin: 120 },
+    { type: "attraction", spotId: "pier", label: "码头", startTime: "17:00", endTime: "19:00", durationMin: 120 },
+    { type: "meal", spotId: "peace", label: "和平饭店晚餐", startTime: "17:30", endTime: "19:00", durationMin: 90 },
+    { type: "attraction", spotId: "bund", label: "外滩夜景", startTime: "19:00", endTime: "21:30", durationMin: 150 },
+  ] }] }] };
+  const knowledge = { profile: { dayStart: "09:00", dayEnd: "21:00" }, weather: [{ sunset: "18:10" }], trafficMatrix: { legs: [] }, spots: [
+    { id: "museum", requiredByUser: false }, { id: "garden", requiredByUser: false }, { id: "tower", requiredByUser: false }, { id: "gallery", requiredByUser: false }, { id: "pier", requiredByUser: false },
+    { id: "peace", requiredByUser: true, timeRole: "meal-landmark" }, { id: "bund", requiredByUser: true, timeRole: "nightscape" },
+  ] };
+  const repaired = applyFinalTimelineSafetyRepair(draft, knowledge);
+  const activities = draft.variants[0].days[0].activities as Array<{ type: string; spotId?: string; label?: string; endTime: string }>;
+  assert.equal(repaired.insertedLunches, 1);
+  assert.ok(repaired.removedFlexibleStops >= 1);
+  assert.ok(activities.some((item) => item.spotId === "peace"));
+  assert.ok(activities.some((item) => item.spotId === "bund"));
+  assert.ok(activities.some((item) => item.type === "meal" && item.label?.includes("午餐")));
+  assert.ok(activities.every((item) => Number(item.endTime.slice(0, 2)) * 60 + Number(item.endTime.slice(3)) <= 21 * 60));
 });
 
 test("D1 runtime persists leases, artifacts, events and provider attempts", () => {

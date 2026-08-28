@@ -2209,6 +2209,83 @@ function legalizePlannerTimelines(draft: any, knowledge: any) {
   return { shiftedActivities, shiftedMinutes };
 }
 
+export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
+  const profile = knowledge?.profile || {};
+  const startLimit = timeToMinutes(profile.dayStart, 9 * 60);
+  const endLimit = timeToMinutes(profile.dayEnd, 21 * 60);
+  const spotMap = new Map((knowledge?.spots || []).map((spot: any) => [spot.id, spot]));
+  const matrix = knowledge?.trafficMatrix;
+  let insertedLunches = 0;
+  let removedFlexibleStops = 0;
+  let reflowedActivities = 0;
+
+  const reflow = (day: any, activities: any[]) => {
+    const ordered = [...activities].sort((left: any, right: any) => timeToMinutes(left.startTime, startLimit) - timeToMinutes(right.startTime, startLimit));
+    let cursor = startLimit;
+    let previousSpot: any = null;
+    for (const activity of ordered) {
+      const originalStart = timeToMinutes(activity.startTime, cursor);
+      const originalEnd = timeToMinutes(activity.endTime, originalStart + Number(activity.durationMin || 60));
+      const semanticSpot: any = activity.spotId ? spotMap.get(activity.spotId) : null;
+      let duration = Math.max(15, originalEnd - originalStart || Number(activity.durationMin || 60));
+      if (activity.type === "meal") duration = Math.min(90, Math.max(60, duration));
+      else if (activity.type === "rest") duration = Math.min(45, Math.max(20, duration));
+      else duration = Math.min(semanticSpot?.requiredByUser ? 120 : 100, Math.max(semanticSpot?.requiredByUser ? 60 : 45, duration));
+      let minimumStart = cursor;
+      const open = openingRange(semanticSpot?.openingHours);
+      if (open) minimumStart = Math.max(minimumStart, open[0]);
+      if (activity.type === "meal" && !activity.spotId && /午餐/.test(cleanText(activity.label))) minimumStart = Math.max(minimumStart, 11 * 60 + 30);
+      if (semanticSpot?.timeRole === "meal-landmark") {
+        activity.type = "meal";
+        minimumStart = Math.max(minimumStart, originalStart <= 14 * 60 ? 11 * 60 + 30 : 17 * 60 + 30);
+      }
+      if (semanticSpot?.timeRole === "nightscape") minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60));
+      if (activity.spotId && previousSpot?.spotId && matrix?.legs?.length) {
+        const leg = matrix.legs.find((item: any) => item.fromId === previousSpot.spotId && item.toId === activity.spotId)
+          || matrix.legs.find((item: any) => item.fromId === activity.spotId && item.toId === previousSpot.spotId);
+        if (leg) {
+          minimumStart = Math.max(minimumStart, previousSpot.end + Number(leg.durationMin));
+          activity.transportFromPrevious = { mode: "公共交通 / 步行（以地图复核为准）", durationMin: Number(leg.durationMin), matrixKey: `${previousSpot.spotId}->${activity.spotId}` };
+        }
+      }
+      const start = minimumStart;
+      activity.startTime = minutesToTime(start);
+      activity.endTime = minutesToTime(start + duration);
+      activity.durationMin = duration;
+      cursor = start + duration;
+      if (activity.spotId) previousSpot = { spotId: activity.spotId, end: cursor };
+      reflowedActivities += 1;
+    }
+    day.activities = ordered;
+    day.returnHotelTime = minutesToTime(Math.min(endLimit, Math.max(cursor, timeToMinutes(day.returnHotelTime, cursor))));
+    return cursor;
+  };
+
+  for (const variant of draft.variants || []) {
+    for (const day of variant.days || []) {
+      let activities = [...(day.activities || [])];
+      const hasLunch = activities.some((activity: any) => activity.type === "meal" && (() => { const start = timeToMinutes(activity.startTime, -1); return start >= 11 * 60 && start <= 13 * 60 + 30; })());
+      if (!hasLunch) {
+        activities.push({ type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:00", durationMin: 60, reason: "最终编译器补齐正常午餐，不跨区追店", evidenceRefs: [] });
+        insertedLunches += 1;
+      }
+      let end = reflow(day, activities);
+      while (end > endLimit) {
+        const removable = [...day.activities].reverse().find((activity: any) => {
+          if (!activity.spotId) return activity.type === "rest";
+          const spot: any = spotMap.get(activity.spotId);
+          return !spot?.requiredByUser && !["meal-landmark", "nightscape"].includes(cleanText(spot?.timeRole));
+        });
+        if (!removable) break;
+        activities = day.activities.filter((activity: any) => activity !== removable);
+        removedFlexibleStops += 1;
+        end = reflow(day, activities);
+      }
+    }
+  }
+  return { insertedLunches, removedFlexibleStops, reflowedActivities };
+}
+
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
   assertPlannerContext(knowledge);
   const modelAudit = { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] as any[] };
@@ -2403,6 +2480,12 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     if (legalization.shiftedActivities) state.modelAudit.compilerIssues.push({ code: "TIMELINE_LEGALIZED", severity: "warning", message: `Travel Compiler 按交通矩阵顺延 ${legalization.shiftedActivities} 个节点，共 ${legalization.shiftedMinutes} 分钟` });
     state.audit = auditPlannerDraft(state.draft, knowledge);
     if (stage === "audit_final") {
+      if (state.audit.hardIssues.some((issue: any) => ["MEAL_MISSING", "LUNCH_MISSING", "TIME_RANGE", "ACTIVITY_OVERLAP", "TRANSIT_GAP", "RETURN_TOO_LATE"].includes(cleanText(issue.code)))) {
+        const safetyRepair = applyFinalTimelineSafetyRepair(state.draft, knowledge);
+        bindTrafficMatrixFacts(state.draft, knowledge);
+        state.audit = auditPlannerDraft(state.draft, knowledge);
+        state.modelAudit.compilerIssues.push({ code: "FINAL_TIMELINE_SAFETY_REPAIR", severity: "warning", message: `最终编译器补齐午餐 ${safetyRepair.insertedLunches} 次、移除 ${safetyRepair.removedFlexibleStops} 个非必选超时节点，并按交通矩阵重排时间；AI 仍负责景点与方案决策` });
+      }
       state.modelAudit.compilerIssues.push(...state.audit.issues);
       if (state.audit.hardIssues.length) {
         const summary = state.audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
