@@ -16,6 +16,7 @@ UNSPLASH_ACCESS_KEY=
 
 # 第 29 版持久规划编排器。Workflow 与 Sites 必须使用同一个随机 HMAC 密钥。
 ORCHESTRATOR_SHARED_SECRET=
+ORCHESTRATOR_URL=https://smart-travel-planner-orchestrator.<你的-workers.dev-子域>.workers.dev
 
 # 可选社交趋势 MCP。默认留空，不会自动登录、绕过验证码或抓取社交平台。
 # 可选：自行部署的 NewsNow。未配置时仍会直连百度、头条与哔哩哔哩公开热榜。

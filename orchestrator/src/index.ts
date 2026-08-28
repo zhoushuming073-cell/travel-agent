@@ -89,24 +89,6 @@ export default {
     return json({ error: "not found" }, 404);
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => {
-      const dispatch = await callSite(env, "/api/internal/plan/dispatch", { checkedAt: new Date().toISOString() });
-      for (const jobId of dispatch.queued || []) {
-        try { await env.TRAVEL_WORKFLOW.create({ id: jobId, params: { jobId } }); }
-        catch {
-          const instance = await env.TRAVEL_WORKFLOW.get(jobId);
-          const status = await instance.status();
-          if (["errored", "terminated"].includes(String(status?.status))) await instance.restart();
-        }
-      }
-      for (const jobId of dispatch.cancelled || []) {
-        try { await (await env.TRAVEL_WORKFLOW.get(jobId)).terminate(); } catch { /* cancellation in D1 remains authoritative */ }
-      }
-      for (const jobId of dispatch.stale || []) {
-        let status = "unknown";
-        try { status = String((await (await env.TRAVEL_WORKFLOW.get(jobId)).status())?.status || "unknown"); } catch { status = "unknown"; }
-        if (["errored", "terminated", "unknown"].includes(status)) await callSite(env, "/api/internal/plan/error", { jobId, code: "WORKFLOW_STALE", message: `后台 Workflow 已停止（${status}），任务未永久停留在生成中` });
-      }
-    })());
+    ctx.waitUntil(callSite(env, "/api/internal/plan/reconcile", { checkedAt: new Date().toISOString() }));
   },
 };

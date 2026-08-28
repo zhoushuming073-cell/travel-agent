@@ -50,7 +50,7 @@ import {
   sha256,
   updateTravelJob,
 } from "./persistence.ts";
-import { verifySignedRequest } from "./signing.ts";
+import { signedRequestHeaders, verifySignedRequest } from "./signing.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -80,6 +80,23 @@ const clamp = (value: unknown, min: number, max: number) =>
 
 const cleanText = (value: unknown, fallback = "") =>
   String(value ?? fallback).replace(/[\u0000-\u001f]+/g, " ").trim();
+
+async function callOrchestrator(env: any, path: string, body: Record<string, unknown>) {
+  const baseUrl = cleanText(env?.ORCHESTRATOR_URL);
+  const secret = cleanText(env?.ORCHESTRATOR_SHARED_SECRET);
+  if (!baseUrl || !secret) throw new Error("第 29 版 Workflow 编排器尚未配置");
+  const text = JSON.stringify(body);
+  const headers = await signedRequestHeaders(secret, "POST", path, text);
+  const response = await fetch(new URL(path, baseUrl), {
+    method: "POST",
+    headers,
+    body: text,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+  if (!response.ok) throw new Error(cleanText(payload?.error?.message || payload?.error, `Workflow HTTP ${response.status}`));
+  return payload;
+}
 
 function fetchOptions(init: RequestInit = {}): RequestInit {
   return {
@@ -2678,6 +2695,39 @@ async function handleInternalPlanApi(request: Request, env: any, url: URL) {
     const jobs = await listJobsForOrchestrator(20);
     return json({ queued: jobs.queued.map((job) => job.id), cancelled: jobs.cancelled.map((job) => job.workflowId || job.id), stale: jobs.stale.map((job) => job.workflowId || job.id) });
   }
+  if (url.pathname === "/api/internal/plan/reconcile" && request.method === "POST") {
+    const jobs = await listJobsForOrchestrator(20);
+    const actions: any[] = [];
+    for (const job of jobs.queued) {
+      try {
+        const started = await callOrchestrator(env, "/v1/jobs/start", { jobId: job.id });
+        await updateTravelJob(job.id, { workflowId: cleanText(started.workflowId, job.id), heartbeatAt: Date.now() });
+        actions.push({ jobId: job.id, action: "started" });
+      } catch (error: any) {
+        actions.push({ jobId: job.id, action: "start_failed", error: cleanText(error?.message) });
+      }
+    }
+    for (const job of jobs.cancelled) {
+      try {
+        await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || job.id)}/cancel`, { jobId: job.id });
+        actions.push({ jobId: job.id, action: "terminated" });
+      } catch (error: any) {
+        actions.push({ jobId: job.id, action: "terminate_failed", error: cleanText(error?.message) });
+      }
+    }
+    for (const job of jobs.stale) {
+      let workflowStatus = "unknown";
+      try {
+        const status = await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || job.id)}/status`, { jobId: job.id });
+        workflowStatus = cleanText(status.status, "unknown");
+      } catch { workflowStatus = "unknown"; }
+      if (["errored", "terminated", "unknown"].includes(workflowStatus)) {
+        await updateTravelJob(job.id, { status: "error", errorCode: "WORKFLOW_STALE", errorMessage: `后台 Workflow 已停止（${workflowStatus}），请重新规划`, completedAt: Date.now() });
+        actions.push({ jobId: job.id, action: "marked_error", workflowStatus });
+      }
+    }
+    return json({ ok: true, actions });
+  }
   return json({ error: { message: "内部接口不存在" } }, 404);
 }
 
@@ -2880,9 +2930,14 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       });
       if (created.created) {
         try {
-          await updateTravelJob(jobId, { status: "queued", workflowId: jobId, currentStep: "queued", heartbeatAt: Date.now() });
-          await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "任务已进入 Workflow 持久队列，私有调度器将在一分钟内领取", detail: { workflowId: jobId }, createdAt: Date.now() });
-        } catch (error: any) { throw error; }
+          const workflow = await callOrchestrator(env, "/v1/jobs/start", { jobId });
+          const workflowId = cleanText(workflow.workflowId, jobId);
+          await updateTravelJob(jobId, { status: "queued", workflowId, currentStep: "queued", heartbeatAt: Date.now() });
+          await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "持久 Workflow 已启动；刷新或关闭页面不会中断规划", detail: { workflowId }, createdAt: Date.now() });
+        } catch (error: any) {
+          await updateTravelJob(jobId, { status: "error", errorCode: "WORKFLOW_START_FAILED", errorMessage: cleanText(error?.message, "Workflow 启动失败"), completedAt: Date.now() });
+          return json({ error: { message: "持久规划服务暂时无法启动，请稍后重试", code: "WORKFLOW_START_FAILED", jobId } }, 503, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+        }
       }
       return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v29-workflow" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
     }
@@ -2919,7 +2974,10 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const job = await getTravelJob(id);
       if (!job || job.sessionHash !== session.hash) return json({ error: { message: "任务不存在或无权访问" } }, 404);
       const cancelled = await requestTravelJobCancellation(id, session.hash);
-      if (cancelled) await addTravelJobEvent({ jobId: id, eventType: "job_cancelled", step: job.currentStep, message: "用户已取消后台规划；私有调度器将终止 Workflow，阶段租约已禁止提交", createdAt: Date.now() });
+      if (cancelled) {
+        await addTravelJobEvent({ jobId: id, eventType: "job_cancelled", step: job.currentStep, message: "用户已取消后台规划；Workflow 已收到终止请求，阶段租约禁止继续提交", createdAt: Date.now() });
+        try { await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || id)}/cancel`, { jobId: id }); } catch { /* D1 取消状态和阶段租约仍然立即生效，定时对账会再次终止实例。 */ }
+      }
       return json({ cancelled, jobId: id, status: cancelled ? "cancelled" : job.status }, 200, { "cache-control": "no-store" });
     }
 
