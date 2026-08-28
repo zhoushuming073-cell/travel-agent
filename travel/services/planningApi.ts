@@ -129,7 +129,7 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
           if (failure instanceof DOMException && failure.name === "AbortError") throw failure;
           advanceFailures += 1;
           if (advanceFailures > 10) throw failure;
-          retryNotBefore = Date.now() + Math.min(12_000, 1200 * advanceFailures);
+          retryNotBefore = Date.now() + Math.max(10_000, Math.min(30_000, 3000 * advanceFailures));
         }
         if (!advanceInFlight && Date.now() >= retryNotBefore) launchNextStage();
         await waitWithSignal(1800, signal);

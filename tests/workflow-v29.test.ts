@@ -25,7 +25,8 @@ test("all three V4 Pro variants have independent durable D1 checkpoints", () => 
   assert.match(apiSource, /requestTimeoutMs: 150000/);
   assert.match(apiSource, /attempt:\$\{stage\}/);
   assert.match(apiSource, /结构校验失败后的最后一次定向重试/);
-  assert.match(apiSource, /maxTokens: 6800/);
+  assert.match(apiSource, /maxTokens: 5400/);
+  assert.match(apiSource, /若明确要求“本次只生成某一套”/);
 });
 
 test("final compiler adds lunch, preserves required places and removes only flexible overtime stops", () => {

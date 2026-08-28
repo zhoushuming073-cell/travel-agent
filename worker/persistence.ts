@@ -232,9 +232,10 @@ export async function activeJobCount(clientHash?: string): Promise<number> {
   const db = await ensureSchema();
   if (!db) return 0;
   const now = Date.now();
+  const activeSince = now - 3 * 60 * 1000;
   const row = clientHash
-    ? await db.prepare("SELECT COUNT(*) AS count FROM travel_jobs WHERE client_hash = ? AND status IN ('queued','working','needs_input') AND expires_at > ?").bind(clientHash, now).first<{ count: number }>()
-    : await db.prepare("SELECT COUNT(*) AS count FROM travel_jobs WHERE status IN ('queued','working','needs_input') AND expires_at > ?").bind(now).first<{ count: number }>();
+    ? await db.prepare("SELECT COUNT(*) AS count FROM travel_jobs WHERE client_hash = ? AND status IN ('queued','working') AND expires_at > ? AND (heartbeat_at > ? OR lease_expires_at > ?)").bind(clientHash, now, activeSince, now).first<{ count: number }>()
+    : await db.prepare("SELECT COUNT(*) AS count FROM travel_jobs WHERE status IN ('queued','working') AND expires_at > ? AND (heartbeat_at > ? OR lease_expires_at > ?)").bind(now, activeSince, now).first<{ count: number }>();
   return Number(row?.count || 0);
 }
 

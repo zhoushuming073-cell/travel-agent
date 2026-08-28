@@ -2086,7 +2086,7 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 9. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
 10. 必须服从每个候选点的 timeRole、preferredWindows、avoidWindows 与 timeRationale：meal-landmark 必须用 type=meal 且保留 spotId，安排在 11:30—13:30 或 17:30—20:00；nightscape 必须在当日 sunset 后；展馆服从开放与预约；户外摄影优先早晚光线。
 11. 每日必须包含正常午餐；若当天延续到 18:00 后还必须包含晚餐。活动之间不得重叠，交通时间不能被吞掉，午晚餐不是可删除的装饰块。
-12. 每套天数严格等于 profile.days；一次输出 hot、niche、relax 完整三套，顺序不得改变。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
+12. 每套天数严格等于 profile.days。若调用方要求三套，则输出 hot、niche、relax 且顺序不变；若明确要求“本次只生成某一套”，variants 必须只含该套，不能擅自输出另外两套。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
 
 function normalizePlannerDraft(value: any, profile: any) {
   const variants = Array.isArray(value?.variants) ? value.variants.slice(0, 3) : [];
@@ -2459,7 +2459,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     if (!objective) throw new Error(`未知方案阶段：${stage}`);
     if (state.draft.variants.some((variant: any) => variant.id === variantId)) return state;
     const supplemental = await aiJson(env, {
-      purpose: "planner", thinking: false, maxTokens: 6800, requestTimeoutMs: 150000,
+      purpose: "planner", thinking: false, maxTokens: 5400, requestTimeoutMs: 150000,
       messages: [
         { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities；禁止 daysPlan、itinerary 等替代字段。` : ""}${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
         { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
@@ -2774,7 +2774,7 @@ async function advancePlanningJob(jobId: string, env: any) {
     return { ...result, status: current?.status || "working", progress: current?.progress, currentStep: current?.currentStep };
   } catch (error: any) {
     const message = cleanText(error?.message, "阶段执行失败");
-    if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, currentStep: stage };
+    if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, retryAfterMs: 10_000, currentStep: stage };
     const attemptKey = `attempt:${stage}`;
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
     const attempts = Number(previous?.attempts || 0) + 1;
