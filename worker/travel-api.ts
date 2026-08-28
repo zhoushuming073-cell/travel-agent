@@ -2416,7 +2416,7 @@ function newWorkflowPlannerState(profile: any, env: any) {
   };
 }
 
-async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: any, env: any, replanContext: any, previousState?: any) {
+async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: any, env: any, replanContext: any, previousState?: any, retryContext?: any) {
   assertPlannerContext(knowledge);
   const state = previousState || newWorkflowPlannerState(profile, env);
   const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives: WORKFLOW_OBJECTIVES, knowledge, verifiedWebContext: state.verifiedWebContext, replanContext };
@@ -2459,10 +2459,10 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     if (!objective) throw new Error(`未知方案阶段：${stage}`);
     if (state.draft.variants.some((variant: any) => variant.id === variantId)) return state;
     const supplemental = await aiJson(env, {
-      purpose: "planner", thinking: false, maxTokens: 5200, requestTimeoutMs: 150000,
+      purpose: "planner", thinking: false, maxTokens: 6800, requestTimeoutMs: 150000,
       messages: [
-        { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
-        { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
+        { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities；禁止 daysPlan、itinerary 等替代字段。` : ""}${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
+        { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
       ],
     });
     const variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
@@ -2719,7 +2719,7 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
     if (stage === "planner_research" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("audit_") || stage.startsWith("repair_")) {
       const prepared: any = await getTravelJobArtifact(jobId, "prepared");
       if (!prepared?.knowledge) throw new Error("规划知识包检查点缺失");
-      const plannerState = await runPlannerWorkflowStage(stage, envelope.profile, prepared.knowledge, env, envelope.replanContext, await getTravelJobArtifact(jobId, "planner_state"));
+      const plannerState = await runPlannerWorkflowStage(stage, envelope.profile, prepared.knowledge, env, envelope.replanContext, await getTravelJobArtifact(jobId, "planner_state"), await getTravelJobArtifact(jobId, `attempt:${stage}`));
       await assertCommitAllowed();
       await putTravelJobArtifact(jobId, "planner_state", plannerState);
       if (stage.startsWith("variant_")) await putTravelJobArtifact(jobId, stage, plannerState.draft.variants.find((variant: any) => variant.id === stage.slice(8)));
