@@ -74,6 +74,13 @@ type StatusResponse =
   | { jobId: string; status: "done"; result: PlanningResult; progress?: PlanningProgress }
   | { jobId: string; status: "error" | "cancelled"; error: { message?: string; code?: string }; progress?: PlanningProgress };
 
+interface AdvanceResponse {
+  status: "queued" | "working" | "needs_input" | "done" | "error" | "cancelled";
+  progress?: PlanningProgress;
+  retryable?: boolean;
+  retryAfterMs?: number;
+}
+
 const ACTIVE_JOB_KEY = "smart-travel-active-job-v29";
 interface StoredJob { jobId: string; input: PlanningInput; createdAt: number; progress?: PlanningProgress }
 
@@ -90,6 +97,23 @@ function writeStoredJob(value: StoredJob | null) {
 
 async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: (progress: PlanningProgress) => void, signal?: AbortSignal): Promise<PlanningResult> {
   let transientFailures = 0;
+  let advanceFailures = 0;
+  let advanceInFlight: Promise<void> | null = null;
+  let advanceFailure: unknown = null;
+  let retryNotBefore = 0;
+  const launchNextStage = () => {
+    advanceInFlight = requestJson<AdvanceResponse>("/api/plan/advance", { method: "POST", body: JSON.stringify({ jobId }), signal })
+      .then((advanced) => {
+        advanceFailures = 0;
+        if (advanced.progress) {
+          onProgress(advanced.progress);
+          writeStoredJob({ jobId, input, createdAt: readStoredJob()?.createdAt || Date.now(), progress: advanced.progress });
+        }
+        if (advanced.retryAfterMs) retryNotBefore = Date.now() + advanced.retryAfterMs;
+      })
+      .catch((error) => { advanceFailure = error; })
+      .finally(() => { advanceInFlight = null; });
+  };
   for (let attempt = 0; attempt < 650; attempt += 1) {
     try {
       const status = await requestJson<StatusResponse>(`/api/plan/status?id=${encodeURIComponent(jobId)}`, { signal });
@@ -99,6 +123,15 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
         writeStoredJob({ jobId, input, createdAt: readStoredJob()?.createdAt || Date.now(), progress: status.progress });
       }
       if (status.status === "queued" || status.status === "working") {
+        if (advanceFailure) {
+          const failure = advanceFailure;
+          advanceFailure = null;
+          if (failure instanceof DOMException && failure.name === "AbortError") throw failure;
+          advanceFailures += 1;
+          if (advanceFailures > 10) throw failure;
+          retryNotBefore = Date.now() + Math.min(12_000, 1200 * advanceFailures);
+        }
+        if (!advanceInFlight && Date.now() >= retryNotBefore) launchNextStage();
         await waitWithSignal(1800, signal);
         continue;
       }
@@ -120,7 +153,7 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
       await waitWithSignal(Math.min(12_000, 1200 * transientFailures), signal);
     }
   }
-  throw new Error("规划任务超过 20 分钟仍未完成，服务端会自动终止并给出明确状态");
+  throw new Error("规划任务连续运行约 20 分钟仍未完成，已保留全部检查点；刷新页面可继续或取消任务");
 }
 
 export async function runPlanningJob(

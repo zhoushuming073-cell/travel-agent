@@ -8,20 +8,22 @@ import { poiImageScore } from "../worker/travel-api.ts";
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
 const persistenceSource = readFileSync(join(root, "worker", "persistence.ts"), "utf8");
-const workflowSource = readFileSync(join(root, "orchestrator", "src", "index.ts"), "utf8");
 const frontendSource = readFileSync(join(root, "travel", "services", "planningApi.ts"), "utf8");
 const cssSource = readFileSync(join(root, "app", "travel", "[[...tripId]]", "workspace-react.css"), "utf8");
 
-test("complete planning no longer runs inside Sites waitUntil", () => {
+test("complete planning uses resumable Sites requests instead of waitUntil", () => {
   assert.doesNotMatch(apiSource, /waitUntil\(executeDurablePlanningJob/);
-  assert.match(workflowSource, /extends WorkflowEntrypoint/);
-  assert.match(workflowSource, /step\.do\(stage/);
+  assert.match(apiSource, /\/api\/plan\/advance/);
+  assert.match(apiSource, /nextIncompleteStage/);
+  assert.match(frontendSource, /launchNextStage/);
+  assert.match(frontendSource, /\/api\/plan\/advance/);
 });
 
-test("all three V4 Pro variants have independent durable workflow checkpoints", () => {
-  for (const stage of ["variant_hot", "variant_niche", "variant_relax"]) assert.match(workflowSource, new RegExp(`\\["${stage}"`));
+test("all three V4 Pro variants have independent durable D1 checkpoints", () => {
+  for (const stage of ["variant_hot", "variant_niche", "variant_relax"]) assert.match(apiSource, new RegExp(`"${stage}"`));
   assert.match(apiSource, /putTravelJobArtifact\(jobId, stage/);
-  assert.match(workflowSource, /"150 seconds"/);
+  assert.match(apiSource, /requestTimeoutMs: 150000/);
+  assert.match(apiSource, /attempt:\$\{stage\}/);
 });
 
 test("D1 runtime persists leases, artifacts, events and provider attempts", () => {
@@ -38,6 +40,7 @@ test("browser task recovery uses HttpOnly cookie, active lookup and real server 
   assert.match(frontendSource, /sessionStorage\.setItem/);
   assert.match(frontendSource, /reconnectPlanningJob/);
   assert.match(frontendSource, /cancelPlanningJob/);
+  assert.match(apiSource, /站内断点执行器/);
 });
 
 test("traffic coverage transparently distinguishes verified and estimated legs", () => {

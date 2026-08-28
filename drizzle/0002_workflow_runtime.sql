@@ -1,5 +1,5 @@
 ALTER TABLE travel_jobs ADD COLUMN workflow_id TEXT;
-ALTER TABLE travel_jobs ADD COLUMN engine_version TEXT NOT NULL DEFAULT 'v29-workflow';
+ALTER TABLE travel_jobs ADD COLUMN engine_version TEXT NOT NULL DEFAULT 'v29-sites-checkpoint';
 ALTER TABLE travel_jobs ADD COLUMN current_step TEXT;
 ALTER TABLE travel_jobs ADD COLUMN heartbeat_at INTEGER;
 ALTER TABLE travel_jobs ADD COLUMN lease_owner TEXT;

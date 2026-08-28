@@ -34,7 +34,6 @@ import {
   getTravelJobArtifact,
   getTravelJob,
   listJobProviderAttempts,
-  listJobsForOrchestrator,
   listTravelJobEvents,
   persistentCacheGet,
   persistentCachePut,
@@ -50,7 +49,6 @@ import {
   sha256,
   updateTravelJob,
 } from "./persistence.ts";
-import { signedRequestHeaders, verifySignedRequest } from "./signing.ts";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
@@ -80,23 +78,6 @@ const clamp = (value: unknown, min: number, max: number) =>
 
 const cleanText = (value: unknown, fallback = "") =>
   String(value ?? fallback).replace(/[\u0000-\u001f]+/g, " ").trim();
-
-async function callOrchestrator(env: any, path: string, body: Record<string, unknown>) {
-  const baseUrl = cleanText(env?.ORCHESTRATOR_URL);
-  const secret = cleanText(env?.ORCHESTRATOR_SHARED_SECRET);
-  if (!baseUrl || !secret) throw new Error("第 29 版 Workflow 编排器尚未配置");
-  const text = JSON.stringify(body);
-  const headers = await signedRequestHeaders(secret, "POST", path, text);
-  const response = await fetch(new URL(path, baseUrl), {
-    method: "POST",
-    headers,
-    body: text,
-    signal: AbortSignal.timeout(10_000),
-  });
-  const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-  if (!response.ok) throw new Error(cleanText(payload?.error?.message || payload?.error, `Workflow HTTP ${response.status}`));
-  return payload;
-}
 
 function fetchOptions(init: RequestInit = {}): RequestInit {
   return {
@@ -2592,8 +2573,8 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
   if (!job) throw new Error("规划任务不存在");
   if (job.status === "cancelled" || job.cancelRequestedAt) return { cancelled: true };
   if (job.status === "done") return { done: true };
-  if (Date.now() - job.createdAt > 20 * 60 * 1000) {
-    await updateTravelJob(jobId, { status: "error", errorCode: "HARD_DEADLINE", errorMessage: "规划超过 20 分钟硬截止", completedAt: Date.now() });
+  if (Date.now() > job.expiresAt) {
+    await updateTravelJob(jobId, { status: "error", errorCode: "JOB_EXPIRED", errorMessage: "规划任务已超过 24 小时恢复期限", completedAt: Date.now() });
     return { done: true, status: "error" };
   }
   if (await getTravelJobArtifact(jobId, `stage:${stage}`)) return { ok: true, skipped: true, stage };
@@ -2625,16 +2606,19 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
     } else if (!envelope) throw new Error("需求解析检查点缺失");
 
     if (stage === "collect_sources") {
-      const started = Date.now();
-      const prepared = await preparePlanKnowledge(envelope.profile, envelope.city, env);
-      await assertCommitAllowed();
-      await putTravelJobArtifact(jobId, "prepared", prepared);
-      const branches = [
-        { provider: prepared.weather?.mcpStatus === "ready" ? "MCPMarket 天气查询" : "Open-Meteo 直连兜底", capability: "天气", ok: prepared.providerBundle.weather.status === "ready", count: prepared.weather?.tripForecast?.length || 0, detail: prepared.weather?.mcpStatus === "fallback" ? `天气 MCP 失败：${prepared.weather?.mcpNote || "未返回"}；Open-Meteo 已兜底` : "天气 MCP 成功；Open-Meteo 补充日照时间" },
-        { provider: "高德官方 / Wikimedia / OSM", capability: "景点", ok: prepared.providerBundle.spots.status === "ready", count: prepared.rawSpots?.length || 0, detail: prepared.providerBundle.spots.error },
-        { provider: prepared.hotel?.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "住宿数据源", capability: "住宿候选（非指定日期实时价格）", ok: prepared.providerBundle.hotels.status === "ready", count: prepared.hotel?.candidates?.length || 0, detail: `${prepared.hotel?.note || prepared.providerBundle.hotels.error || "候选已返回"}；指定日期房态、税费、房型、取消政策保持未知` },
-      ];
-      for (const branch of branches) await recordJobProviderAttempt(jobId, stage, { provider: branch.provider, capability: branch.capability, status: branch.ok ? "success" : "failed", detail: branch.detail || (branch.ok ? "本次任务已返回" : "本次任务未返回"), latencyMs: Date.now() - started, resultCount: branch.count });
+      const existingPrepared = await getTravelJobArtifact(jobId, "prepared");
+      if (!existingPrepared) {
+        const started = Date.now();
+        const prepared = await preparePlanKnowledge(envelope.profile, envelope.city, env);
+        await assertCommitAllowed();
+        await putTravelJobArtifact(jobId, "prepared", prepared);
+        const branches = [
+          { provider: prepared.weather?.mcpStatus === "ready" ? "MCPMarket 天气查询" : "Open-Meteo 直连兜底", capability: "天气", ok: prepared.providerBundle.weather.status === "ready", count: prepared.weather?.tripForecast?.length || 0, detail: prepared.weather?.mcpStatus === "fallback" ? `天气 MCP 失败：${prepared.weather?.mcpNote || "未返回"}；Open-Meteo 已兜底` : "天气 MCP 成功；Open-Meteo 补充日照时间" },
+          { provider: "高德官方 / Wikimedia / OSM", capability: "景点", ok: prepared.providerBundle.spots.status === "ready", count: prepared.rawSpots?.length || 0, detail: prepared.providerBundle.spots.error },
+          { provider: prepared.hotel?.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "住宿数据源", capability: "住宿候选（非指定日期实时价格）", ok: prepared.providerBundle.hotels.status === "ready", count: prepared.hotel?.candidates?.length || 0, detail: `${prepared.hotel?.note || prepared.providerBundle.hotels.error || "候选已返回"}；指定日期房态、税费、房型、取消政策保持未知` },
+        ];
+        for (const branch of branches) await recordJobProviderAttempt(jobId, stage, { provider: branch.provider, capability: branch.capability, status: branch.ok ? "success" : "failed", detail: branch.detail || (branch.ok ? "本次任务已返回" : "本次任务未返回"), latencyMs: Date.now() - started, resultCount: branch.count });
+      }
     }
     if (stage === "build_knowledge" || stage === "build_matrix") {
       const prepared: any = await getTravelJobArtifact(jobId, "prepared");
@@ -2683,58 +2667,54 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
   }
 }
 
-async function handleInternalPlanApi(request: Request, env: any, url: URL) {
-  if (!await verifySignedRequest(request, cleanText(env?.ORCHESTRATOR_SHARED_SECRET))) return json({ error: { message: "内部签名无效" } }, 401);
-  const body = await request.json().catch(() => ({}));
-  if (url.pathname === "/api/internal/plan/stage" && request.method === "POST") return json(await runInternalPlanStage(cleanText(body.jobId), cleanText(body.stage), cleanText(body.workflowId), env));
-  if (url.pathname === "/api/internal/plan/error" && request.method === "POST") {
-    await updateTravelJob(cleanText(body.jobId), { status: "error", errorCode: cleanText(body.code, "WORKFLOW_FAILED"), errorMessage: cleanText(body.message, "Workflow 规划失败"), completedAt: Date.now() });
-    return json({ ok: true });
+async function nextIncompleteStage(jobId: string): Promise<string | null> {
+  for (const stage of WORKFLOW_STAGES) {
+    if (!await getTravelJobArtifact(jobId, `stage:${stage}`)) return stage;
   }
-  if (url.pathname === "/api/internal/plan/dispatch" && request.method === "POST") {
-    const jobs = await listJobsForOrchestrator(20);
-    return json({ queued: jobs.queued.map((job) => job.id), cancelled: jobs.cancelled.map((job) => job.workflowId || job.id), stale: jobs.stale.map((job) => job.workflowId || job.id) });
+  return null;
+}
+
+async function advancePlanningJob(jobId: string, env: any) {
+  const job = await getTravelJob(jobId);
+  if (!job) throw new Error("规划任务不存在");
+  if (["done", "error", "cancelled", "needs_input"].includes(job.status)) return { status: job.status, progress: job.progress };
+  const stage = await nextIncompleteStage(jobId);
+  if (!stage) {
+    if (job.result) await updateTravelJob(jobId, { status: "done", completedAt: job.completedAt || Date.now() });
+    else await updateTravelJob(jobId, { status: "error", errorCode: "CHECKPOINT_INCOMPLETE", errorMessage: "所有阶段已结束，但最终结果检查点缺失", completedAt: Date.now() });
+    const finished = await getTravelJob(jobId);
+    return { status: finished?.status || "error", progress: finished?.progress };
   }
-  if (url.pathname === "/api/internal/plan/reconcile" && request.method === "POST") {
-    const jobs = await listJobsForOrchestrator(20);
-    const actions: any[] = [];
-    for (const job of jobs.queued) {
-      try {
-        const started = await callOrchestrator(env, "/v1/jobs/start", { jobId: job.id });
-        await updateTravelJob(job.id, { workflowId: cleanText(started.workflowId, job.id), heartbeatAt: Date.now() });
-        actions.push({ jobId: job.id, action: "started" });
-      } catch (error: any) {
-        actions.push({ jobId: job.id, action: "start_failed", error: cleanText(error?.message) });
-      }
+  try {
+    const result = await runInternalPlanStage(jobId, stage, `site-runner-${crypto.randomUUID()}`, env);
+    const current = await getTravelJob(jobId);
+    return { ...result, status: current?.status || "working", progress: current?.progress, currentStep: current?.currentStep };
+  } catch (error: any) {
+    const message = cleanText(error?.message, "阶段执行失败");
+    if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, currentStep: stage };
+    const attemptKey = `attempt:${stage}`;
+    const previous: any = await getTravelJobArtifact(jobId, attemptKey);
+    const attempts = Number(previous?.attempts || 0) + 1;
+    const limit = stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
+    await putTravelJobArtifact(jobId, attemptKey, { attempts, lastError: message, updatedAt: new Date().toISOString() });
+    if (attempts >= limit) {
+      await updateTravelJob(jobId, { status: "error", currentStep: stage, attemptCount: Number(job.attemptCount || 0) + 1, errorCode: "STAGE_RETRY_EXHAUSTED", errorMessage: `${stageLabels[stage] || stage}连续失败 ${attempts} 次：${message}`, completedAt: Date.now() });
+      await addTravelJobEvent({ jobId, eventType: "stage_failed", step: stage, message: `${stageLabels[stage] || stage}重试耗尽`, detail: { attempts, error: message }, createdAt: Date.now() });
+      return { status: "error", currentStep: stage, retryable: false };
     }
-    for (const job of jobs.cancelled) {
-      try {
-        await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || job.id)}/cancel`, { jobId: job.id });
-        actions.push({ jobId: job.id, action: "terminated" });
-      } catch (error: any) {
-        actions.push({ jobId: job.id, action: "terminate_failed", error: cleanText(error?.message) });
-      }
-    }
-    for (const job of jobs.stale) {
-      let workflowStatus = "unknown";
-      try {
-        const status = await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || job.id)}/status`, { jobId: job.id });
-        workflowStatus = cleanText(status.status, "unknown");
-      } catch { workflowStatus = "unknown"; }
-      if (["errored", "terminated", "unknown"].includes(workflowStatus)) {
-        await updateTravelJob(job.id, { status: "error", errorCode: "WORKFLOW_STALE", errorMessage: `后台 Workflow 已停止（${workflowStatus}），请重新规划`, completedAt: Date.now() });
-        actions.push({ jobId: job.id, action: "marked_error", workflowStatus });
-      }
-    }
-    return json({ ok: true, actions });
+    const envelope = await getTravelJobArtifact(jobId, "envelope") || job.payload;
+    const progress = await progressForStage(jobId, stage, envelope, [`! 本阶段第 ${attempts} 次调用失败，将从检查点自动重试`, `! ${message}`]);
+    await updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), attemptCount: Number(job.attemptCount || 0) + 1, progress });
+    await addTravelJobEvent({ jobId, eventType: "stage_retry", step: stage, message: `${stageLabels[stage] || stage}将在检查点重试`, detail: { attempts, limit, error: message }, createdAt: Date.now() });
+    return { status: "working", currentStep: stage, retryable: true, retryAfterMs: Math.min(60_000, attempts * 10_000), progress };
   }
-  return json({ error: { message: "内部接口不存在" } }, 404);
 }
 
 function rateLimitPolicy(pathname: string, method: string) {
   if (pathname === "/api/plan/start" && method === "POST") return { endpoint: "plan-start", limit: 6, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/plan/status") return { endpoint: "plan-status", limit: 3600, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/plan/active") return { endpoint: "plan-active", limit: 600, windowMs: 60 * 60 * 1000 };
+  if (pathname === "/api/plan/advance") return { endpoint: "plan-advance", limit: 600, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/plan/cancel") return { endpoint: "plan-cancel", limit: 60, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/agent") return { endpoint: "agent", limit: 30, windowMs: 60 * 60 * 1000 };
   if (pathname === "/api/image") return { endpoint: "image", limit: 180, windowMs: 60 * 60 * 1000 };
@@ -2745,7 +2725,6 @@ function rateLimitPolicy(pathname: string, method: string) {
 export async function handleTravelApi(request: Request, env: any, url: URL, ctx?: { waitUntil(promise: Promise<unknown>): void }): Promise<Response | null> {
   try {
     configurePersistence(env?.DB);
-    if (url.pathname.startsWith("/api/internal/plan/")) return handleInternalPlanApi(request, env, url);
     const clientHash = await requestClientHash(request, cleanText(env?.RATE_LIMIT_SALT, "smart-travel-public"));
     const policy = rateLimitPolicy(url.pathname, request.method);
     const quota = await consumeRateLimit(clientHash, policy.endpoint, policy.limit, policy.windowMs);
@@ -2921,25 +2900,28 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const idempotencyKey = cleanText(request.headers.get("x-idempotency-key"));
       if (idempotencyKey.length < 16) return json({ error: { message: "缺少幂等请求标识，请刷新页面后重试", code: "IDEMPOTENCY_KEY_REQUIRED" } }, 400, { "set-cookie": session.setCookie });
       const jobId = crypto.randomUUID();
-      const progress = { phase: "queued", title: "规划任务已进入持久队列", items: ["● 等待 Workflow 启动", "● 即使刷新或关闭页面，后台仍会继续"], generatedAt: new Date().toISOString() };
+      const progress = { phase: "queued", title: "规划任务已建立断点", items: ["● 正在启动第一阶段", "● 刷新或断网不会丢失进度；重新打开后自动续跑", "● 完全关闭页面时任务暂停，不会继续消耗模型额度"], generatedAt: new Date().toISOString() };
       const now = Date.now();
       const created = await createTravelJob({
         id: jobId, idempotencyKey, clientHash, accessTokenHash: "", status: "queued", payload: input,
         progress, result: null, errorMessage: null, createdAt: now, updatedAt: now, expiresAt: now + 24 * 60 * 60 * 1000,
-        workflowId: null, engineVersion: "v29-workflow", currentStep: "queued", heartbeatAt: now, leaseOwner: null, leaseNonce: null, leaseExpiresAt: null, cancelRequestedAt: null, attemptCount: 0, errorCode: null, completedAt: null, sessionHash: session.hash,
+        workflowId: null, engineVersion: "v29-sites-checkpoint", currentStep: "queued", heartbeatAt: now, leaseOwner: null, leaseNonce: null, leaseExpiresAt: null, cancelRequestedAt: null, attemptCount: 0, errorCode: null, completedAt: null, sessionHash: session.hash,
       });
       if (created.created) {
-        try {
-          const workflow = await callOrchestrator(env, "/v1/jobs/start", { jobId });
-          const workflowId = cleanText(workflow.workflowId, jobId);
-          await updateTravelJob(jobId, { status: "queued", workflowId, currentStep: "queued", heartbeatAt: Date.now() });
-          await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "持久 Workflow 已启动；刷新或关闭页面不会中断规划", detail: { workflowId }, createdAt: Date.now() });
-        } catch (error: any) {
-          await updateTravelJob(jobId, { status: "error", errorCode: "WORKFLOW_START_FAILED", errorMessage: cleanText(error?.message, "Workflow 启动失败"), completedAt: Date.now() });
-          return json({ error: { message: "持久规划服务暂时无法启动，请稍后重试", code: "WORKFLOW_START_FAILED", jobId } }, 503, { "set-cookie": session.setCookie, "cache-control": "no-store" });
-        }
+        await updateTravelJob(jobId, { status: "queued", workflowId: "sites-checkpoint-runner", currentStep: "queued", heartbeatAt: Date.now() });
+        await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "站内断点执行器已就绪；刷新或断网后可从最后检查点续跑", detail: { runner: "sites-checkpoint-v29" }, createdAt: Date.now() });
       }
-      return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v29-workflow" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+      return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v29-sites-checkpoint" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+    }
+
+    if (url.pathname === "/api/plan/advance" && request.method === "POST") {
+      const session = await taskSession(request, env);
+      const body = await request.json().catch(() => ({}));
+      const id = cleanText(body.jobId);
+      if (!id || !session.hash) return json({ error: { message: "缺少任务或会话" } }, 400);
+      const job = await getTravelJob(id);
+      if (!job || job.sessionHash !== session.hash) return json({ error: { message: "任务不存在或无权访问" } }, 404);
+      return json(await advancePlanningJob(id, env), 202, { "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/plan/status") {
@@ -2975,8 +2957,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       if (!job || job.sessionHash !== session.hash) return json({ error: { message: "任务不存在或无权访问" } }, 404);
       const cancelled = await requestTravelJobCancellation(id, session.hash);
       if (cancelled) {
-        await addTravelJobEvent({ jobId: id, eventType: "job_cancelled", step: job.currentStep, message: "用户已取消后台规划；Workflow 已收到终止请求，阶段租约禁止继续提交", createdAt: Date.now() });
-        try { await callOrchestrator(env, `/v1/jobs/${encodeURIComponent(job.workflowId || id)}/cancel`, { jobId: id }); } catch { /* D1 取消状态和阶段租约仍然立即生效，定时对账会再次终止实例。 */ }
+        await addTravelJobEvent({ jobId: id, eventType: "job_cancelled", step: job.currentStep, message: "用户已取消规划；正在执行的阶段租约禁止继续提交", createdAt: Date.now() });
       }
       return json({ cancelled, jobId: id, status: cancelled ? "cancelled" : job.status }, 200, { "cache-control": "no-store" });
     }

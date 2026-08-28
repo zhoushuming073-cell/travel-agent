@@ -165,7 +165,7 @@ async function ensureSchema(): Promise<D1DatabaseLike | null> {
       const columns = await db.prepare("PRAGMA table_info(travel_jobs)").all<{ name: string }>();
       const existingColumns = new Set((columns.results || []).map((column) => String(column.name)));
       const additions: Array<[string, string]> = [
-        ["workflow_id", "TEXT"], ["engine_version", "TEXT NOT NULL DEFAULT 'v29-workflow'"],
+        ["workflow_id", "TEXT"], ["engine_version", "TEXT NOT NULL DEFAULT 'v29-sites-checkpoint'"],
         ["current_step", "TEXT"], ["heartbeat_at", "INTEGER"], ["lease_owner", "TEXT"],
         ["lease_nonce", "TEXT"], ["lease_expires_at", "INTEGER"], ["cancel_requested_at", "INTEGER"],
         ["attempt_count", "INTEGER NOT NULL DEFAULT 0"], ["error_code", "TEXT"],
@@ -262,7 +262,7 @@ function rowToJob(row: Record<string, unknown>): DurableTravelJob {
     errorMessage: row.error_message ? String(row.error_message) : null,
     createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), expiresAt: Number(row.expires_at),
     workflowId: row.workflow_id ? String(row.workflow_id) : null,
-    engineVersion: String(row.engine_version || "v29-workflow"), currentStep: row.current_step ? String(row.current_step) : null,
+    engineVersion: String(row.engine_version || "v29-sites-checkpoint"), currentStep: row.current_step ? String(row.current_step) : null,
     heartbeatAt: row.heartbeat_at == null ? null : Number(row.heartbeat_at), leaseOwner: row.lease_owner ? String(row.lease_owner) : null,
     leaseNonce: row.lease_nonce ? String(row.lease_nonce) : null, leaseExpiresAt: row.lease_expires_at == null ? null : Number(row.lease_expires_at),
     cancelRequestedAt: row.cancel_requested_at == null ? null : Number(row.cancel_requested_at), attemptCount: Number(row.attempt_count || 0),
@@ -376,26 +376,6 @@ export async function requestTravelJobCancellation(jobId: string, sessionHash: s
   const result = await db.prepare(`UPDATE travel_jobs SET status = 'cancelled', cancel_requested_at = ?, completed_at = ?, error_code = 'USER_CANCELLED', updated_at = ? WHERE id = ? AND session_hash = ? AND status IN ('queued','working','needs_input')`)
     .bind(now, now, now, jobId, sessionHash).run();
   return Number(result.meta?.changes || 0) > 0;
-}
-
-export async function listStaleActiveJobs(staleBefore: number, limit = 20): Promise<DurableTravelJob[]> {
-  const db = await ensureSchema();
-  if (!db) return [];
-  const result = await db.prepare(`SELECT * FROM travel_jobs WHERE status IN ('queued','working') AND (heartbeat_at IS NULL OR heartbeat_at < ?) ORDER BY updated_at ASC LIMIT ?`)
-    .bind(staleBefore, limit).all<Record<string, unknown>>();
-  return (result.results || []).map(rowToJob);
-}
-
-export async function listJobsForOrchestrator(limit = 20): Promise<{ queued: DurableTravelJob[]; cancelled: DurableTravelJob[]; stale: DurableTravelJob[] }> {
-  const db = await ensureSchema();
-  if (!db) return { queued: [], cancelled: [], stale: [] };
-  const now = Date.now();
-  const [queued, cancelled, stale] = await Promise.all([
-    db.prepare("SELECT * FROM travel_jobs WHERE status = 'queued' AND expires_at > ? ORDER BY created_at ASC LIMIT ?").bind(now, limit).all<Record<string, unknown>>(),
-    db.prepare("SELECT * FROM travel_jobs WHERE status = 'cancelled' AND cancel_requested_at > ? ORDER BY cancel_requested_at DESC LIMIT ?").bind(now - 20 * 60 * 1000, limit).all<Record<string, unknown>>(),
-    db.prepare("SELECT * FROM travel_jobs WHERE status = 'working' AND heartbeat_at < ? ORDER BY heartbeat_at ASC LIMIT ?").bind(now - 3 * 60 * 1000, limit).all<Record<string, unknown>>(),
-  ]);
-  return { queued: (queued.results || []).map(rowToJob), cancelled: (cancelled.results || []).map(rowToJob), stale: (stale.results || []).map(rowToJob) };
 }
 
 export async function persistentCacheGet(namespace: string, key: string): Promise<unknown | null> {

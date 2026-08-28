@@ -13,9 +13,6 @@
     "test:domain": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
-    ,"orchestrator:dev": "wrangler dev --config orchestrator/wrangler.jsonc"
-    ,"orchestrator:deploy": "wrangler deploy --config orchestrator/wrangler.jsonc"
-    ,"orchestrator:types": "wrangler types --config orchestrator/wrangler.jsonc orchestrator/worker-configuration.d.ts"
   },
   "dependencies": {
     "react": "19.2.6",
