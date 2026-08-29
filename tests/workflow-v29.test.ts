@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { summarizeTrafficCoverage } from "../worker/domain/traffic-coverage.ts";
-import { applyFinalTimelineSafetyRepair, poiImageScore } from "../worker/travel-api.ts";
+import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit } from "../worker/travel-api.ts";
 
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
@@ -53,6 +53,28 @@ test("final compiler adds lunch, preserves required places and removes only flex
   assert.ok(activities.every((item) => Number(item.endTime.slice(0, 2)) * 60 + Number(item.endTime.slice(3)) <= 21 * 60));
 });
 
+test("final transit requires dinner only for an actual evening itinerary and inserts it before validation", () => {
+  const earlyDay = {
+    day: 1, date: "2026-08-30", weather: {}, items: [],
+    blocks: [
+      { type: "rest", mealType: "lunch", label: "午餐", startTime: "12:00", endTime: "13:00", durationMin: 60 },
+      { type: "attraction", item: { id: "museum", name: "天津博物馆", lat: 39.08, lng: 117.22 }, startTime: "14:00", endTime: "17:30", durationMin: 210 },
+    ],
+  };
+  assert.doesNotThrow(() => reflowDayAfterTransit(earlyDay, { dayStart: "09:00", dayEnd: "21:00" }));
+  assert.equal(earlyDay.blocks.some((block: { mealType?: string }) => block.mealType === "dinner"), false);
+
+  const eveningDay = {
+    day: 1, date: "2026-08-30", weather: { sunset: "18:31" }, items: [],
+    blocks: [
+      { type: "rest", mealType: "lunch", label: "午餐", startTime: "12:00", endTime: "13:00", durationMin: 60 },
+      { type: "attraction", item: { id: "eye", name: "天津之眼", lat: 39.15, lng: 117.20 }, startTime: "14:00", endTime: "19:00", durationMin: 300 },
+    ],
+  };
+  assert.doesNotThrow(() => reflowDayAfterTransit(eveningDay, { dayStart: "09:00", dayEnd: "21:00" }));
+  assert.ok(eveningDay.blocks.some((block: { mealType?: string }) => block.mealType === "dinner"));
+});
+
 test("D1 runtime persists leases, artifacts, events and provider attempts", () => {
   for (const value of ["travel_job_artifacts", "travel_job_events", "travel_job_provider_attempts", "lease_nonce", "heartbeat_at", "cancel_requested_at"]) assert.match(persistenceSource, new RegExp(value));
   assert.match(apiSource, /renewTravelJobLease/);
@@ -71,6 +93,15 @@ test("browser task recovery uses HttpOnly cookie, active lookup and real server 
   assert.match(apiSource, /expireStaleTravelJobs/);
   assert.match(frontendSource, /CONCURRENT_JOB_LIMIT/);
   assert.match(frontendSource, /pollPlanningJob\(error\.jobId/);
+  assert.match(apiSource, /\/api\/plan\/retry/);
+  assert.match(frontendSource, /retryPlanningJob/);
+  assert.match(persistenceSource, /resetTravelJobForRetry/);
+});
+
+test("deterministic final validation errors do not repeat the same unchanged stage three times", () => {
+  assert.match(apiSource, /const deterministicFailure =/);
+  assert.match(apiSource, /deterministicFailure \? 1/);
+  assert.match(apiSource, /STAGE_VALIDATION_FAILED/);
 });
 
 test("model failures degrade safely instead of multiplying calls or killing the whole trip", () => {

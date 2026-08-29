@@ -32,6 +32,7 @@ import {
   consumeRateLimit,
   createTravelJob,
   findActiveTravelJob,
+  findLatestTravelJob,
   expireStaleTravelJobs,
   getTravelJobArtifact,
   getTravelJob,
@@ -44,6 +45,7 @@ import {
   recordJobProviderAttempt,
   recordProviderHealth,
   releaseTravelJobLease,
+  resetTravelJobForRetry,
   renewTravelJobLease,
   requestTravelJobCancellation,
   requestClientHash,
@@ -1544,10 +1546,21 @@ async function enrichDayTransit(day: any, city: any, env: any, exactCache = new 
   }));
 }
 
-function reflowDayAfterTransit(day: any, profile: any) {
-  const originalActivities = (day.blocks || [])
+export function reflowDayAfterTransit(day: any, profile: any) {
+  let originalActivities = (day.blocks || [])
     .filter((block: any) => block.type !== "leg")
     .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
+  const plannedEnd = originalActivities.reduce((latest: number, block: any) => Math.max(latest, timeToMinutes(block.endTime, 0)), 0);
+  const hasDinner = originalActivities.some((block: any) => block.mealType === "dinner");
+  if (plannedEnd > 18 * 60 && !hasDinner) {
+    const nearby = [...originalActivities].reverse().find((block: any) => block.item && timeToMinutes(block.endTime, 0) <= 18 * 60)
+      || originalActivities.find((block: any) => block.item && timeToMinutes(block.startTime, 0) >= 18 * 60);
+    originalActivities = [...originalActivities, {
+      type: "rest", mealType: "dinner", label: "晚餐与休息", startTime: "17:30", endTime: "18:30", durationMin: 60,
+      anchor: nearby?.item ? { lat: nearby.item.lat, lng: nearby.item.lng } : undefined,
+      reason: "最终交通核验发现当天延续到 18:00 后，自动保留顺路晚餐时段",
+    }].sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
+  }
   const legByPair = new Map((day.blocks || []).filter((block: any) => block.type === "leg").map((block: any) => [`${block.from}->${block.to}`, block]));
   const rebuilt: any[] = [];
   let cursor = timeToMinutes(profile.dayStart, 540);
@@ -1611,7 +1624,7 @@ function reflowDayAfterTransit(day: any, profile: any) {
   if (cursor > dayEnd) conflicts.push(`最终公交核验后结束时间 ${minutesToTime(cursor)} 超出用户要求 ${minutesToTime(dayEnd)}`);
   const lunch = originalActivities.find((block: any) => block.mealType === "lunch");
   if (!lunch || timeToMinutes(lunch.startTime, 0) > 13 * 60 + 30) conflicts.push("最终公交核验后午餐不在 13:30 前开始");
-  const dinnerRequired = dayEnd >= 18 * 60;
+  const dinnerRequired = cursor > 18 * 60;
   const dinner = originalActivities.find((block: any) => block.mealType === "dinner");
   if (dinnerRequired && (!dinner || timeToMinutes(dinner.startTime, 0) > 20 * 60)) conflicts.push("最终公交核验后缺少合理晚餐时段");
   const duplicateNames = day.items.map((item: any) => normalizeName(item.name)).filter((name: string, index: number, values: string[]) => values.indexOf(name) !== index);
@@ -2295,6 +2308,7 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
   const spotMap = new Map((knowledge?.spots || []).map((spot: any) => [spot.id, spot]));
   const matrix = knowledge?.trafficMatrix;
   let insertedLunches = 0;
+  let insertedDinners = 0;
   let removedFlexibleStops = 0;
   let reflowedActivities = 0;
 
@@ -2348,6 +2362,12 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
         activities.push({ type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:00", durationMin: 60, reason: "最终编译器补齐正常午餐，不跨区追店", evidenceRefs: [] });
         insertedLunches += 1;
       }
+      const plannedEnd = activities.reduce((latest: number, activity: any) => Math.max(latest, timeToMinutes(activity.endTime, 0)), 0);
+      const hasDinner = activities.some((activity: any) => activity.type === "meal" && (() => { const start = timeToMinutes(activity.startTime, -1); return start >= 17 * 60 && start <= 20 * 60; })());
+      if (plannedEnd > 18 * 60 && !hasDinner) {
+        activities.push({ type: "meal", label: "晚餐与休息", startTime: "17:30", endTime: "18:30", durationMin: 60, reason: "最终编译器为延续到晚间的行程补齐顺路晚餐", evidenceRefs: [] });
+        insertedDinners += 1;
+      }
       let end = reflow(day, activities);
       while (end > endLimit) {
         const removable = [...day.activities].reverse().find((activity: any) => {
@@ -2362,7 +2382,7 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
       }
     }
   }
-  return { insertedLunches, removedFlexibleStops, reflowedActivities };
+  return { insertedLunches, insertedDinners, removedFlexibleStops, reflowedActivities };
 }
 
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
@@ -2571,11 +2591,11 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     if (legalization.shiftedActivities) state.modelAudit.compilerIssues.push({ code: "TIMELINE_LEGALIZED", severity: "warning", message: `Travel Compiler 按交通矩阵顺延 ${legalization.shiftedActivities} 个节点，共 ${legalization.shiftedMinutes} 分钟` });
     state.audit = auditPlannerDraft(state.draft, knowledge);
     if (stage === "audit_final") {
-      if (state.audit.hardIssues.some((issue: any) => ["MEAL_MISSING", "LUNCH_MISSING", "TIME_RANGE", "ACTIVITY_OVERLAP", "TRANSIT_GAP", "RETURN_TOO_LATE"].includes(cleanText(issue.code)))) {
+      if (state.audit.hardIssues.some((issue: any) => ["MEAL_MISSING", "LUNCH_MISSING", "DINNER_MISSING", "TIME_RANGE", "ACTIVITY_OVERLAP", "TRANSIT_GAP", "RETURN_TOO_LATE"].includes(cleanText(issue.code)))) {
         const safetyRepair = applyFinalTimelineSafetyRepair(state.draft, knowledge);
         bindTrafficMatrixFacts(state.draft, knowledge);
         state.audit = auditPlannerDraft(state.draft, knowledge);
-        state.modelAudit.compilerIssues.push({ code: "FINAL_TIMELINE_SAFETY_REPAIR", severity: "warning", message: `最终编译器补齐午餐 ${safetyRepair.insertedLunches} 次、移除 ${safetyRepair.removedFlexibleStops} 个非必选超时节点，并按交通矩阵重排时间；AI 仍负责景点与方案决策` });
+        state.modelAudit.compilerIssues.push({ code: "FINAL_TIMELINE_SAFETY_REPAIR", severity: "warning", message: `最终编译器补齐午餐 ${safetyRepair.insertedLunches} 次、晚餐 ${safetyRepair.insertedDinners} 次，移除 ${safetyRepair.removedFlexibleStops} 个非必选超时节点，并按交通矩阵重排时间；AI 仍负责景点与方案决策` });
       }
       state.modelAudit.compilerIssues.push(...state.audit.issues);
       if (state.audit.hardIssues.length) {
@@ -2880,13 +2900,14 @@ async function advancePlanningJob(jobId: string, env: any) {
     const attemptKey = `attempt:${stage}`;
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
     const attempts = Number(previous?.attempts || 0) + 1;
-    const limit = stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
+    const deterministicFailure = /时间轴不可执行|最终审计检查点未通过|确定性编译器拒绝|所有阶段已结束|检查点缺失/.test(message);
+    const limit = deterministicFailure ? 1 : stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
     if (stage === "parse_profile" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("repair_")) {
       await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景 V4 Flash" : "联通元景 DeepSeek V4 Pro", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
     }
     await putTravelJobArtifact(jobId, attemptKey, { attempts, lastError: message, updatedAt: new Date().toISOString() });
     if (attempts >= limit) {
-      await updateTravelJob(jobId, { status: "error", currentStep: stage, attemptCount: Number(job.attemptCount || 0) + 1, errorCode: "STAGE_RETRY_EXHAUSTED", errorMessage: `${stageLabels[stage] || stage}连续失败 ${attempts} 次：${message}`, completedAt: Date.now() });
+      await updateTravelJob(jobId, { status: "error", currentStep: stage, attemptCount: Number(job.attemptCount || 0) + 1, errorCode: deterministicFailure ? "STAGE_VALIDATION_FAILED" : "STAGE_RETRY_EXHAUSTED", errorMessage: deterministicFailure ? `${stageLabels[stage] || stage}未通过：${message}` : `${stageLabels[stage] || stage}连续失败 ${attempts} 次：${message}`, completedAt: Date.now() });
       await addTravelJobEvent({ jobId, eventType: "stage_failed", step: stage, message: `${stageLabels[stage] || stage}重试耗尽`, detail: { attempts, error: message }, createdAt: Date.now() });
       return { status: "error", currentStep: stage, retryable: false };
     }
@@ -3113,6 +3134,25 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const job = await getTravelJob(id);
       if (!job || job.sessionHash !== session.hash) return json({ error: { message: "任务不存在或无权访问" } }, 404);
       return json(await advancePlanningJob(id, env), 202, { "cache-control": "no-store" });
+    }
+
+    if (url.pathname === "/api/plan/retry" && request.method === "POST") {
+      const session = await taskSession(request, env);
+      if (!session.hash) return json({ error: { message: "任务会话已失效", code: "JOB_SESSION_REQUIRED" } }, 401);
+      const body = await request.json().catch(() => ({}));
+      const requestedId = cleanText(body.jobId);
+      const job = requestedId ? await getTravelJob(requestedId) : await findLatestTravelJob(session.hash);
+      if (!job || job.sessionHash !== session.hash) return json({ error: { message: "没有可恢复的规划任务", code: "RETRY_JOB_NOT_FOUND" } }, 404);
+      if (job.status !== "error" || Date.now() > job.expiresAt) return json({ error: { message: "该任务当前不能从检查点继续", code: "RETRY_NOT_ALLOWED" } }, 409);
+      const stage = await nextIncompleteStage(job.id);
+      if (!stage) return json({ error: { message: "任务缺少可恢复的检查点", code: "RETRY_CHECKPOINT_MISSING" } }, 409);
+      const reset = await resetTravelJobForRetry(job.id, session.hash, stage);
+      if (!reset) return json({ error: { message: "任务状态已变化，请重新连接", code: "RETRY_STATE_CHANGED" } }, 409);
+      const envelope: any = await getTravelJobArtifact(job.id, "envelope");
+      const progress = await progressForStage(job.id, stage, envelope || { profile: job.payload, city: { name: cleanText((job.payload as any)?.city) } }, ["● 已保留前面全部成功检查点", `● 正在从 ${stageLabels[stage] || stage} 继续`]);
+      await updateTravelJob(job.id, { status: "working", currentStep: stage, heartbeatAt: Date.now(), progress, errorMessage: null, errorCode: null, completedAt: null });
+      await addTravelJobEvent({ jobId: job.id, eventType: "job_resumed", step: stage, message: `已从失败检查点恢复：${stageLabels[stage] || stage}`, createdAt: Date.now() });
+      return json({ jobId: job.id, status: "working", progress, input: job.payload, resumedFrom: stage }, 202, { "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/plan/status") {

@@ -16,7 +16,7 @@ import { RequirementProfile } from "./components/RequirementProfile.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
-import { abandonPlanningJob, cancelPlanningJob, explainPlan, monitorTrip, reconnectPlanningJob, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
+import { abandonPlanningJob, cancelPlanningJob, explainPlan, monitorTrip, reconnectPlanningJob, retryPlanningJob, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
 import { WORKSPACE_STAGES } from "./state/machine.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
 
@@ -266,6 +266,28 @@ export function TravelWorkspaceApp() {
     }
   }, [applyPlanningResult, busy, handleProgress]);
 
+  const retryPlanning = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setStage("GENERATING_ITINERARY");
+    const controller = new AbortController();
+    planningController.current = controller;
+    try {
+      const resumed = await retryPlanningJob(handleProgress, controller.signal);
+      if (resumed.input.freeText) setDraft(resumed.input.freeText);
+      await applyPlanningResult(resumed.result);
+    } catch (caught) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        setError(caught instanceof Error ? caught.message : "从检查点继续失败");
+        setStage("ERROR");
+      }
+    } finally {
+      setBusy(false);
+      if (planningController.current === controller) planningController.current = null;
+    }
+  }, [applyPlanningResult, busy, handleProgress]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => { if (stage === "EMPTY" && !busy) void reconnectPlanning(true); }, 250);
     return () => window.clearTimeout(timer);
@@ -480,7 +502,7 @@ export function TravelWorkspaceApp() {
       {stage === "VALIDATING_ITINERARY" && (
         <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
       )}
-      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => void reconnectPlanning()}>重新连接任务</button><button className="secondary-button" type="button" onClick={abandonPlanning}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并新建</span><Icon name="arrow"/></button></div></section>}
+      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => void retryPlanning()}>从检查点继续</button><button className="secondary-button" type="button" onClick={abandonPlanning}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并新建</span><Icon name="arrow"/></button></div></section>}
       {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>}
       {readyForReview && reviewStep === 1 && <DataAcquisition request={draft} profile={profile} progress={progress}/>}
       {readyForReview && reviewStep === 2 && <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => { setActivePlanId(planId); setReviewStep(3); void persist({ activePlanId: planId }); }}/>}

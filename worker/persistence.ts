@@ -311,6 +311,31 @@ export async function findActiveTravelJob(sessionHash: string, freshOnly = false
   return row ? rowToJob(row) : null;
 }
 
+export async function findLatestTravelJob(sessionHash: string): Promise<DurableTravelJob | null> {
+  const db = await ensureSchema();
+  if (!db || !sessionHash) return null;
+  const row = await db.prepare("SELECT * FROM travel_jobs WHERE session_hash = ? ORDER BY updated_at DESC LIMIT 1")
+    .bind(sessionHash).first<Record<string, unknown>>();
+  return row ? rowToJob(row) : null;
+}
+
+export async function resetTravelJobForRetry(jobId: string, sessionHash: string, stage: string): Promise<boolean> {
+  const db = await ensureSchema();
+  if (!db || !jobId || !sessionHash || !stage) return false;
+  const now = Date.now();
+  const result = await db.prepare(`UPDATE travel_jobs SET status = 'working', current_step = ?, heartbeat_at = ?,
+    lease_owner = NULL, lease_nonce = NULL, lease_expires_at = NULL, cancel_requested_at = NULL,
+    error_message = NULL, error_code = NULL, completed_at = NULL, updated_at = ?
+    WHERE id = ? AND session_hash = ? AND status = 'error' AND expires_at > ?`)
+    .bind(stage, now, now, jobId, sessionHash, now).run();
+  if (Number(result.meta?.changes || 0) > 0) {
+    await db.prepare("DELETE FROM travel_job_artifacts WHERE job_id = ? AND artifact_key = ?")
+      .bind(jobId, `attempt:${stage}`).run();
+    return true;
+  }
+  return false;
+}
+
 export async function putTravelJobArtifact(jobId: string, key: string, value: unknown): Promise<{ created: boolean; checksum: string }> {
   const db = await ensureSchema();
   if (!db) throw new Error("规划任务数据库未配置");

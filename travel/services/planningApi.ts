@@ -203,6 +203,19 @@ export async function reconnectPlanningJob(onProgress: (progress: PlanningProgre
   return { result: await pollPlanningJob(active.jobId, input, onProgress, signal), input };
 }
 
+export async function retryPlanningJob(onProgress: (progress: PlanningProgress) => void, signal?: AbortSignal): Promise<{ result: PlanningResult; input: PlanningInput }> {
+  const stored = readStoredJob();
+  const resumed = await requestJson<StartResponse & { input?: PlanningInput }>("/api/plan/retry", {
+    method: "POST",
+    body: JSON.stringify(stored?.jobId ? { jobId: stored.jobId } : {}),
+    signal,
+  });
+  const input = resumed.input || stored?.input || ({ freeText: "", city: "", startDate: "", days: 3, budget: 0, style: "", preferences: [], pace: "medium", transport: "公共交通优先", hotelPreference: "", deepReasoning: true, partySize: 2 } as PlanningInput);
+  onProgress(resumed.progress);
+  writeStoredJob({ jobId: resumed.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: resumed.progress });
+  return { result: await pollPlanningJob(resumed.jobId, input, onProgress, signal), input };
+}
+
 export async function cancelPlanningJob(): Promise<boolean> {
   const stored = readStoredJob();
   if (!stored?.jobId) return false;

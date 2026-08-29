@@ -110,6 +110,17 @@ test("missing required attraction and opening conflict request a repair call", (
   assert.equal(result.needsRepair, true);
 });
 
+test("an itinerary that runs past 18:00 must include dinner", () => {
+  const value = draft();
+  const rest = value.variants[0].days[0].activities.find((activity) => activity.type === "rest");
+  assert.ok(rest);
+  rest.startTime = "18:15";
+  rest.endTime = "19:00";
+  rest.durationMin = 45;
+  const result = auditPlannerDraft(value, knowledge);
+  assert.ok(result.issues.some((issue) => issue.code === "DINNER_MISSING" && issue.variantId === "hot" && issue.day === 1));
+});
+
 test("variant difference metrics reject name-only alternatives", () => {
   const identical = draft();
   identical.variants[1].days = structuredClone(identical.variants[0].days);

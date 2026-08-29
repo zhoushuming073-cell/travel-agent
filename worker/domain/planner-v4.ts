@@ -236,6 +236,9 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
       const rests = day.activities.filter((activity) => activity.type === "rest");
       if (!meals.length) issues.push({ code: "MEAL_MISSING", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天缺少正常用餐` });
       if (!meals.some((activity) => { const start = timeToMinutes(activity.startTime); return start !== null && start >= 11 * 60 && start <= 13 * 60 + 30; })) issues.push({ code: "LUNCH_MISSING", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天没有在 11:00—13:30 安排午餐` });
+      const lastActivityEnd = day.activities.reduce((latest, activity) => Math.max(latest, timeToMinutes(activity.endTime) ?? 0), 0);
+      const hasDinner = meals.some((activity) => { const start = timeToMinutes(activity.startTime); return start !== null && start >= 17 * 60 && start <= 20 * 60; });
+      if (lastActivityEnd > 18 * 60 && !hasDinner) issues.push({ code: "DINNER_MISSING", severity: "error", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天行程延续到 18:00 后，但没有安排晚餐` });
       if (!rests.length) issues.push({ code: "REST_MISSING", severity: "warning", variantId: variant.id, day: day.day, message: `${variant.title} 第 ${day.day} 天缺少弹性休息` });
       const chronologically = [...day.activities].sort((left, right) => (timeToMinutes(left.startTime) ?? 0) - (timeToMinutes(right.startTime) ?? 0));
       for (let index = 1; index < chronologically.length; index += 1) {
