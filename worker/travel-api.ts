@@ -32,6 +32,7 @@ import {
   consumeRateLimit,
   createTravelJob,
   findActiveTravelJob,
+  expireStaleTravelJobs,
   getTravelJobArtifact,
   getTravelJob,
   listJobProviderAttempts,
@@ -120,7 +121,10 @@ async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 18000,
         await recordProviderHealth(provider, { ok: true, latencyMs: Date.now() - startedAt });
         return value;
       }
-      if (response.status === 429 && attempt < 2) {
+      // Model quota errors usually need a wider cooldown than an in-request
+      // retry can provide. Let the durable stage runner handle those so one
+      // user action cannot multiply into nine near-identical AI calls.
+      if (response.status === 429 && attempt < 2 && !/联通元景/.test(source)) {
         const retryAfter = Number(response.headers.get("retry-after") || 0);
         await new Promise(resolve => setTimeout(resolve, retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 900 * (attempt + 1)));
         continue;
@@ -484,6 +488,11 @@ async function aiJson(env: any, options: Parameters<typeof aiRequest>[1]) {
 async function extractProfile(input: any, env: any) {
   const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
   const hints = deterministicProfileHints(cleanText(input.freeText));
+  const replanRequired = input?.replanContext?.days?.flatMap((day: any) => (day?.items || []).filter((item: any) => item?.requiredByUser).map((item: any) => cleanText(item?.name))).filter(Boolean) || [];
+  if (input?.replanContext && cleanText(input.city) && cleanText(input.startDate) && Number(input.days) > 0 && Number(input.partySize) > 0) {
+    const merged = mergeTravelProfile(input, { ...hints, requiredAttractions: [...new Set([...list(hints.requiredAttractions), ...replanRequired])] });
+    return { ...merged, extractionModel: "结构化重规划复用（未重复调用模型）", extractionFormatRepaired: false, extractionFallbackReason: "", extractionReuseReason: "复用已确认用户画像，避免自动重规划重复消耗 V4 Flash 配额" };
+  }
   const prompt = `请把用户的中国旅行需求整理成严格 json。用户原文是事实提取的第一优先级；当前表单只是原文没提到字段时的默认参数，绝不能用表单默认人数、日期、天数覆盖原文。支持中文数字以及“8.25出发”“8月25日”“明天出发”等口语日期；没有年份时按中国时区、相对今天 ${today} 推断最近的未过日期。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。用户明确说“想去/希望去/必须去”的地点属于 requiredAttractions，普通兴趣偏好不得提升为必去。\n字段：city,startDate(YYYY-MM-DD),days,nights,partySize,adults,children,seniors,budget,budgetLevel,style,preferences(string[]),interestPriorities([{name,priority}]),avoid(string[]),requiredAttractions(string[]),excludedAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,crowdSensitivity,weatherSensitivity,walkingSensitivity,seasonalNeeds(string[]),requestedVariants(string[]),returnTime,unknownFields(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。未明确字段填 "Unknown" 或放入 unknownFields，不得自行猜测。当前规划器一次只支持一个明确城市或区县。\n当前表单（仅作缺省值）：${JSON.stringify({ ...input, freeText: undefined })}\n用户原文（最高优先级）：${cleanText(input.freeText)}`;
   let extracted: any;
   try {
@@ -495,10 +504,8 @@ async function extractProfile(input: any, env: any) {
       ],
     });
   } catch (error: any) {
-    const hasCoreTextFields = Boolean((hints.city || cleanText(input.city)) && hints.startDate && hints.days && hints.partySize);
-    if (!hasCoreTextFields) throw error;
     extracted = {
-      value: {},
+      value: hints,
       model: "deepseek-v4-flash（限流时文本规则兜底）",
       formatRepaired: false,
       fallbackReason: cleanText(error?.message, "需求模型暂不可用"),
@@ -2034,30 +2041,87 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 11. 每日必须包含正常午餐；若当天延续到 18:00 后还必须包含晚餐。活动之间不得重叠，交通时间不能被吞掉，午晚餐不是可删除的装饰块。
 12. 每套天数严格等于 profile.days。若调用方要求三套，则输出 hot、niche、relax 且顺序不变；若明确要求“本次只生成某一套”，variants 必须只含该套，不能擅自输出另外两套。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
 
+export function compactPlannerKnowledge(knowledge: any) {
+  const matrix = knowledge?.trafficMatrix || {};
+  const requiredIds = new Set((knowledge?.spots || []).filter((spot: any) => spot.requiredByUser).map((spot: any) => spot.id));
+  const selected: any[] = [];
+  const seen = new Set<string>();
+  const add = (leg: any) => {
+    const key = `${leg.fromId}->${leg.toId}`;
+    if (!seen.has(key)) { seen.add(key); selected.push(leg); }
+  };
+  for (const leg of matrix.legs || []) {
+    if (leg.fromId === "hotel" || leg.toId === "hotel" || requiredIds.has(leg.fromId) || requiredIds.has(leg.toId)) add(leg);
+  }
+  const byOrigin = new Map<string, any[]>();
+  for (const leg of matrix.legs || []) {
+    const rows = byOrigin.get(leg.fromId) || [];
+    rows.push(leg);
+    byOrigin.set(leg.fromId, rows);
+  }
+  for (const rows of byOrigin.values()) {
+    rows.sort((left, right) => Number(left.durationMin || 9999) - Number(right.durationMin || 9999)).slice(0, 4).forEach(add);
+  }
+  return {
+    ...knowledge,
+    trafficMatrix: { ...matrix, legs: selected.slice(0, 120), totalCandidateLegs: matrix.legs?.length || 0, compactedForModel: true },
+    modelInputPolicy: "交通矩阵只向模型提供酒店/必选相关段和各点最近邻；完整矩阵仍由 Travel Compiler 审计与最终核验使用",
+  };
+}
+
+function modelArray(value: any, keys: string[]) {
+  if (Array.isArray(value)) return value;
+  for (const key of keys) if (Array.isArray(value?.[key])) return value[key];
+  if (value && typeof value === "object") {
+    const ordered = Object.entries(value)
+      .filter(([key, row]) => /^(?:day|d|第)?\s*\d+\s*(?:天)?$/i.test(key) && row && typeof row === "object")
+      .sort(([left], [right]) => Number(left.match(/\d+/)?.[0] || 0) - Number(right.match(/\d+/)?.[0] || 0))
+      .map(([, row]) => row);
+    if (ordered.length) return ordered;
+  }
+  return [];
+}
+
+function modelVariants(value: any) {
+  const direct = modelArray(value, ["variants", "plans", "alternatives"]);
+  if (direct.length) return direct;
+  const named = [value?.hot, value?.niche, value?.relax, value?.classic, value?.nature, value?.easy].filter(Boolean);
+  if (named.length) return named;
+  return value?.variant || value?.plan || value?.result ? [value.variant || value.plan || value.result] : [];
+}
+
+function modelDays(value: any) {
+  return modelArray(value, ["days", "daysPlan", "dayPlans", "dailyPlans", "daily_plans", "itinerary"]);
+}
+
+function modelActivities(value: any) {
+  return modelArray(value, ["activities", "items", "schedule", "timeline", "events"]);
+}
+
 function normalizePlannerDraft(value: any, profile: any) {
-  const variants = Array.isArray(value?.variants) ? value.variants.slice(0, 3) : [];
+  const variants = modelVariants(value).slice(0, 3);
   return {
     variants: variants.map((variant: any, variantIndex: number) => ({
       id: ["hot", "niche", "relax"][variantIndex],
       title: cleanText(variant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
       style: cleanText(variant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
       strategy: cleanText(variant?.strategy),
-      days: (Array.isArray(variant?.days) ? variant.days : []).slice(0, profile.days).map((day: any, dayIndex: number) => ({
+      days: modelDays(variant).slice(0, profile.days).map((day: any, dayIndex: number) => ({
         day: dayIndex + 1,
         theme: cleanText(day?.theme, `第 ${dayIndex + 1} 天`),
         returnHotelTime: cleanText(day?.returnHotelTime, profile.dayEnd),
         totalActivityMin: clamp(day?.totalActivityMin, 0, 900),
         totalTransportMin: clamp(day?.totalTransportMin, 0, 600),
-        activities: (Array.isArray(day?.activities) ? day.activities : []).slice(0, 12).map((activity: any) => ({
-          type: ["attraction", "meal", "rest"].includes(cleanText(activity?.type)) ? cleanText(activity.type) : "rest",
-          spotId: cleanText(activity?.spotId) || undefined,
-          label: cleanText(activity?.label) || undefined,
-          startTime: cleanText(activity?.startTime), endTime: cleanText(activity?.endTime),
-          durationMin: clamp(activity?.durationMin, 15, 360),
-          transportFromPrevious: activity?.transportFromPrevious ? {
-            mode: cleanText(activity.transportFromPrevious.mode, "公共交通"),
-            durationMin: clamp(activity.transportFromPrevious.durationMin, 1, 360),
-            matrixKey: cleanText(activity.transportFromPrevious.matrixKey) || undefined,
+        activities: modelActivities(day).slice(0, 12).map((activity: any) => ({
+          type: ["attraction", "meal", "rest"].includes(cleanText(activity?.type)) ? cleanText(activity.type) : cleanText(activity?.spotId || activity?.poiId || activity?.placeId) ? "attraction" : /餐|午饭|晚饭|用餐/.test(cleanText(activity?.label || activity?.name)) ? "meal" : "rest",
+          spotId: cleanText(activity?.spotId || activity?.poiId || activity?.placeId) || undefined,
+          label: cleanText(activity?.label || activity?.name) || undefined,
+          startTime: cleanText(activity?.startTime || activity?.start), endTime: cleanText(activity?.endTime || activity?.end),
+          durationMin: clamp(activity?.durationMin || activity?.duration, 15, 360),
+          transportFromPrevious: activity?.transportFromPrevious || activity?.transit ? {
+            mode: cleanText((activity.transportFromPrevious || activity.transit).mode, "公共交通"),
+            durationMin: clamp((activity.transportFromPrevious || activity.transit).durationMin || (activity.transportFromPrevious || activity.transit).minutes, 1, 360),
+            matrixKey: cleanText((activity.transportFromPrevious || activity.transit).matrixKey) || undefined,
           } : undefined,
           reason: cleanText(activity?.reason, "依据候选景点知识包与交通矩阵"),
           evidenceRefs: list(activity?.evidenceRefs).slice(0, 8),
@@ -2069,8 +2133,9 @@ function normalizePlannerDraft(value: any, profile: any) {
   };
 }
 
-function normalizePlannerVariant(value: any, profile: any, variantIndex: number) {
-  const rawVariant = Array.isArray(value?.variants) ? value.variants[0] : value?.variant || value;
+export function normalizePlannerVariant(value: any, profile: any, variantIndex: number) {
+  const variantId = ["hot", "niche", "relax"][variantIndex];
+  const rawVariant = modelVariants(value)[0] || value?.[variantId] || value?.variant || value?.plan || value?.result || value;
   const normalized = normalizePlannerDraft({ variants: [rawVariant] }, profile).variants[0];
   if (!normalized) return null;
   return {
@@ -2078,6 +2143,74 @@ function normalizePlannerVariant(value: any, profile: any, variantIndex: number)
     id: ["hot", "niche", "relax"][variantIndex],
     title: cleanText(rawVariant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
     style: cleanText(rawVariant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
+  };
+}
+
+function completePlannerVariant(variant: any, profile: any) {
+  return Boolean(variant && variant.days?.length === Number(profile.days) && variant.days.every((day: any, index: number) => Number(day.day) === index + 1 && Array.isArray(day.activities) && day.activities.length > 0));
+}
+
+export function recoverPlannerVariant(profile: any, knowledge: any, variantIndex: number, partial: any, reason = "模型输出结构不完整") {
+  const ids = ["hot", "niche", "relax"];
+  const titles = ["经典覆盖", "自然摄影", "轻松避峰"];
+  const styles = ["经典", "自然摄影", "轻松避峰"];
+  const variantId = ids[variantIndex];
+  const modelChosenIds = (partial?.days || []).flatMap((day: any) => (day.activities || []).map((activity: any) => cleanText(activity.spotId)).filter(Boolean));
+  const spots = [...(knowledge?.spots || [])];
+  const score = (spot: any) => {
+    if (variantId === "niche") return Number(spot.seasonFit?.score || 0) * 1.2 + (/自然|摄影/.test((spot.tags || []).join(" ")) ? 35 : 0) + Number(spot.plannerScore || 0);
+    if (variantId === "relax") return 150 - Number(spot.crowdRisk?.score || 50) + Number(spot.plannerScore || 0) * 0.5;
+    return Number(spot.hotness?.score || 0) + Number(spot.plannerScore || 0);
+  };
+  const ordered = [...spots].sort((left, right) => {
+    const leftPriority = left.requiredByUser ? 3 : modelChosenIds.includes(left.id) ? 2 : 1;
+    const rightPriority = right.requiredByUser ? 3 : modelChosenIds.includes(right.id) ? 2 : 1;
+    return rightPriority - leftPriority || score(right) - score(left);
+  });
+  const requiredCount = ordered.filter((spot) => spot.requiredByUser).length;
+  const targetPerDay = Math.min(4, Math.max(variantId === "relax" ? 2 : 3, Math.ceil(requiredCount / Math.max(1, Number(profile.days)))));
+  const selected = ordered.slice(0, Math.max(requiredCount, targetPerDay * Number(profile.days)));
+  const buckets = Array.from({ length: Number(profile.days) }, () => [] as any[]);
+  selected.forEach((spot, index) => buckets[index % buckets.length].push(spot));
+  const dayStart = timeToMinutes(profile.dayStart, 9 * 60);
+  const dayEnd = timeToMinutes(profile.dayEnd, 21 * 60);
+  const days = buckets.map((daySpots, dayIndex) => {
+    const mealLandmark = daySpots.find((spot: any) => spot.timeRole === "meal-landmark");
+    const nightscape = daySpots.find((spot: any) => spot.timeRole === "nightscape");
+    const regular = daySpots.filter((spot: any) => spot !== mealLandmark && spot !== nightscape);
+    const activities: any[] = [];
+    let cursor = dayStart;
+    for (const spot of regular.slice(0, 1)) {
+      const duration = 90;
+      activities.push({ type: "attraction", spotId: spot.id, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + duration), durationMin: duration, reason: "保留模型已选/高优先候选，由可靠性编译器补全缺失日期", evidenceRefs: [spot.id], alternativeSpotIds: [] });
+      cursor += duration;
+    }
+    const lunchStart = Math.max(11 * 60 + 30, cursor + 20);
+    activities.push(mealLandmark
+      ? { type: "meal", spotId: mealLandmark.id, label: `${mealLandmark.name}用餐`, startTime: minutesToTime(lunchStart), endTime: minutesToTime(lunchStart + 75), durationMin: 75, reason: "餐饮型必去点进入正常饭点", evidenceRefs: [mealLandmark.id], alternativeSpotIds: [] }
+      : { type: "meal", label: "午餐与休息", startTime: minutesToTime(lunchStart), endTime: minutesToTime(lunchStart + 75), durationMin: 75, reason: "可靠性编译器保留正常用餐", evidenceRefs: [] });
+    cursor = lunchStart + 95;
+    for (const spot of regular.slice(1)) {
+      if (cursor + 90 > Math.min(dayEnd - 30, 17 * 60 + 30)) break;
+      activities.push({ type: "attraction", spotId: spot.id, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + 90), durationMin: 90, reason: "保留模型已选/高优先候选，并控制单日密度", evidenceRefs: [spot.id], alternativeSpotIds: [] });
+      cursor += 115;
+    }
+    if (nightscape) {
+      const sunset = timeToMinutes(knowledge?.weather?.[dayIndex]?.sunset, 18 * 60);
+      const start = Math.max(cursor, sunset, 18 * 60);
+      if (start + 90 <= dayEnd) activities.push({ type: "attraction", spotId: nightscape.id, startTime: minutesToTime(start), endTime: minutesToTime(start + 90), durationMin: 90, reason: "夜景型地点安排在日落后", evidenceRefs: [nightscape.id], alternativeSpotIds: [] });
+    }
+    const lastEnd = activities.reduce((latest, activity) => Math.max(latest, timeToMinutes(activity.endTime, latest)), dayStart);
+    if (lastEnd + 30 <= dayEnd) activities.push({ type: "rest", label: "弹性缓冲 / 返回住宿地", startTime: minutesToTime(lastEnd), endTime: minutesToTime(lastEnd + 30), durationMin: 30, reason: "为交通波动和临时调整预留缓冲", evidenceRefs: [] });
+    return { day: dayIndex + 1, theme: `${titles[variantIndex]} · 第 ${dayIndex + 1} 天`, returnHotelTime: minutesToTime(Math.min(dayEnd, lastEnd + 30)), totalActivityMin: activities.reduce((sum, activity) => sum + Number(activity.durationMin || 0), 0), totalTransportMin: 0, activities };
+  });
+  return {
+    id: variantId,
+    title: cleanText(partial?.title, titles[variantIndex]),
+    style: cleanText(partial?.style, styles[variantIndex]),
+    strategy: `${cleanText(partial?.strategy, titles[variantIndex])}；模型响应结构异常后由可靠性编译器使用候选池补全时间轴`,
+    days,
+    recoveryReason: cleanText(reason),
   };
 }
 
@@ -2257,7 +2390,7 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
     }
   }))).filter(Boolean);
   modelAudit.toolCalls.push(...verifiedWebContext);
-  const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives, knowledge, verifiedWebContext, replanContext };
+  const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives, knowledge: compactPlannerKnowledge(knowledge), verifiedWebContext, replanContext };
   let decisionMemo = "";
   if (profile.deepReasoning !== false) {
     try {
@@ -2365,7 +2498,7 @@ function newWorkflowPlannerState(profile: any, env: any) {
 async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: any, env: any, replanContext: any, previousState?: any, retryContext?: any) {
   assertPlannerContext(knowledge);
   const state = previousState || newWorkflowPlannerState(profile, env);
-  const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives: WORKFLOW_OBJECTIVES, knowledge, verifiedWebContext: state.verifiedWebContext, replanContext };
+  const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives: WORKFLOW_OBJECTIVES, knowledge: compactPlannerKnowledge(knowledge), verifiedWebContext: state.verifiedWebContext, replanContext };
   if (stage === "planner_research") {
     const verificationQueries = [...new Set([
       ...list(profile.requiredAttractions).slice(0, 3),
@@ -2404,19 +2537,31 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     const objective = WORKFLOW_OBJECTIVES[variantIndex];
     if (!objective) throw new Error(`未知方案阶段：${stage}`);
     if (state.draft.variants.some((variant: any) => variant.id === variantId)) return state;
-    const supplemental = await aiJson(env, {
-      purpose: "planner", thinking: false, maxTokens: 5400, requestTimeoutMs: 150000,
-      messages: [
-        { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities；禁止 daysPlan、itinerary 等替代字段。` : ""}${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
-        { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
-      ],
-    });
-    const variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
-    if (!variant?.days?.length) throw new Error(`${objective.name}没有返回完整日期`);
+    let supplemental: any = null;
+    let variant: any = null;
+    let failure = "";
+    try {
+      supplemental = await aiJson(env, {
+        purpose: "planner", thinking: false, maxTokens: 5400, requestTimeoutMs: 150000,
+        messages: [
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities。允许 days、daysPlan、itinerary 等常见日期容器，后端会安全归一化。` : ""}${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
+          { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((item: any) => ({ id: item.id, strategy: item.strategy, spotIds: item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
+        ],
+      });
+      variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
+      if (!completePlannerVariant(variant, profile)) throw new Error(`${objective.name}返回 ${variant?.days?.length || 0}/${profile.days} 个完整日期`);
+    } catch (error: any) {
+      failure = cleanText(error?.message, `${objective.name}模型调用失败`);
+      if (!retryContext?.attempts) throw new Error(failure);
+      variant = recoverPlannerVariant(profile, knowledge, variantIndex, variant, failure);
+      state.modelAudit.degraded = true;
+      state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${objective.name}模型连续两次未返回可编译结构，已保留候选池事实并由可靠性编译器补全时间轴`].filter(Boolean).join("；");
+      state.modelAudit.compilerIssues.push({ code: "MODEL_STRUCTURE_RECOVERED", severity: "warning", variantId, message: `${failure}；未切换到较弱模型，未新增候选池外事实` });
+    }
     state.draft.variants.push(variant);
     state.draft.variants.sort((left: any, right: any) => WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === left.id) - WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === right.id));
-    state.modelAudit.plannerModel = supplemental.model;
-    if (supplemental.formatRepaired) state.modelAudit.formatRepairs += 1;
+    if (supplemental?.model) state.modelAudit.plannerModel = supplemental.model;
+    if (supplemental?.formatRepaired) state.modelAudit.formatRepairs += 1;
     return state;
   }
   if (stage.startsWith("audit_")) {
@@ -2449,18 +2594,25 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       const variantIndex = WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === variantId);
       if (variantIndex < 0 || !state.draft.variants[variantIndex]) continue;
       const issues = state.audit.hardIssues.filter((issue: any) => !issue.variantId || issue.variantId === variantId);
-      const repaired = await aiJson(env, {
-        purpose: "repair", thinking: false, maxTokens: 5600, requestTimeoutMs: 150000,
-        messages: [
-          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你是单方案冲突修复器。只输出 {"variants":[修复后的 ${variantId} 完整方案]}。逐项消除问题并保留必去点和正常用餐。` },
-          { role: "user", content: JSON.stringify({ knowledge, variant: state.draft.variants[variantIndex], issues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, replanContext }) },
-        ],
-      });
-      const repairedVariant = normalizePlannerVariant(repaired.value, profile, variantIndex);
-      if (!repairedVariant?.days?.length) throw new Error(`${variantId} 修复结果缺少完整日期`);
-      state.draft.variants[variantIndex] = repairedVariant;
-      state.modelAudit.repairModel = repaired.model;
-      if (repaired.formatRepaired) state.modelAudit.formatRepairs += 1;
+      try {
+        const repaired = await aiJson(env, {
+          purpose: "repair", thinking: false, maxTokens: 5600, requestTimeoutMs: 150000,
+          messages: [
+            { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n你是单方案冲突修复器。只输出 {"variants":[修复后的 ${variantId} 完整方案]}。逐项消除问题并保留必去点和正常用餐。` },
+            { role: "user", content: JSON.stringify({ knowledge: compactPlannerKnowledge(knowledge), variant: state.draft.variants[variantIndex], issues, hardConstraints: { requiredAttractions: profile.requiredAttractions, dayStart: profile.dayStart, dayEnd: profile.dayEnd, days: profile.days }, replanContext }) },
+          ],
+        });
+        const repairedVariant = normalizePlannerVariant(repaired.value, profile, variantIndex);
+        if (!completePlannerVariant(repairedVariant, profile)) throw new Error(`${variantId} 修复结果缺少完整日期`);
+        state.draft.variants[variantIndex] = repairedVariant;
+        state.modelAudit.repairModel = repaired.model;
+        if (repaired.formatRepaired) state.modelAudit.formatRepairs += 1;
+      } catch (error: any) {
+        if (!retryContext?.attempts) throw error;
+        state.modelAudit.degraded = true;
+        state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${variantId} 的 AI 冲突修复暂不可用，后续继续由硬约束编译器校验`].filter(Boolean).join("；");
+        state.modelAudit.compilerIssues.push({ code: "AI_REPAIR_UNAVAILABLE", severity: "warning", variantId, message: cleanText(error?.message) });
+      }
     }
     state.modelAudit.repairRounds += 1;
     return state;
@@ -2623,6 +2775,8 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
     if (stage === "parse_profile") {
       const input = job.payload;
       const profile = await extractProfile(input, env);
+      if (profile.extractionFallbackReason) await recordJobProviderAttempt(jobId, stage, { provider: "联通元景 V4 Flash", capability: "需求理解", status: /429|频繁|额度/.test(profile.extractionFallbackReason) ? "rate_limited" : "degraded", detail: `${profile.extractionFallbackReason}；已使用文本规则与明确参数继续`, resultCount: 1 });
+      else await recordJobProviderAttempt(jobId, stage, { provider: profile.extractionModel || "联通元景 V4 Flash", capability: "需求理解", status: "success", detail: profile.extractionReuseReason || "正式用户画像已生成", resultCount: 1 });
       if (profile.clarificationNeeded) {
         await updateTravelJob(jobId, { status: "needs_input", currentStep: stage, progress: { phase: "analysis", title: "需要补充信息", items: [profile.clarificationQuestion || "请明确主要目的地"], formSync: profile } });
         return { done: true, status: "needs_input" };
@@ -2727,6 +2881,9 @@ async function advancePlanningJob(jobId: string, env: any) {
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
     const attempts = Number(previous?.attempts || 0) + 1;
     const limit = stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
+    if (stage === "parse_profile" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("repair_")) {
+      await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景 V4 Flash" : "联通元景 DeepSeek V4 Pro", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
+    }
     await putTravelJobArtifact(jobId, attemptKey, { attempts, lastError: message, updatedAt: new Date().toISOString() });
     if (attempts >= limit) {
       await updateTravelJob(jobId, { status: "error", currentStep: stage, attemptCount: Number(job.attemptCount || 0) + 1, errorCode: "STAGE_RETRY_EXHAUSTED", errorMessage: `${stageLabels[stage] || stage}连续失败 ${attempts} 次：${message}`, completedAt: Date.now() });
@@ -2737,7 +2894,7 @@ async function advancePlanningJob(jobId: string, env: any) {
     const progress = await progressForStage(jobId, stage, envelope, [`! 本阶段第 ${attempts} 次调用失败，将从检查点自动重试`, `! ${message}`]);
     await updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), attemptCount: Number(job.attemptCount || 0) + 1, progress });
     await addTravelJobEvent({ jobId, eventType: "stage_retry", step: stage, message: `${stageLabels[stage] || stage}将在检查点重试`, detail: { attempts, limit, error: message }, createdAt: Date.now() });
-    return { status: "working", currentStep: stage, retryable: true, retryAfterMs: Math.min(60_000, attempts * 10_000), progress };
+    return { status: "working", currentStep: stage, retryable: true, retryAfterMs: /429|频繁|额度/.test(message) ? 60_000 : Math.min(60_000, attempts * 10_000), progress };
   }
 }
 
@@ -2921,7 +3078,10 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
 
     if (url.pathname === "/api/plan/start" && request.method === "POST") {
       const session = await taskSession(request, env, true);
-      const existingActive = await findActiveTravelJob(session.hash);
+      // A task whose browser disappeared for several minutes must not block a
+      // deliberate new submission forever. Its durable artifacts remain in D1.
+      await expireStaleTravelJobs(session.hash);
+      const existingActive = await findActiveTravelJob(session.hash, true);
       if (existingActive) return json({ error: { message: "您已有一个规划任务正在执行，可重新连接或先取消", code: "CONCURRENT_JOB_LIMIT", jobId: existingActive.id } }, 409, { "set-cookie": session.setCookie, "cache-control": "no-store" });
       const globalJobs = await activeJobCount();
       if (globalJobs >= 4) return json({ error: { message: "当前规划队列繁忙，请稍后再试", code: "GLOBAL_CONCURRENCY_LIMIT" } }, 503, { "retry-after": "20" });

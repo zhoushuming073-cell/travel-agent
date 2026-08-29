@@ -1,6 +1,19 @@
 import type { PlanningProgress, PlanningResult, TravelProfile, UiPlan } from "../types.ts";
 
-interface ErrorEnvelope { error?: { message?: string } | string }
+interface ErrorEnvelope { error?: { message?: string; code?: string; jobId?: string } | string }
+
+class PlanningRequestError extends Error {
+  code?: string;
+  jobId?: string;
+  status: number;
+  constructor(message: string, status: number, code?: string, jobId?: string) {
+    super(message);
+    this.name = "PlanningRequestError";
+    this.status = status;
+    this.code = code;
+    this.jobId = jobId;
+  }
+}
 
 function waitWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -20,7 +33,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await response.json().catch(() => ({ error: { message: "服务返回的内容不是 JSON" } })) as T & ErrorEnvelope;
   if (!response.ok) {
     const message = typeof body.error === "string" ? body.error : body.error?.message;
-    throw new Error(message || `服务请求失败（HTTP ${response.status}）`);
+    const code = typeof body.error === "object" ? body.error?.code : undefined;
+    const jobId = typeof body.error === "object" ? body.error?.jobId : undefined;
+    throw new PlanningRequestError(message || `服务请求失败（HTTP ${response.status}）`, response.status, code, jobId);
   }
   return body;
 }
@@ -163,7 +178,16 @@ export async function runPlanningJob(
 ): Promise<PlanningResult> {
   const idempotencyKey = crypto.randomUUID();
   const jobHeaders = { "x-idempotency-key": idempotencyKey };
-  const started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), headers: jobHeaders, signal });
+  let started: StartResponse;
+  try {
+    started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), headers: jobHeaders, signal });
+  } catch (error) {
+    if (error instanceof PlanningRequestError && error.code === "CONCURRENT_JOB_LIMIT" && error.jobId) {
+      writeStoredJob({ jobId: error.jobId, input, createdAt: Date.now() });
+      return pollPlanningJob(error.jobId, input, onProgress, signal);
+    }
+    throw error;
+  }
   onProgress(started.progress);
   writeStoredJob({ jobId: started.jobId, input, createdAt: Date.now(), progress: started.progress });
   return pollPlanningJob(started.jobId, input, onProgress, signal);

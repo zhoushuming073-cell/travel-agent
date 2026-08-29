@@ -68,6 +68,18 @@ test("browser task recovery uses HttpOnly cookie, active lookup and real server 
   assert.match(frontendSource, /reconnectPlanningJob/);
   assert.match(frontendSource, /cancelPlanningJob/);
   assert.match(apiSource, /站内断点执行器/);
+  assert.match(apiSource, /expireStaleTravelJobs/);
+  assert.match(frontendSource, /CONCURRENT_JOB_LIMIT/);
+  assert.match(frontendSource, /pollPlanningJob\(error\.jobId/);
+});
+
+test("model failures degrade safely instead of multiplying calls or killing the whole trip", () => {
+  assert.match(apiSource, /!\/联通元景\/\.test\(source\)/);
+  assert.match(apiSource, /结构化重规划复用（未重复调用模型）/);
+  assert.match(apiSource, /MODEL_STRUCTURE_RECOVERED/);
+  assert.match(apiSource, /recoverPlannerVariant/);
+  assert.match(apiSource, /compactPlannerKnowledge/);
+  assert.match(persistenceSource, /STALE_TASK_REPLACED/);
 });
 
 test("traffic coverage transparently distinguishes verified and estimated legs", () => {

@@ -288,11 +288,26 @@ export async function updateTravelJob(id: string, update: { status?: DurableTrav
     .bind(update.status ?? null, update.progress === undefined ? null : JSON.stringify(update.progress), update.result === undefined ? null : JSON.stringify(update.result), update.errorMessage ?? null, update.errorCode ?? null, update.currentStep ?? null, update.workflowId ?? null, update.heartbeatAt ?? null, update.completedAt ?? null, Date.now(), id).run();
 }
 
-export async function findActiveTravelJob(sessionHash: string): Promise<DurableTravelJob | null> {
+export async function expireStaleTravelJobs(sessionHash: string, staleAfterMs = 3 * 60 * 1000): Promise<number> {
+  const db = await ensureSchema();
+  if (!db || !sessionHash) return 0;
+  const now = Date.now();
+  const result = await db.prepare(`UPDATE travel_jobs SET status = 'error', error_code = 'STALE_TASK_REPLACED',
+    error_message = '旧规划任务长时间没有心跳，已释放任务名额；其检查点仍保留', completed_at = ?, updated_at = ?
+    WHERE session_hash = ? AND status IN ('queued','working') AND heartbeat_at <= ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
+    .bind(now, now, sessionHash, now - staleAfterMs, now).run();
+  return Number(result.meta?.changes || 0);
+}
+
+export async function findActiveTravelJob(sessionHash: string, freshOnly = false): Promise<DurableTravelJob | null> {
   const db = await ensureSchema();
   if (!db || !sessionHash) return null;
-  const row = await db.prepare(`SELECT * FROM travel_jobs WHERE session_hash = ? AND status IN ('queued','working','needs_input') AND expires_at > ? ORDER BY updated_at DESC LIMIT 1`)
-    .bind(sessionHash, Date.now()).first<Record<string, unknown>>();
+  const now = Date.now();
+  const row = freshOnly
+    ? await db.prepare(`SELECT * FROM travel_jobs WHERE session_hash = ? AND status IN ('queued','working','needs_input') AND expires_at > ? AND (status = 'needs_input' OR heartbeat_at > ? OR lease_expires_at > ?) ORDER BY updated_at DESC LIMIT 1`)
+      .bind(sessionHash, now, now - 3 * 60 * 1000, now).first<Record<string, unknown>>()
+    : await db.prepare(`SELECT * FROM travel_jobs WHERE session_hash = ? AND status IN ('queued','working','needs_input') AND expires_at > ? ORDER BY updated_at DESC LIMIT 1`)
+      .bind(sessionHash, now).first<Record<string, unknown>>();
   return row ? rowToJob(row) : null;
 }
 
