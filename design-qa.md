@@ -1,54 +1,50 @@
-# Design QA — 智能旅游助手 UI polishing
+# Design QA — 用户画像模板还原与全局流程导航
 
 ## Scope
 
-- Task: polish the existing product UI without changing its information architecture, planning flow, API behavior, or feature set.
-- Browser evidence: rendered in the in-app browser against `http://localhost:3000`.
-- Primary states checked: new-trip homepage, requirement review, evidence review, validation review, completed itinerary, weather/crowd tab, mobile parameter panel.
+- Visual source: `C:\Users\周树铭\.codex\skills\artifact-template-ai\assets\reference.png` (1600×1024).
+- Supplied motion asset: `C:\Users\周树铭\Desktop\Face scanning.json`.
+- Implementation route: `/travel/trip-4b69aa5b-b74`.
+- Browser used: the in-app browser selected for this project.
 
-## Visual truth and normalization
+## Visual comparison evidence
 
-The pre-polish implementation is the source visual truth for product structure and interaction order. The final implementation is compared against it to verify that the original flow was preserved while the requested visual issues were corrected.
+| Artifact | Path |
+| --- | --- |
+| Reference copy | `C:\Users\周树铭\Desktop\smart_travel_assistant_live_port8090\sites-app\.design-qa\reference.png` |
+| Rendered implementation | `C:\Users\周树铭\Desktop\smart_travel_assistant_live_port8090\sites-app\.design-qa\implementation.png` |
+| Combined comparison input | `C:\Users\周树铭\Desktop\smart_travel_assistant_live_port8090\sites-app\.design-qa\comparison.png` |
 
-| Surface | Source capture | Final capture | Comparison input | Viewport / normalization |
-| --- | --- | --- | --- | --- |
-| Desktop homepage | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\01-before-desktop.png` (1425×1086) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\14-final-home-desktop.png` (1425×876) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\final-comparison-home-desktop.png` (2850×876) | 1425 px wide; source cropped to the final 876 px height for side-by-side review |
-| Desktop completed itinerary | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\02-before-ready-desktop.png` (1425×1539) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\15-final-ready-desktop.png` (1425×876) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\final-comparison-ready-desktop.png` (2850×876) | 1425 px wide; source cropped to the final 876 px height for side-by-side review |
-| Mobile homepage | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\03-before-mobile-home.png` (375×1149) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\17-final-home-mobile.png` (375×812) | `C:\Users\周树铭\AppData\Local\Temp\smart-travel-ui-qa\final-comparison-home-mobile.png` (750×812) | 390×844 browser viewport with a 375 px content viewport; source cropped to the final 812 px content height |
+The implementation was exercised at the available 1280×720 browser viewport. The reference is 1600×1024; the combined comparison preserves each capture's aspect ratio. Runtime layout measurements confirmed `scrollWidth 1265 <= innerWidth 1280`, so the rendered page has no horizontal overflow even though the in-app screenshot preview crops its right edge.
 
-All comparison inputs place the source and implementation in the same image at the same content width and screenshot density. Each comparison input was inspected after the final implementation capture.
+## Findings and fixes
 
-## Comparison history
-
-| Severity | Finding | Fix | Final evidence |
+| Severity | Finding | Fix | Verification |
 | --- | --- | --- | --- |
-| P2 | Type hierarchy was too small and visually flat, especially headings, labels, and itinerary metadata. | Established a restrained type scale, stronger title/body contrast, and readable line heights without changing copy. | Desktop and mobile homepage comparisons; completed-itinerary comparison. |
-| P2 | Nested rounded cards, borders, and shadows fragmented related content and created a template-like appearance. | Converted parameter, metrics, review, itinerary, hotel, weather, crowd, and evidence groups into open grids or divided rails; retained card treatment only for media objects that need a boundary. | Desktop homepage and completed-itinerary comparisons. |
-| P2 | Spacing and alignment were inconsistent between the sidebar, top bar, stages, workspace, and persistent composer. | Introduced shared content widths, section rhythm, control heights, grid gaps, and edge alignment. | All final desktop captures. |
-| P2 | Mobile responsiveness largely stacked desktop blocks and exposed horizontal scrollbars. | Added mobile-specific horizontal rails, scroll snapping, tuned padding, and hidden scrollbar chrome while keeping content swipeable. | Mobile homepage and mobile completed-itinerary captures; document scroll width measured below viewport width. |
-| P2 | Focus and status colors mixed system blue with the product green. | Unified focus-visible, active, and progress treatments around the existing green brand color. | Requirement, evidence, and validation review captures. |
-| P2 | Weather used text glyphs/emoji, creating inconsistent rendering and visual weight. | Replaced weather/status/count glyphs with the existing icon component and matching vector icon paths. | Mobile weather/crowd capture and completed-itinerary capture. |
-| P2 | The homepage illustration exposed a checkerboard-like background that read as an unfinished asset. | Used a restrained background treatment and filtering so the supplied illustration reads as a secondary visual, not a placeholder. | Desktop homepage comparison. |
+| P1 | The earlier central media did not match the selected asset and introduced a React runtime conflict. | Replaced it with the supplied Bodymovin JSON through the direct `lottie-web` player and isolated lifecycle cleanup. | One live SVG renderer is present; two captures 700 ms apart differ, confirming animation playback; no runtime error overlay. |
+| P2 | User-profile composition diverged from the reference. | Matched the reference's expanded dark sidebar, compact top process line, centered title, left facts, central scan, right inference/constraints, and bottom completion rail. | Inspected in the combined comparison input. |
+| P2 | The right information column was too narrow and the three-column grid overflowed with an expanded sidebar. | Rebalanced desktop columns and added a 1450 px responsive layout for the real content width. | Expanded sidebar width is 252 px; page scroll width remains inside the viewport. |
+| P2 | The Chinese sidebar brand name inherited a dark body color and disappeared. | Added an explicit high-contrast sidebar brand style. | Chinese and English brand names are both visible in the final capture. |
+| P2 | The four-step navigation occupied too much top space and was changed only on the profile screen. | Applied the same 740 px compact process navigation globally, retaining active, completed, and review states. | All four review stages report the same 740 px progress width and four functional step controls. |
 
-## Final fidelity review
+## Interaction and regression checks
 
-- Typography: clear page, section, component, and metadata hierarchy; Chinese body copy is readable on desktop and mobile.
-- Layout and spacing: primary content aligns to a consistent grid; section spacing follows one rhythm; the completed itinerary maintains a usable timeline/map split.
-- Color: green is used for primary action and state, while neutral surfaces carry structure; no new gradients, glass effects, or decorative shadows were introduced.
-- Imagery: supplied travel imagery and map content remain in place; media cards use consistent crops and restrained boundaries.
-- Copy and content: wording, values, planning states, and route data are unchanged.
-- Icons: controls and weather/status indicators use the same icon system rather than emoji or typographic symbols.
-- States and interactions: sidebar collapse, parameter expansion, review-stage navigation, result tabs, timeline, map, and persistent composer were exercised successfully.
-- Accessibility: focus-visible treatment is consistent; control sizes and text contrast are improved; no horizontal page overflow was found at 390 px.
-
-## Regression evidence
-
-- Browser console: no errors in the final desktop or mobile pass.
+- Stage navigation: `理解需求 / 信息搜集 / 智能规划 / 方案呈现` all remain clickable in completed-trip review.
+- Profile action: `检查旅行参数` opens the existing editable parameter panel.
+- Reduced motion: animation pauses at a representative frame when the operating system requests reduced motion.
 - Type checking: passed.
 - Linting: passed.
-- Domain tests: 45/45 passed.
-- Production build: passed.
+- Domain tests: 58/58 passed.
+- Production build: passed. The bundler reports the standard third-party `lottie-web` expression-player warning, with no build failure.
 
-## Result
+## Compact single-screen iteration
+
+- Source capture: `.design-qa/reference.png`.
+- Before capture: `.design-qa/compact-before.png`.
+- Final capture: `.design-qa/compact-after.png`.
+- Combined visual review: `.design-qa/compact-comparison.png`.
+- At the tested 1280×720 desktop viewport, `scrollHeight` now equals `innerHeight` (720 px), so the complete profile workspace is visible without vertical scrolling.
+- The compact rules only apply to desktop windows at or below 820 px height; taller screens retain the roomier reference proportions.
+- The supplied Lottie animation, six profile tags, all left/right information groups, progress state, and completion action remain visible.
 
 final result: passed

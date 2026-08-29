@@ -21,10 +21,17 @@ const stateLabel = {
 export function DataAcquisition({ request, profile, progress, onCancel }: Props) {
   const items = progress?.items ?? [];
   const actual = new Map((progress?.sources ?? []).map((source) => [source.id, source]));
+  const completedCount = (progress?.sources ?? []).filter((source) => source.state === "success").length;
+  const activeCount = (progress?.sources ?? []).filter((source) => source.state === "loading").length;
+  const unavailableCount = (progress?.sources ?? []).filter((source) => source.state === "error" || source.state === "unavailable").length;
   return <div className="data-stage-react">
     <aside className="conversation-rail panel"><div className="rail-head"><span>原始需求</span><small>实时任务</small></div><div className="assistant-intro"><Icon name="sparkles"/> 已识别 {profile?.city ?? "目的地"}，正在连接数据工具。</div><p>{request}</p></aside>
     <section className="agent-stage-panel panel data-agent-panel">
-      <div className="agent-stage-head centered"><div><span className="section-code">LIVE DATA</span><h2>正在获取可核验的旅行信息</h2><p>完成状态只来自服务端实际返回，不用条目数量推测。</p></div>{onCancel ? <button className="task-cancel" type="button" onClick={onCancel}>取消规划</button> : null}</div>
+      <div className="agent-stage-head centered"><div><span className="section-code">STAGE 2 · RESEARCH</span><h2>AI 正在搜集与核验旅行信息</h2><p>完成状态只来自服务端实际返回，不用条目数量推测。</p></div>{onCancel ? <button className="task-cancel" type="button" onClick={onCancel}>取消规划</button> : null}</div>
+      <div className="evidence-meter" aria-label="实时数据搜集概况">
+        <div><strong>{completedCount}</strong><span>已返回</span></div><div><strong>{activeCount}</strong><span>查询中</span></div><div><strong>{unavailableCount}</strong><span>暂不可用</span></div>
+        <p><span style={{ width: `${Math.round(completedCount / expectedSources.length * 100)}%` }}/></p>
+      </div>
       <div className="evidence-source-grid react-source-grid">{expectedSources.map(([id, label]) => {
         const source = actual.get(id);
         const state = source?.state ?? "loading";
