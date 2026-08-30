@@ -1,0 +1,23 @@
+:root {
+  --bg: #f3f7fb;
+  --surface: #ffffff;
+  --surface-soft: #f7faff;
+  --text: #13233c;
+  --muted: #708097;
+  --quiet: #97a3b4;
+  --line: #e1e8f1;
+  --line-strong: #d3deeb;
+  --blue: #2f6df6;
+  --blue-dark: #1e55cc;
+  --green: #16aa72;
+  --teal: #13a6a0;
+  --amber: #d88924;
+  --red: #d65060;
+  --shadow: 0 12px 34px rgba(35, 65, 110, 0.07);
+  --shadow-strong: 0 18px 48px rgba(35, 65, 110, 0.13);
+  --radius: 18px;
+  --radius-sm: 12px;
+  --day-1: #2f6df6;
+  --day-2: #16aa72;
+  --day-3: #db8a2d;
+}

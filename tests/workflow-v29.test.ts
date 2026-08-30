@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { summarizeTrafficCoverage } from "../worker/domain/traffic-coverage.ts";
@@ -9,7 +9,13 @@ const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
 const persistenceSource = readFileSync(join(root, "worker", "persistence.ts"), "utf8");
 const frontendSource = readFileSync(join(root, "travel", "services", "planningApi.ts"), "utf8");
-const cssSource = readFileSync(join(root, "app", "travel", "[[...tripId]]", "workspace-react.css"), "utf8");
+const cssRoot = join(root, "app", "travel", "[[...tripId]]");
+const cssSource = [
+  readFileSync(join(cssRoot, "workspace-react.css"), "utf8"),
+  ...readdirSync(join(cssRoot, "styles"))
+    .filter((name) => name.endsWith(".css"))
+    .map((name) => readFileSync(join(cssRoot, "styles", name), "utf8")),
+].join("\n");
 
 test("complete planning uses resumable Sites requests instead of waitUntil", () => {
   assert.doesNotMatch(apiSource, /waitUntil\(executeDurablePlanningJob/);

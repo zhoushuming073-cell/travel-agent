@@ -1,0 +1,18 @@
+/* Parameters */
+.inline-parameter-panel.panel { max-width: 1180px; margin-top: 28px; padding: 26px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; animation: inline-parameters-in .22s ease-out both; }
+.inline-parameter-panel > header { padding: 0 0 20px; }
+.inline-parameter-panel h2 { font-size: 22px; letter-spacing: -.02em; }
+.inline-parameter-panel header p { font-size: 12px; }
+.parameter-fields-grid { gap: 18px 16px; margin-top: 22px; }
+.parameter-field > span { color: #455850; font-size: 12px; }
+.parameter-field .select-wrap,.parameter-field .counter-control { min-height: 46px; border-color: #ccd6d1; border-radius: 6px; background: #fff; }
+.parameter-field .select-wrap input,.parameter-field .select-wrap select { font-size: 13px; font-weight: 520; }
+.parameter-field .counter-control button { width: 38px; border-radius: 5px; }
+.parameter-field .counter-control button svg { width: 16px; height: 16px; }
+.parameter-field .chip { min-height: 36px; padding: 0 12px; border-radius: 5px; font-size: 12px; }
+.parameter-field .chip.active { border-color: #69a991; color: #0d654b; background: #eaf3ef; }
+.parameter-field .segmented { padding: 3px; border: 1px solid #d5ddd9; border-radius: 6px; background: #edf1ef; }
+.parameter-field .segmented button { border-radius: 4px; font-size: 12px; }
+.reasoning-toggle > button { min-height: 46px; border-color: #ccd6d1; border-radius: 6px; background: #fff; }
+.reasoning-toggle > small { font-size: 11px; }
+

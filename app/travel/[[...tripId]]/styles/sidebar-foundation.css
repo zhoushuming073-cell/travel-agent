@@ -1,0 +1,41 @@
+/* Concept sidebar: trip library, not a workspace navigation menu */
+.travel-sidebar { padding: 17px 10px 12px; background: linear-gradient(180deg,#0a1d2a 0%,#071923 100%); }
+.sidebar-brand { min-width: 0; padding: 0 5px; }
+.sidebar-brand .brand-mark,.sidebar-brand .brand-mark svg { width: 29px; height: 29px; }
+.sidebar-brand b { font-size: 13px; }.sidebar-brand small { margin-top: 2px; color: #718994; font-size: 6px; letter-spacing: .7px; }
+.sidebar-collapse { width: 25px; height: 25px; position: absolute; top: 14px; right: -12px; z-index: 2; display: grid; place-items: center; border: 1px solid #334955; border-radius: 50%; color: #d6e4ea; background: #0b1d28; box-shadow: 0 4px 14px rgba(0,0,0,.22); font-size: 16px; line-height: 1; }
+.sidebar-new-trip { min-height: 36px; margin: 17px 0 9px; border: 0; border-radius: 6px; color: #fff; background: linear-gradient(135deg,#14bd7e,#12a96f); box-shadow: 0 7px 18px rgba(12,177,116,.2); font-size: 10px; }
+.sidebar-new-trip span { color: #fff; font-size: 14px; }
+.sidebar-search { height: 31px; display: grid; grid-template-columns: 20px 1fr auto; align-items: center; margin-bottom: 10px; padding: 0 7px; border: 1px solid #203640; border-radius: 6px; color: #7e949e; background: rgba(2,13,19,.34); }
+.sidebar-search span { font-size: 12px; }.sidebar-search input { min-width: 0; border: 0; outline: 0; color: #d4e1e6; background: transparent; font-size: 8px; }.sidebar-search input::placeholder { color: #78909a; }.sidebar-search kbd { padding: 1px 4px; border: 1px solid #314650; border-radius: 4px; color: #728790; background: #10252f; font-family: inherit; font-size: 6px; }
+.sidebar-history { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #29414c transparent; }
+#tripHistory { gap: 10px; }
+.trip-history-group.search-empty { display: none; }
+.trip-history-group header { display: flex; align-items: center; gap: 5px; min-height: 18px; padding: 0 5px; color: #728892; font-size: 7px; font-weight: 700; }
+.trip-history-group header b { min-width: 15px; height: 15px; display: grid; place-items: center; border-radius: 5px; color: #b4c5cc; background: #18303b; font-size: 6px; }
+.trip-history-group > div { display: grid; gap: 2px; }
+.history-item { width: 100%; min-height: 41px; display: grid; grid-template-columns: 8px minmax(0,1fr) 12px; gap: 5px; align-items: center; padding: 6px 7px; border-radius: 6px; color: #b4c4ca; font-size: 8px; }
+.history-item > i { width: 5px; height: 5px; border-radius: 50%; background: #4c6873; }.history-item > span { min-width: 0; }.history-item > em { color: #617782; font-size: 10px; font-style: normal; }
+.history-item b { color: #cbd8dd; font-size: 8px; }.history-item small { margin-top: 3px; color: #657d87; font-size: 6px; }
+.history-item.active { color: #f3fbfe; background: #132f3b; box-shadow: inset 0 0 0 1px rgba(124,183,202,.06); }.history-item.active > i { background: #23d190; box-shadow: 0 0 0 3px rgba(35,209,144,.08); }.history-item.active b { color: #f4fbfd; }.history-item.active small { color: #34c98f; }
+.history-group-empty { display: block; padding: 4px 20px; color: #3f5964; font-size: 6px; }
+.sidebar-footer { padding-top: 9px; }
+.sidebar-user { min-height: 40px; display: grid; grid-template-columns: 29px minmax(0,1fr) 7px; gap: 7px; align-items: center; padding: 4px 5px; }
+.user-avatar { width: 29px; height: 29px; display: grid; place-items: center; border: 2px solid #7aa3b2; border-radius: 50%; color: #eaf4f7; background: linear-gradient(145deg,#2c6e7e,#183946); font-size: 10px; font-weight: 850; }
+.sidebar-user b,.sidebar-user small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.sidebar-user b { color: #d7e4e9; font-size: 8px; }.sidebar-user b em { margin-left: 3px; padding: 2px 4px; border-radius: 4px; color: #062a1f; background: #23d190; font-size: 5px; font-style: normal; }.sidebar-user small { margin-top: 2px; color: #607781; font-size: 6px; }
+.sidebar-footer > button { min-height: 31px; border-radius: 6px; color: #98aab1; background: transparent; font-size: 8px; }.sidebar-footer > button:hover { color: #e9f1f4; background: rgba(255,255,255,.04); }.sidebar-footer > button > span { margin-right: 8px; }.sidebar-footer > button > b { margin-left: auto; font-size: 12px; }
+.sidebar-collapsed .travel-sidebar { width: 70px; padding-left: 9px; padding-right: 9px; }
+.sidebar-collapsed .sidebar-brand > span:last-child,.sidebar-collapsed .sidebar-new-trip:not(:hover),.sidebar-collapsed .sidebar-search input,.sidebar-collapsed .sidebar-search kbd,.sidebar-collapsed .sidebar-history,.sidebar-collapsed .sidebar-user > div,.sidebar-collapsed .sidebar-footer > button:not([hidden]) { font-size: 0; }
+.sidebar-collapsed .sidebar-brand { justify-content: center; }.sidebar-collapsed .sidebar-new-trip { padding: 0; text-align: center; }.sidebar-collapsed .sidebar-new-trip span { margin: 0; }.sidebar-collapsed .sidebar-search { grid-template-columns: 1fr; justify-items: center; padding: 0; }.sidebar-collapsed .sidebar-user { grid-template-columns: 1fr; justify-items: center; }.sidebar-collapsed .sidebar-user .status-dot { display: none; }.sidebar-collapsed .workspace-canvas { margin-left: 70px; }.sidebar-collapsed .persistent-composer { left: 96px; }
+
+@media (min-width: 901px) and (max-width: 1180px) {
+  .travel-sidebar { width: 210px; padding-left: 9px; padding-right: 9px; transform: none; }
+  .sidebar-brand > span:last-child,.sidebar-new-trip,.sidebar-search,.sidebar-history,.sidebar-user > div,.sidebar-footer > button { font-size: initial; }
+  .workspace-canvas { margin-left: 210px; }.persistent-composer { left: 226px; }
+  .sidebar-collapsed .travel-sidebar { width: 70px; }.sidebar-collapsed .workspace-canvas { margin-left: 70px; }.sidebar-collapsed .persistent-composer { left: 86px; }
+}
+@media (max-width: 900px) {
+  .travel-sidebar { width: 244px; padding-left: 10px; padding-right: 10px; }.sidebar-collapse { right: 10px; transform: rotate(180deg); }
+  .sidebar-brand > span:last-child,.sidebar-new-trip,.sidebar-search,.sidebar-history,.sidebar-user > div,.sidebar-footer > button { font-size: initial; }
+}
+

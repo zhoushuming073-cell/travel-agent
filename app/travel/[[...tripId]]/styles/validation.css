@@ -1,0 +1,24 @@
+/* Validation */
+.validation-stage-react.panel { max-width: 1440px; margin: 28px auto 120px; padding: 30px 38px; border: 1px solid var(--line-soft); border-radius: 8px; background: #fff; }
+.validation-hero { padding: 0 0 24px; }
+.validation-hero h2 { margin: 6px 0; font-size: 32px; font-weight: 680; letter-spacing: -.035em; }
+.validation-hero p { color: #65756f; font-size: 13px; }
+.compiler-ring { width: 100px; height: 100px; padding: 7px; }.compiler-ring > span { width: 86px; height: 86px; }
+.react-validation-layout { margin-top: 24px; }
+.react-validation-layout .validation-candidate-grid { gap: 10px; }
+.react-validation-layout .validation-candidate-grid > button { min-height: 238px; padding: 18px; border: 1px solid #d9e0dc; border-radius: 6px; background: #fff; box-shadow: none; }
+.react-validation-layout .validation-candidate-grid > button.active { border-color: #3d8d73; box-shadow: inset 3px 0 #2a8164; }
+.react-validation-layout .validation-candidate-grid header i { border-radius: 4px; }
+.react-validation-layout .validation-candidate-grid em { border-radius: 4px; font-size: 10px; }
+.react-validation-layout .validation-candidate-grid p { color: #65756f; font-size: 12px; line-height: 1.6; }
+.react-validation-layout .validation-candidate-grid .candidate-metrics span { border-radius: 4px; background: #f3f6f4; }
+.candidate-metrics small { font-size: 10px; }.candidate-metrics strong { font-size: 13px; }
+.react-validation-layout .validation-candidate-grid footer small { border-radius: 4px; }
+.plan-comparison { border: 1px solid var(--line-soft); border-radius: 6px; }
+.plan-comparison small,.plan-comparison span { font-size: 11px; }.plan-comparison strong { font-size: 15px; }
+.validation-bottom-grid { gap: 16px; }
+.validation-issues,.validation-evidence,.compiler-card,.validation-crowd { padding: 16px 0; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; }
+.stage-card-title strong { font-size: 13px; }.stage-card-title span { font-size: 11px; }
+.evidence-stats b { border-radius: 4px; font-size: 22px; }
+.evidence-stats small { font-size: 10px; }
+

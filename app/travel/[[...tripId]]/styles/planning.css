@@ -1,0 +1,19 @@
+/* Active stages */
+.profile-stage-react,.data-stage-react { max-width: 1440px; grid-template-columns: 280px minmax(0,1fr); gap: 32px; margin-top: 28px; padding: 0 38px 128px; }
+.rail-head { font-size: 13px; }.rail-head small { font-size: 10px; }
+.profile-stage-react .agent-stage-panel,.data-stage-react .agent-stage-panel { min-height: 560px; padding: 32px; border: 1px solid var(--line-soft); border-radius: 8px; background: #fff; }
+.agent-stage-head h2,.agent-stage-head.centered h2 { margin-top: 6px; font-size: clamp(26px,2.4vw,34px); font-weight: 680; letter-spacing: -.035em; }
+.agent-stage-head p { margin-top: 7px; color: #65756f; font-size: 13px; }
+.requirement-review::before { display: none; }
+.requirement-summary-grid { gap: 0; margin: 30px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.requirement-summary-grid article { min-height: 106px; grid-template-columns: 30px 1fr; gap: 12px; padding: 18px 16px; border: 0; border-right: 1px solid var(--line-soft); border-radius: 0; background: transparent; }
+.requirement-summary-grid article:nth-child(3n) { border-right: 0; }
+.requirement-summary-grid article:nth-child(-n+3) { border-bottom: 1px solid var(--line-soft); }
+.requirement-summary-grid article > i { width: 30px; height: 30px; border-radius: 0; color: var(--brand); background: transparent; }
+.requirement-summary-grid small { font-size: 11px; }.requirement-summary-grid strong { margin-top: 2px; font-size: 15px; }.requirement-summary-grid em { margin-top: 3px; font-size: 10px; }
+.ai-understanding { padding: 17px 0 17px 16px; border: 0; border-left: 3px solid #6eaa94; border-radius: 0; background: #f5f8f6; }
+.ai-understanding p { font-size: 13px; }
+.profile-completion { max-width: none; grid-template-columns: 34px 1fr auto; margin-top: 20px; padding: 18px 0 0; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; box-shadow: none; }
+.profile-completion > span { width: 32px; height: 32px; }.profile-completion > span svg { width: 17px; }
+.profile-completion strong { font-size: 13px; }.profile-completion small,.profile-completion > b { font-size: 11px; }
+

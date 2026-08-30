@@ -17,56 +17,15 @@ import { RequirementProfile } from "./components/RequirementProfile.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
-import { abandonPlanningJob, cancelPlanningJob, explainPlan, monitorTrip, reconnectPlanningJob, retryPlanningJob, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
+import { usePlanningLifecycle } from "./hooks/usePlanningLifecycle.ts";
+import { usePlanningProgress } from "./hooks/usePlanningProgress.ts";
+import { explainPlan, monitorTrip, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
 import { WORKSPACE_STAGES } from "./state/machine.ts";
+import { createWorkspaceId, EMPTY_FORM, isExplanation, profileToForm, REVIEW_LABELS } from "./state/workspace-config.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
 
-const EMPTY_FORM: TravelFormState = {
-  city: "",
-  startDate: "",
-  days: 3,
-  budget: 0,
-  partySize: 2,
-  style: "",
-  preferences: [],
-  pace: "medium",
-  transport: "公共交通优先",
-  hotelPreference: "",
-  deepReasoning: true,
-};
-const REVIEW_LABELS = ["理解需求", "信息搜集", "智能规划", "方案呈现"] as const;
-
-function workspaceId(): string {
-  return `trip-${crypto.randomUUID().slice(0, 12)}`;
-}
-
-function eventFromProgress(id: string, progress: PlanningProgress): AgentEvent {
-  const state: AgentState = progress.phase === "analysis" ? "BUILDING_PROFILE" : progress.phase === "live" ? "FETCHING_DATA" : "GENERATING_ITINERARY";
-  return { id: `${id}-${progress.phase}-${Date.now()}`, workspaceId: id, type: progress.phase, state, title: progress.title, detail: progress.items.at(-1), createdAt: new Date().toISOString() };
-}
-
-function profileToForm(profile: TravelProfile, fallback: TravelFormState = EMPTY_FORM): TravelFormState {
-  return {
-    city: profile.city ?? fallback.city,
-    startDate: profile.startDate ?? fallback.startDate,
-    days: Number(profile.days ?? fallback.days),
-    budget: Number(profile.budget ?? fallback.budget),
-    partySize: Number(profile.partySize ?? fallback.partySize),
-    style: profile.style ?? fallback.style,
-    preferences: profile.preferences ?? fallback.preferences,
-    pace: profile.pace ?? fallback.pace,
-    transport: profile.transport ?? fallback.transport,
-    hotelPreference: profile.hotelPreference ?? fallback.hotelPreference,
-    deepReasoning: profile.deepReasoning ?? fallback.deepReasoning,
-  };
-}
-
-function isExplanation(text: string): boolean {
-  return /^(为什么|解释|依据|证据|可靠|数据|怎么|哪些未知|风险)/.test(text.trim());
-}
-
 export function TravelWorkspaceApp() {
-  const [id, setId] = useState(workspaceId);
+  const [id, setId] = useState(createWorkspaceId);
   const [stage, setStage] = useState<AgentState>("EMPTY");
   const [draft, setDraft] = useState("");
   const [form, setForm] = useState<TravelFormState>(EMPTY_FORM);
@@ -85,15 +44,13 @@ export function TravelWorkspaceApp() {
   const [reviewStep, setReviewStep] = useState(3);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const planningController = useRef<AbortController | null>(null);
-  const profileStageStartedAt = useRef(0);
-  const profileAdvanceTimer = useRef<number | null>(null);
-  const researchAdvanceTimer = useRef<number | null>(null);
+  const planningControllerRef = useRef<AbortController | null>(null);
   const monitorEventRef = useRef("");
   const monitoredReplanRef = useRef<(text: string) => Promise<void>>(async () => undefined);
 
   const activePlan = useMemo(() => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null, [activePlanId, plans]);
   const stageConfig = WORKSPACE_STAGES[stage];
+  const { beginProfileStage, clearStageTimers, handleProgress } = usePlanningProgress({ workspaceId: id, setProgress, setProfile, setForm, setEvents, setStage });
 
   useEffect(() => {
     if (stage === "BUILDING_PROFILE" || (stage === "READY" && reviewStep === 0)) setSidebarCollapsed(false);
@@ -184,7 +141,7 @@ export function TravelWorkspaceApp() {
       const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
       if (pathId && pathId !== "index.html") void loadWorkspace(pathId, false);
       else {
-        setId(workspaceId()); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
+        setId(createWorkspaceId()); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
         setProfile(null); setProgress(null); setPlans([]); setActivePlanId(null);
         setVersions([]); setEvents([]); setMessages([]); setPendingChange(null); setError(null);
         setParametersOpen(false); setReviewStep(3);
@@ -224,159 +181,16 @@ export function TravelWorkspaceApp() {
     replanContext,
   }), [form]);
 
-  const handleProgress = useCallback((next: PlanningProgress) => {
-    setProgress(next);
-    if (next.formSync) {
-      setProfile(next.formSync);
-      setForm((current) => profileToForm(next.formSync as TravelProfile, current));
-    }
-    const event = eventFromProgress(id, next);
-    setEvents((current) => current.some((item) => item.type === event.type && item.title === event.title) ? current : [...current, event]);
-    if (next.phase === "analysis") setStage("BUILDING_PROFILE");
-    if (next.phase === "live") {
-      const remaining = Math.max(0, 4200 - (performance.now() - profileStageStartedAt.current));
-      if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
-      profileAdvanceTimer.current = window.setTimeout(() => {
-        setStage("FETCHING_DATA");
-        profileAdvanceTimer.current = null;
-      }, remaining);
-    }
-    if (next.phase === "route") {
-      const remaining = Math.max(0, 4200 - (performance.now() - profileStageStartedAt.current));
-      if (remaining > 0) {
-        if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
-        profileAdvanceTimer.current = window.setTimeout(() => {
-          setStage("FETCHING_DATA");
-          profileAdvanceTimer.current = null;
-          researchAdvanceTimer.current = window.setTimeout(() => {
-            setStage("GENERATING_ITINERARY");
-            researchAdvanceTimer.current = null;
-          }, 2200);
-        }, remaining);
-      } else {
-        setStage("GENERATING_ITINERARY");
-      }
-    }
-  }, [id]);
-
-  const applyPlanningResult = useCallback(async (result: Awaited<ReturnType<typeof runPlanningJob>>) => {
-    if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
-    if (researchAdvanceTimer.current !== null) window.clearTimeout(researchAdvanceTimer.current);
-    setProfile(result.request);
-    setForm((current) => profileToForm(result.request, current));
-    setPlans(result.alternatives);
-    setActivePlanId(result.activeId);
-    setEvents(result.agentEvents ?? []);
-    setProgress(result.progress ?? null);
-    setStage("VALIDATING_ITINERARY");
-    await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: profileToForm(result.request, form), messages, progress: result.progress ?? null }));
+  const savePlanningResult = useCallback(async (result: Awaited<ReturnType<typeof runPlanningJob>>, nextForm: TravelFormState) => {
+    await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: nextForm, messages, progress: result.progress ?? null }));
     await refreshWorkspaces();
-  }, [draft, form, messages, refreshWorkspaces, snapshot]);
+  }, [draft, messages, refreshWorkspaces, snapshot]);
 
-  const reconnectPlanning = useCallback(async (quiet = false) => {
-    if (busy) return;
-    setBusy(true);
-    if (!quiet) setError(null);
-    const controller = new AbortController();
-    planningController.current = controller;
-    try {
-      const resumed = await reconnectPlanningJob(handleProgress, controller.signal);
-      if (!resumed) {
-        if (!quiet) setError("没有可重新连接的后台规划任务");
-        return;
-      }
-      if (resumed.input.freeText) setDraft(resumed.input.freeText);
-      await applyPlanningResult(resumed.result);
-    } catch (caught) {
-      if (!(caught instanceof DOMException && caught.name === "AbortError") && !quiet) {
-        setError(caught instanceof Error ? caught.message : "重新连接任务失败");
-        setStage("ERROR");
-      }
-    } finally {
-      setBusy(false);
-      if (planningController.current === controller) planningController.current = null;
-    }
-  }, [applyPlanningResult, busy, handleProgress]);
-
-  const retryPlanning = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    setStage("GENERATING_ITINERARY");
-    const controller = new AbortController();
-    planningController.current = controller;
-    try {
-      const resumed = await retryPlanningJob(handleProgress, controller.signal);
-      if (resumed.input.freeText) setDraft(resumed.input.freeText);
-      await applyPlanningResult(resumed.result);
-    } catch (caught) {
-      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
-        setError(caught instanceof Error ? caught.message : "从检查点继续失败");
-        setStage("ERROR");
-      }
-    } finally {
-      setBusy(false);
-      if (planningController.current === controller) planningController.current = null;
-    }
-  }, [applyPlanningResult, busy, handleProgress]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => { if (stage === "EMPTY" && !busy) void reconnectPlanning(true); }, 250);
-    return () => window.clearTimeout(timer);
-  // only attempt automatic cookie/session recovery once after mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const startPlanning = async () => {
-    if (!draft.trim() || busy) return;
-    setBusy(true);
-    setError(null);
-    profileStageStartedAt.current = performance.now();
-    setStage("BUILDING_PROFILE");
-    setParametersOpen(false);
-    setReviewStep(0);
-    setPlans([]);
-    setActivePlanId(null);
-    setVersions([]);
-    setEvents([]);
-    planningController.current?.abort();
-    const controller = new AbortController();
-    planningController.current = controller;
-    try {
-      const result = await runPlanningJob(planningInput(draft), handleProgress, controller.signal);
-      await applyPlanningResult(result);
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") {
-        setStage("EMPTY");
-        setProgress(null);
-        return;
-      }
-      setError(caught instanceof Error ? caught.message : "规划工具暂时不可用");
-      setStage("ERROR");
-    } finally {
-      setBusy(false);
-      if (planningController.current === controller) planningController.current = null;
-    }
-  };
-
-  const cancelPlanning = async () => {
-    try { await cancelPlanningJob(); } catch (caught) { setError(caught instanceof Error ? caught.message : "服务端取消失败"); return; }
-    planningController.current?.abort();
-    if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
-    if (researchAdvanceTimer.current !== null) window.clearTimeout(researchAdvanceTimer.current);
-    setBusy(false);
-    setProgress(null);
-    setStage("EMPTY");
-    setParametersOpen(true);
-  };
-
-  const abandonPlanning = () => {
-    planningController.current?.abort();
-    if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
-    if (researchAdvanceTimer.current !== null) window.clearTimeout(researchAdvanceTimer.current);
-    abandonPlanningJob();
-    setBusy(false); setProgress(null); setStage("EMPTY"); setParametersOpen(true); setError(null);
-  };
+  const { startPlanning, retryPlanning, cancelPlanning, abandonPlanning } = usePlanningLifecycle({
+    busy, setBusy, setError, planningControllerRef, draft, form, planningInput, handleProgress, beginProfileStage, clearStageTimers, saveResult: savePlanningResult,
+    setDraft, setForm, setProfile, setProgress, setPlans, setActivePlanId, setEvents, setVersions,
+    setStage, setParametersOpen, setReviewStep,
+  });
 
   const enterReady = async (planId: string) => {
     const selected = plans.find((plan) => plan.id === planId);
@@ -423,7 +237,7 @@ export function TravelWorkspaceApp() {
         })),
       };
       const controller = new AbortController();
-      planningController.current = controller;
+      planningControllerRef.current = controller;
       const result = await runPlanningJob(planningInput(`${draft}\n\n在现有行程基础上执行以下调整，并尽量保持未点名的日期不变：${text}`, context), (next) => setProgress(next), controller.signal);
       const after = result.alternatives.find((plan) => plan.id === activePlan.variant) ?? result.alternatives[0];
       setPendingChange({ before: activePlan, after, result, adjustment: text, changeSet: after.changeSet ?? null });
@@ -477,8 +291,8 @@ export function TravelWorkspaceApp() {
   };
 
   const newTrip = () => {
-    planningController.current?.abort();
-    const nextId = workspaceId();
+    planningControllerRef.current?.abort();
+    const nextId = createWorkspaceId();
     setId(nextId);
     setStage("EMPTY");
     setDraft("");
@@ -500,7 +314,7 @@ export function TravelWorkspaceApp() {
   };
 
   const editRequirements = () => {
-    planningController.current?.abort();
+    planningControllerRef.current?.abort();
     setBusy(false);
     setError(null);
     setStage("EMPTY");

@@ -1,0 +1,35 @@
+/* Empty state */
+.empty-stage.react-empty-stage { max-width: 1320px; padding: clamp(62px,8vh,96px) clamp(32px,5vw,72px) 72px; }
+.react-empty-stage .empty-copy { max-width: 760px; }
+.react-empty-stage .empty-copy h1 { margin-top: 0; color: #13251e; font-size: clamp(42px,4.2vw,58px); font-weight: 680; line-height: 1.08; letter-spacing: -.055em; }
+.react-empty-stage .empty-copy > p { margin-top: 12px; color: #5f7069; font-size: 17px; line-height: 1.65; }
+.hero-capabilities { margin-top: 23px; gap: 10px 24px; }
+.hero-capabilities span { padding: 0; border: 0; border-radius: 0; color: #60716a; background: transparent; font-size: 12px; }
+.hero-capabilities svg { color: var(--brand); }
+.react-empty-stage .empty-layout { max-width: 1120px; grid-template-columns: minmax(560px,1.4fr) minmax(280px,.6fr); gap: 48px; margin: 38px auto 0; }
+.prompt-studio .query-input-wrap,.react-empty-stage .query-input-wrap { min-height: 190px; padding: 22px 24px 18px; border: 1px solid #cfd9d4; border-radius: 8px; background: #fff; box-shadow: none; }
+.prompt-studio .query-content label { color: #50635b; font-size: 12px; }
+.prompt-studio textarea,.react-empty-stage textarea { min-height: 112px; color: #24362f; font-size: 15px; font-weight: 480; line-height: 1.7; }
+.prompt-studio .query-helper { padding-top: 10px; border-top: 1px solid #e7ebe9; color: #778780; font-size: 11px; }
+.react-empty-stage .primary-button { width: 154px; min-width: 154px; min-height: 46px; right: 16px; bottom: 16px; border-radius: 7px; font-size: 13px; }
+.city-illustration { height: 268px; border: 0; border-radius: 0; background: transparent; mask-image: none; }
+.city-illustration::after { display: none; }
+.jiangnan-hero-art { opacity: .7; filter: brightness(1.22) saturate(.62) contrast(.72); mix-blend-mode: multiply; }
+.quick-param-shell { margin-top: 34px; }
+.quick-param-grid { gap: 0; overflow: hidden; border: 1px solid #d7dfdb; border-radius: 7px; background: #fff; }
+.quick-param-grid button { min-height: 84px; padding: 14px 16px; border: 0; border-right: 1px solid #e2e7e4; border-radius: 0; background: transparent; text-align: left; box-shadow: none; }
+.quick-param-grid button:last-child { border-right: 0; }
+.quick-param-grid button:hover,.quick-param-grid button.text-detected,.quick-param-grid .more-params.active { border-color: #e2e7e4; color: var(--brand); background: #f0f6f3; box-shadow: none; }
+.quick-param-grid button span { color: #74837d; font-size: 11px; }
+.quick-param-grid button strong { margin-top: 4px; color: var(--text); font-size: 14px; font-weight: 680; }
+.quick-param-grid button small { color: #8b9893; font-size: 10px; }
+.try-say { margin-top: 40px; }
+.try-say h2 { margin-bottom: 14px; color: var(--text); font-size: 18px; letter-spacing: -.02em; }
+.concept-examples { gap: 0; overflow: hidden; border: 1px solid #dce3df; border-radius: 7px; background: #fff; }
+.concept-examples button { min-height: 104px; display: grid; grid-template-columns: 82px minmax(0,1fr) 18px; grid-template-rows: auto auto; column-gap: 12px; align-content: center; padding: 12px; border: 0; border-right: 1px solid #e2e7e4; border-radius: 0; background: transparent; box-shadow: none; text-align: left; }
+.concept-examples button:last-child { border-right: 0; }
+.concept-examples .example-art { width: 82px; height: 72px; grid-row: 1/3; border-radius: 4px; }
+.concept-examples b { align-self: end; font-size: 14px; }.concept-examples small { align-self: start; color: #74837d; font-size: 11px; }
+.concept-examples button > i { grid-column: 3; grid-row: 1/3; align-self: center; }
+.generation-disclaimer { margin-top: 18px; color: #7d8984; font-size: 11px; }
+

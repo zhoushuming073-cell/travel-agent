@@ -1,0 +1,45 @@
+/* App frame and navigation */
+.travel-sidebar.react-sidebar {
+  width: 252px; padding: 20px 14px 16px; border-right: 1px solid #18353c;
+  background: #0c222a; box-shadow: none;
+}
+.workspace-canvas.react-workspace-canvas { margin-left: 252px; padding-bottom: 116px; }
+.sidebar-brand { padding: 0 4px; }
+.sidebar-brand .travel-logo-mark {
+  width: 36px; height: 36px; flex-basis: 36px; border: 0; border-radius: 8px; color: #fff; background: #16785d; box-shadow: none;
+}
+.sidebar-brand .travel-logo-mark > i { display: none; }
+.sidebar-brand .travel-logo-mark svg { width: 20px; height: 20px; }
+.sidebar-brand .sidebar-label { margin: 0; color: #f2f6f4; font-size: 15px; letter-spacing: -.01em; text-transform: none; }
+.sidebar-brand .sidebar-label b { color: #f2f6f4; font-size: 15px; font-weight: 690; }
+.sidebar-brand .sidebar-label small { margin-top: 3px; color: #7f999f; font-size: 8px; letter-spacing: .09em; }
+.sidebar-collapse { width: 30px; height: 30px; top: 22px; right: -15px; border: 1px solid #284650; border-radius: 7px; color: #dbe5e3; background: #102a33; box-shadow: none; }
+.sidebar-new-trip { min-height: 42px; margin: 24px 0 12px; border: 0; border-radius: 6px; background: #15936b; box-shadow: none; font-size: 13px; }
+.sidebar-new-trip:hover { background: #117d5c; }
+.sidebar-new-trip .sidebar-label { margin: 0; color: #fff; font-size: 13px; letter-spacing: 0; text-transform: none; }
+.sidebar-search { height: 38px; margin-bottom: 18px; padding: 0 9px; border-color: #294149; border-radius: 6px; background: #102a33; }
+.sidebar-search input { color: #e7efed; font-size: 12px; }
+.sidebar-search kbd { border-color: #39515a; border-radius: 3px; color: #91a5aa; background: transparent; font-size: 9px; }
+.trip-history-group > header { min-height: 26px; padding: 0 8px; color: #7f9499; font-size: 10px; letter-spacing: .03em; }
+.trip-history-group > header b { min-width: 19px; height: 19px; border-radius: 4px; color: #c5d1d3; background: #17343d; font-size: 9px; }
+.trip-history-group > div { gap: 4px; }
+.history-item-row { border-radius: 5px; }
+.history-item { min-height: 50px; padding: 8px; border-radius: 5px; font-size: 12px; }
+.history-item b { color: #d7e1e2; font-size: 12px; font-weight: 620; }
+.history-item small { margin-top: 4px; color: #71888e; font-size: 10px; }
+.history-item.active { background: #153640; box-shadow: inset 2px 0 #31b98d; }
+.history-delete { border-radius: 5px; }
+.sidebar-user { min-height: 48px; }
+.sidebar-user b { color: #d7e2e2; font-size: 11px; }.sidebar-user small { font-size: 9px; }
+.user-avatar { border: 1px solid #436773; border-radius: 7px; background: #163843; }
+.workspace-header {
+  height: 72px; padding: 0 clamp(22px,2.4vw,38px); border-bottom: 1px solid var(--line-soft);
+  background: rgba(246,247,245,.98); backdrop-filter: none;
+}
+.workspace-title span { color: #7a8883; font-size: 10px; letter-spacing: .09em; }
+.workspace-title strong { margin-top: 4px; color: var(--text); font-size: 15px; font-weight: 680; }
+.workspace-state { border-radius: 5px; color: #556760; background: #e9eeeb; font-size: 11px; }
+.workspace-state.live { color: #0b694d; background: #e2f0ea; }
+.sidebar-collapsed .travel-sidebar.react-sidebar { width: 70px; }
+.sidebar-collapsed .workspace-canvas.react-workspace-canvas { margin-left: 70px; }
+

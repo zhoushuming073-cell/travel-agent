@@ -1,0 +1,13 @@
+/* Workflow progress */
+.react-stage-progress { width: min(740px,calc(100% - 80px)); margin-top: 12px; }
+.react-stage-progress li { gap: 3px; color: #899690; font-size: 11px; font-weight: 620; }
+.react-stage-progress li::before { top: 12px; height: 1px; background: #cfd8d3; }
+.react-stage-progress li.done::before,.react-stage-progress li.active::before { background: #4e9b80; }
+.react-stage-progress i { width: 25px; height: 25px; border: 1px solid #c8d2cd; background: var(--canvas); font-size: 10px; }
+.react-stage-progress i svg { width: 15px; height: 15px; }
+.react-stage-progress small { color: #7c8d86; font-size: 8px; }
+.react-stage-progress li.done,.react-stage-progress li.active { color: #1b6d54; }
+.react-stage-progress li.done i,.react-stage-progress li.done.active i { border-color: #1f8664; background: #1f8664; box-shadow: none; }
+.react-stage-progress li.active i { border-color: #1f8664; color: #1f8664; box-shadow: 0 0 0 3px #dcebe5; }
+.react-stage-progress li > button:focus-visible { outline: 2px solid #3d8d73; outline-offset: 4px; border-radius: 6px; }
+
