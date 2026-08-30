@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { MOTION } from "../lib/animationCatalog.ts";
 import type { UiPlan } from "../types.ts";
 import { Icon } from "./Icon.tsx";
+import { LottieMotion } from "./LottieMotion.tsx";
 
 interface Props {
   plan: UiPlan;
@@ -80,7 +82,14 @@ export function MapPanel({ plan, selectedDay, selectedSpotId, onSelectSpot }: Pr
       <div className="map-preview-label">可拖动的路线预览</div>
       <div className="tile-layer">{tiles.map((tile) => <img key={`${tile.x}-${tile.y}`} src={tile.url} alt="" draggable={false} style={{ left: tile.x * TILE - centerWorld[0] + width / 2, top: tile.y * TILE - centerWorld[1] + height / 2 }}/>)}</div>
       <svg className="map-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"><polyline points={routePoints} fill="none" stroke="#178df7" strokeWidth="4" strokeDasharray="7 5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-      {spots.map((spot, index) => { const position = point(spot.lat ?? 0, spot.lng ?? 0); return <button className={`react-map-marker${spot.id === selectedSpotId ? " active" : ""}`} type="button" key={spot.id} style={{ left: position.x, top: position.y }} onClick={() => onSelectSpot(spot.id, day.day)}><i>{index + 1}</i><span>{spot.name}</span></button>; })}
+      {spots.map((spot, index) => {
+        const position = point(spot.lat ?? 0, spot.lng ?? 0);
+        const selected = spot.id === selectedSpotId;
+        return <button className={`react-map-marker${selected ? " active" : ""}`} type="button" key={spot.id} style={{ left: position.x, top: position.y }} onClick={() => onSelectSpot(spot.id, day.day)} aria-pressed={selected}>
+          <i>{selected ? <LottieMotion src={MOTION.location} className="selected-map-location-motion" label={`${spot.name}已选中`} loop={false} fallback={<Icon name="mapPin"/>}/> : index + 1}</i>
+          <span>{spot.name}</span>
+        </button>;
+      })}
       <div className="map-zoom"><button type="button" aria-label="放大地图" onClick={() => { setZoom(Math.min(16, zoom + 1)); setPan({ x: 0, y: 0 }); }}><Icon name="plus"/></button><button type="button" aria-label="缩小地图" onClick={() => { setZoom(Math.max(5, zoom - 1)); setPan({ x: 0, y: 0 }); }}>−</button><button type="button" aria-label="重新定位路线" onClick={() => setPan({ x: 0, y: 0 })}><Icon name="mapPin"/></button></div>
       <div className="map-attribution">© OpenStreetMap contributors</div>
     </div>

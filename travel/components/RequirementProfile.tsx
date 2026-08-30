@@ -1,7 +1,6 @@
 "use client";
 
 import { deterministicProfileHints } from "../../worker/domain/profile-extraction.ts";
-import { MOTION } from "../lib/animationCatalog.ts";
 import type { PlanningProgress, TravelProfile } from "../types.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { LottieMotion } from "./LottieMotion.tsx";
@@ -95,7 +94,6 @@ export function RequirementProfile({ request, profile, progress, onEdit, onCance
 
       <div className="template-profile-core">
         <div className="face-scan-stage" role="img" aria-label="人脸扫描与用户画像构建动画">
-          <LottieMotion src={MOTION.location} className="profile-location-motion" label="已识别目的地" loop={false} fallback={<Icon name="mapPin"/>}/>
           <LottieMotion src="/animations/face-scanning.json" className="face-scan-lottie" label="正在构建用户画像" fallback={<Icon name="sparkles"/>}/>
           <div className="template-orbit-tags" aria-label="已识别的用户画像标签">
             {tags.slice(0, 6).map((tag, index) => <span className={`tag-${index + 1}`} key={`${tag}-${index}`}>{tag}</span>)}
