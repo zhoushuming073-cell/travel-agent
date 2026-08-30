@@ -45,6 +45,17 @@ export interface CrowdRiskPrediction {
   avoidWindow: string;
   peakWindow: string;
   action: string;
+  comparableDateAnalysis?: { sampleCount: number; weightedRelevance: number; evidenceIds: string[]; note: string };
+}
+
+export interface ComparableCrowdSignal {
+  sampleDate?: string | null;
+  sampleTime?: string | null;
+  evidenceId: string;
+  sourceTier?: string;
+  queueSeverity?: "low" | "medium" | "high" | "unknown";
+  weatherSimilarity?: number;
+  isHoliday?: boolean;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)));
@@ -77,6 +88,61 @@ export function dateCrowdPressure(dateIso: string) {
   if ((monthDay >= "07-10" && monthDay <= "08-25") && weekend) return { impact: 17, label: "暑期周末" };
   if (monthDay >= "07-10" && monthDay <= "08-25") return { impact: 8, label: "暑期工作日" };
   return { impact: weekend ? 12 : 0, label: weekend ? "普通周末" : "普通工作日" };
+}
+
+function seasonBucket(dateIso: string) {
+  const month = Number(dateIso.slice(5, 7));
+  return month <= 2 || month === 12 ? "winter" : month <= 5 ? "spring" : month <= 8 ? "summer" : "autumn";
+}
+
+function holidayClass(dateIso: string) {
+  const pressure = dateCrowdPressure(dateIso);
+  return pressure.impact >= 25 ? "golden-week" : pressure.impact >= 17 ? "holiday" : pressure.impact >= 8 ? "weekend-or-peak" : "weekday";
+}
+
+export function comparableDateRelevance(targetDate: string, sampleDate?: string | null, weatherSimilarity = 0.5) {
+  if (!sampleDate || !/^\d{4}-\d{2}-\d{2}$/.test(sampleDate)) return 0.22;
+  const target = new Date(`${targetDate}T12:00:00+08:00`);
+  const sample = new Date(`${sampleDate}T12:00:00+08:00`);
+  if (!Number.isFinite(target.getTime()) || !Number.isFinite(sample.getTime())) return 0.22;
+  const sameHolidayClass = holidayClass(targetDate) === holidayClass(sampleDate);
+  const sameWeekendClass = [0, 6].includes(target.getDay()) === [0, 6].includes(sample.getDay());
+  const sameSeason = seasonBucket(targetDate) === seasonBucket(sampleDate);
+  const ageDays = Math.abs(target.getTime() - sample.getTime()) / 86_400_000;
+  const recency = Math.max(0.25, Math.exp(-ageDays / 520));
+  const score = 0.12 + (sameHolidayClass ? 0.32 : 0) + (sameWeekendClass ? 0.16 : 0) + (sameSeason ? 0.18 : 0) + Math.max(0, Math.min(1, weatherSimilarity)) * 0.1 + recency * 0.12;
+  return Number(Math.max(0.05, Math.min(1, score)).toFixed(2));
+}
+
+export function calibrateCrowdWithResearch(base: CrowdRiskPrediction | null | undefined, targetDate: string, signals: ComparableCrowdSignal[]) {
+  if (!base || !signals?.length) return base;
+  const weighted = signals.map((signal) => ({ ...signal, relevance: comparableDateRelevance(targetDate, signal.sampleDate, signal.weatherSimilarity) }));
+  const totalWeight = weighted.reduce((sum, signal) => sum + signal.relevance, 0);
+  const severityValue = (severity: ComparableCrowdSignal["queueSeverity"]) => severity === "high" ? 82 : severity === "medium" ? 58 : severity === "low" ? 28 : 50;
+  const evidenceEstimate = weighted.reduce((sum, signal) => sum + severityValue(signal.queueSeverity) * signal.relevance, 0) / Math.max(0.01, totalWeight);
+  const influence = Math.min(0.38, totalWeight / (totalWeight + 3));
+  const score = clamp(base.score * (1 - influence) + evidenceEstimate * influence, 4, 98);
+  const averageRelevance = Number((totalWeight / weighted.length).toFixed(2));
+  const confidence = Math.min(0.9, Number((base.confidence + Math.min(0.16, totalWeight * 0.025)).toFixed(2)));
+  const halfBand = Math.max(7, Math.round((base.forecastBand.high - base.forecastBand.low) / 2 * (1 - Math.min(0.2, totalWeight * 0.03))));
+  return {
+    ...base,
+    score,
+    riskProbability: score,
+    label: labelFor(score),
+    confidence,
+    confidenceLabel: confidence >= 0.72 ? "较高" as const : confidence >= 0.55 ? "中等" as const : "较低" as const,
+    uncertainty: confidence >= 0.72 ? "low" as const : confidence >= 0.55 ? "medium" as const : "high" as const,
+    evidenceCoverage: clamp(base.evidenceCoverage + Math.min(22, totalWeight * 4), 0, 95),
+    forecastBand: { low: clamp(score - halfBand, 3, 97), high: clamp(score + halfBand, 3, 97) },
+    factors: [...new Set([...base.factors, "可比日期公开信号修正"])],
+    comparableDateAnalysis: {
+      sampleCount: weighted.length,
+      weightedRelevance: averageRelevance,
+      evidenceIds: weighted.map((signal) => signal.evidenceId),
+      note: "按节假日类型、星期属性、季节、天气相似度和时间距离加权；不是目标日实时人数",
+    },
+  };
 }
 
 function timeImpact(role: CrowdRole, minute: number) {
