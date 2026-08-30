@@ -617,70 +617,29 @@ async function weatherDirect(city: any, startDate: string, days: number) {
   const params = new URLSearchParams({
     latitude: String(city.lat), longitude: String(city.lng), timezone: "Asia/Shanghai",
     current: "temperature_2m,weather_code,wind_speed_10m",
-    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,sunrise,sunset",
     forecast_days: "16",
   });
   const raw = await fetchJson(`${OPEN_METEO}?${params}`, {}, 18000, "Open-Meteo 天气服务");
   const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
+  const forecast16 = (raw?.daily?.time || []).map((date: string, idx: number) => ({
+    date, quality: "forecast", weatherCode: raw.daily.weather_code[idx],
+    temperatureMax: raw.daily.temperature_2m_max[idx], temperatureMin: raw.daily.temperature_2m_min[idx],
+    precipitationProbability: raw.daily.precipitation_probability_max[idx], windSpeed: raw.daily.wind_speed_10m_max?.[idx],
+    sunrise: cleanText(raw.daily.sunrise?.[idx]).slice(11, 16) || null,
+    sunset: cleanText(raw.daily.sunset?.[idx]).slice(11, 16) || null,
+    source: "Open-Meteo",
+  }));
+  const byDate = new Map(forecast16.map((day: any) => [day.date, day]));
   const tripForecast = Array.from({ length: days }, (_, index) => {
     const date = addDays(startDate, index);
-    const idx = raw?.daily?.time?.indexOf(date) ?? -1;
-    if (idx < 0) return { date, quality: "unavailable", note: diffDays(today, date) > 15 ? "出行日期超过当前逐日预报范围；未用今日天气替代" : "该日期暂无逐日预报" };
-    return {
-      date, quality: "forecast", weatherCode: raw.daily.weather_code[idx],
-      temperatureMax: raw.daily.temperature_2m_max[idx], temperatureMin: raw.daily.temperature_2m_min[idx],
-      precipitationProbability: raw.daily.precipitation_probability_max[idx],
-      sunrise: cleanText(raw.daily.sunrise?.[idx]).slice(11, 16) || null,
-      sunset: cleanText(raw.daily.sunset?.[idx]).slice(11, 16) || null,
-      source: "Open-Meteo",
-    };
+    return byDate.get(date) || { date, quality: "unavailable", note: diffDays(today, date) > 15 ? "出行日期超过当前逐日预报范围；未用今日天气替代" : "该日期暂无逐日预报" };
   });
-  return { city: city.name, current: raw.current || {}, tripForecast, fetchedAt: new Date().toISOString(), source: "Open-Meteo" };
+  return { city: city.name, current: raw.current || {}, tripForecast, forecast16, fetchedAt: new Date().toISOString(), source: "Open-Meteo（未来 16 天）" };
 }
 
 async function weatherFor(city: any, startDate: string, days: number) {
-  const astronomicalPromise = weatherDirect(city, startDate, days).catch(() => null);
-  try {
-    const raw: any = await callMcp(WEATHER_MCP, "get_weather_forecast", {
-      latitude: Number(city.lat), longitude: Number(city.lng), days: Math.min(16, Math.max(3, days)),
-      hourly_vars: "temperature_2m,precipitation_probability,weather_code,wind_speed_10m",
-    }, { timeoutMs: 16000, cacheMs: 20 * 60 * 1000 });
-    const hourly = raw?.hourly || {};
-    const rows = (hourly.time || []).map((time: string, index: number) => ({
-      time, temperature: Number(hourly.temperature_2m?.[index]), precipitation: Number(hourly.precipitation_probability?.[index]),
-      code: Number(hourly.weather_code?.[index]), wind: Number(hourly.wind_speed_10m?.[index]),
-    }));
-    if (!rows.length) throw new Error("天气 MCP 未返回逐小时预报");
-    const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" });
-    const tripForecast = Array.from({ length: days }, (_, offset) => {
-      const date = addDays(startDate, offset);
-      const dayRows = rows.filter((row: any) => row.time.startsWith(date));
-      if (!dayRows.length) return { date, quality: "unavailable", note: diffDays(today, date) > 15 ? "出行日期超出当前逐日预报范围；未用今日天气替代" : "该日期暂时没有逐日预报" };
-      const temperatures = dayRows.map((row: any) => row.temperature).filter(Number.isFinite);
-      const precipitations = dayRows.map((row: any) => row.precipitation).filter(Number.isFinite);
-      const noon = dayRows.find((row: any) => row.time.endsWith("T12:00")) || dayRows[Math.floor(dayRows.length / 2)];
-      return {
-        date, quality: "forecast", weatherCode: Number(noon?.code || 0),
-        temperatureMax: Math.max(...temperatures), temperatureMin: Math.min(...temperatures),
-        precipitationProbability: precipitations.length ? Math.max(...precipitations) : 0,
-        source: "MCPMarket 天气查询 / Open-Meteo",
-      };
-    });
-    const astronomical: any = await astronomicalPromise;
-    const mergedForecast = tripForecast.map((day: any, index: number) => ({
-      ...day,
-      sunrise: astronomical?.tripForecast?.[index]?.sunrise || null,
-      sunset: astronomical?.tripForecast?.[index]?.sunset || null,
-    }));
-    return { city: city.name, current: astronomical?.current || {}, tripForecast: mergedForecast, fetchedAt: new Date().toISOString(), source: "MCPMarket 天气查询 + Open-Meteo 日照时间", mcpStatus: "ready" };
-  } catch (error: any) {
-    const fallback: any = await astronomicalPromise || await weatherDirect(city, startDate, days);
-    fallback.source = "Open-Meteo 直连兜底";
-    fallback.mcpStatus = "fallback";
-    fallback.mcpNote = cleanText(error?.message, "天气 MCP 暂不可用");
-    fallback.tripForecast = (fallback.tripForecast || []).map((day: any) => ({ ...day, source: day.quality === "forecast" ? "Open-Meteo 直连兜底" : day.source }));
-    return fallback;
-  }
+  return weatherDirect(city, startDate, days);
 }
 
 function category(tags: any) {
@@ -3212,7 +3171,7 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
     "● 正在进行必选景点实体消歧、父子景区去重和公开状态核验",
   ], [
     { id: "spots", label: "景点实体与常规开放信息", provider: providerBundle.spots.status === "ready" ? "Wikimedia / 高德 / OSM" : "未返回", state: providerBundle.spots.status === "ready" ? "success" : "error", detail: providerBundle.spots.error },
-    { id: "weather", label: "天气预报", provider: providerBundle.weather.status === "ready" ? "天气服务已返回" : "未返回", state: providerBundle.weather.status === "ready" ? "success" : "error", detail: providerBundle.weather.error },
+    { id: "weather", label: "天气预报", provider: providerBundle.weather.status === "ready" ? "Open-Meteo（未来 16 天）" : "未返回", state: providerBundle.weather.status === "ready" ? "success" : "error", detail: providerBundle.weather.error },
     { id: "routing", label: "公共交通矩阵", provider: "候选核验后开始", state: "waiting" },
     { id: "hotels", label: "住宿候选与参考价", provider: providerBundle.hotels.status === "ready" ? "高德 / 酒店 MCP" : "未返回", state: providerBundle.hotels.status === "ready" ? "success" : "unavailable", detail: providerBundle.hotels.error },
     { id: "crowd", label: "拥挤风险预测", provider: "等待趋势和天气输入", state: "waiting" },

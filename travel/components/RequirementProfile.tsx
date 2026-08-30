@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { AnimationItem } from "lottie-web";
 import { deterministicProfileHints } from "../../worker/domain/profile-extraction.ts";
-import faceScanAnimation from "../assets/face-scanning.json";
+import { MOTION } from "../lib/animationCatalog.ts";
 import type { PlanningProgress, TravelProfile } from "../types.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { LottieMotion } from "./LottieMotion.tsx";
 
 interface Props {
   request: string;
@@ -35,47 +34,6 @@ function unknownLabel(input: string): string {
   return labels[input] ?? input;
 }
 
-function useReducedMotion() {
-  const [reduced, setReduced] = useState(false);
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const sync = () => setReduced(media.matches);
-    sync();
-    media.addEventListener("change", sync);
-    return () => media.removeEventListener("change", sync);
-  }, []);
-  return reduced;
-}
-
-function FaceScanAnimation({ reducedMotion }: { reducedMotion: boolean }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let animation: AnimationItem | null = null;
-    let disposed = false;
-
-    void import("lottie-web").then(({ default: lottie }) => {
-      if (disposed || !containerRef.current) return;
-      animation = lottie.loadAnimation({
-        container: containerRef.current,
-        renderer: "svg",
-        loop: !reducedMotion,
-        autoplay: !reducedMotion,
-        animationData: structuredClone(faceScanAnimation),
-        rendererSettings: { preserveAspectRatio: "xMidYMid meet" },
-      });
-      if (reducedMotion) animation.goToAndStop(55, true);
-    });
-
-    return () => {
-      disposed = true;
-      animation?.destroy();
-    };
-  }, [reducedMotion]);
-
-  return <div ref={containerRef} className="face-scan-lottie" aria-hidden="true"/>;
-}
-
 function FactPanel({ title, rows, className = "" }: { title: string; rows: FactRow[]; className?: string }) {
   return <section className={`template-info-panel ${className}`.trim()}>
     <h3>{title}</h3>
@@ -84,7 +42,6 @@ function FactPanel({ title, rows, className = "" }: { title: string; rows: FactR
 }
 
 export function RequirementProfile({ request, profile, progress, onEdit, onCancel }: Props) {
-  const reducedMotion = useReducedMotion();
   const hints = deterministicProfileHints(request) as unknown as Partial<TravelProfile>;
   const effective: Partial<TravelProfile> = profile ?? hints;
   const preferences = Array.isArray(effective.preferences) ? effective.preferences : [];
@@ -138,7 +95,8 @@ export function RequirementProfile({ request, profile, progress, onEdit, onCance
 
       <div className="template-profile-core">
         <div className="face-scan-stage" role="img" aria-label="人脸扫描与用户画像构建动画">
-          <FaceScanAnimation reducedMotion={reducedMotion}/>
+          <LottieMotion src={MOTION.location} className="profile-location-motion" label="已识别目的地" loop={false} fallback={<Icon name="mapPin"/>}/>
+          <LottieMotion src="/animations/face-scanning.json" className="face-scan-lottie" label="正在构建用户画像" fallback={<Icon name="sparkles"/>}/>
           <div className="template-orbit-tags" aria-label="已识别的用户画像标签">
             {tags.slice(0, 6).map((tag, index) => <span className={`tag-${index + 1}`} key={`${tag}-${index}`}>{tag}</span>)}
           </div>

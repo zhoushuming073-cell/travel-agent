@@ -270,6 +270,10 @@ export interface WeatherDay {
   temperatureMin?: number;
   temperatureMax?: number;
   precipitationProbability?: number;
+  windSpeed?: number;
+  sunrise?: string | null;
+  sunset?: string | null;
+  source?: string;
   note?: string;
   fetchedAt?: string;
 }
@@ -322,7 +326,7 @@ export interface ItineraryPlan {
   daysPlan: ItineraryDay[];
   evaluation?: PlanEvaluation;
   candidatePool?: CandidatePoolItem[];
-  weather?: { source?: string; fetchedAt?: string };
+  weather?: { source?: string; fetchedAt?: string; forecast16?: WeatherDay[] };
   hotelPlan?: {
     candidates?: Array<{
       name?: string;

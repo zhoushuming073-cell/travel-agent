@@ -965,3 +965,45 @@ body { background: #f6f7f5; }
 @media (prefers-reduced-motion: reduce) {
   .face-scan-lottie { opacity: .92; }.template-orbit-tags span { transition: none; }
 }
+
+/* State-aware Lottie motion: assets load only when their owning view is mounted. */
+.lottie-motion { display: inline-grid; place-items: center; position: relative; overflow: hidden; flex: 0 0 auto; }
+.lottie-canvas { width: 100%; height: 100%; display: block; }
+.lottie-canvas svg { width: 100% !important; height: 100% !important; display: block; }
+.lottie-fallback { display: grid; place-items: center; position: absolute; inset: 0; color: currentColor; }
+.lottie-motion.is-ready > .lottie-fallback { display: none; }
+.sidebar-brand .travel-logo-mark { display: grid; place-items: center; overflow: hidden; background: #ecf8f3; }
+.sidebar-plane-motion { width: 42px; height: 34px; margin: -2px -4px; color: var(--brand); }
+.sidebar-plane-motion .lottie-canvas { transform: scale(1.34); }
+.step-success-motion { width: 25px; height: 25px; margin: -1px; border-radius: 50%; background: #1f8664; }
+.react-stage-progress li.done i { overflow: visible; }
+.research-motion { width: 132px; height: 92px; position: absolute; right: 62px; top: -18px; }
+.agent-stage-head.centered { min-height: 78px; position: relative; padding-right: 200px; }
+.agent-live-log.with-motion { grid-template-columns: 84px minmax(0,1fr); align-items: center; }
+.agent-live-log.with-motion > div { display: grid; gap: 7px; }
+.loading-files-motion { width: 76px; height: 52px; }
+.route-planning-motion { width: 92%; height: 74%; position: absolute; inset: 4% 4% auto; opacity: .29; pointer-events: none; }
+.route-map-core,.planning-route-map .route-node { z-index: 2; }
+.profile-location-motion { width: 60px; height: 60px; position: absolute; left: calc(50% - 30px); top: 44%; z-index: 3; filter: drop-shadow(0 5px 12px rgba(12,151,105,.15)); }
+.face-scan-lottie .lottie-canvas { width: 100%; height: 100%; }
+.chatbot-motion { width: 34px; height: 34px; border-radius: 50%; }
+.composer-spark { overflow: visible; }
+.trend-fire-motion { width: 20px; height: 22px; margin-right: 5px; vertical-align: middle; }
+.ready-trend-card header b { display: inline-flex; align-items: center; }
+.weather-forecast-row.sixteen-day { grid-template-columns: repeat(16,minmax(92px,1fr)) !important; overflow-x: auto; scroll-snap-type: x proximity; overscroll-behavior-inline: contain; }
+.weather-forecast-row.sixteen-day article { min-width: 92px; scroll-snap-align: start; }
+.weather-forecast-row.sixteen-day article.trip-day:not(.active) { background: #f6faf8; box-shadow: inset 0 -2px #8ab9a7; }
+.weather-motion { width: 32px; height: 32px; }
+.weather-forecast-row i .weather-motion svg { width: 100% !important; height: 100% !important; }
+
+@media (max-width: 760px) {
+  .agent-stage-head.centered { min-height: 0; padding-right: 0; }
+  .research-motion { width: 88px; height: 64px; position: static; align-self: center; }
+  .agent-live-log.with-motion { grid-template-columns: 58px minmax(0,1fr); }
+  .loading-files-motion { width: 54px; height: 42px; }
+  .profile-location-motion { width: 48px; height: 48px; left: calc(50% - 24px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lottie-motion { animation: none !important; }
+}

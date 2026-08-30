@@ -1,7 +1,9 @@
 "use client";
 
 import type { PlanningProgress, TravelProfile, UiPlan } from "../types.ts";
+import { MOTION } from "../lib/animationCatalog.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { LottieMotion } from "./LottieMotion.tsx";
 
 interface Props {
   profile: TravelProfile | null;
@@ -62,6 +64,7 @@ export function PlanningVisualization({ profile, progress, plans = [], onCancel 
       </ol>
 
       <div className="planning-route-map">
+        <LottieMotion src={completed ? MOTION.success : MOTION.routePlanning} className="route-planning-motion" label={completed ? "三套路线已生成" : "DeepSeek V4 Pro 正在进行路线决策"} loop={!completed} fallback={<Icon name={completed ? "check" : "sparkles"}/>}/>
         <div className="route-map-core"><Icon name="sparkles"/><strong>多约束路线引擎</strong><span>{progress?.title ?? "正在优化路线顺序……"}</span></div>
         {required.slice(0, 4).map((name, index) => <span className={`route-node node-${index + 1}`} key={name}><Icon name="mapPin"/>{name}</span>)}
         {!required.length ? <span className="route-node node-1"><Icon name="mapPin"/>候选景点</span> : null}

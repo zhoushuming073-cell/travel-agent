@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { WorkspaceSnapshot } from "../types.ts";
+import { MOTION } from "../lib/animationCatalog.ts";
 import { Icon } from "./Icon.tsx";
+import { LottieMotion } from "./LottieMotion.tsx";
 
 interface Props {
   workspaces: WorkspaceSnapshot[];
@@ -76,7 +78,7 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
   return <>
     <aside className={`travel-sidebar react-sidebar${collapsed ? " is-collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`} aria-label="旅行工作区导航">
       <a className="brand sidebar-brand" href="/travel/" aria-label="智能旅游助手首页">
-        <span className="brand-mark travel-logo-mark" aria-hidden="true"><Icon name="mapPin"/><i></i></span>
+        <span className="brand-mark travel-logo-mark"><LottieMotion src={MOTION.paperPlane} className="sidebar-plane-motion" label="智能旅游助手" loop={false} fallback={<Icon name="send"/>}/></span>
         <span className="sidebar-label"><b>智能旅游助手</b><small>AI TRAVEL ASSISTANT</small></span>
       </a>
       <button className="sidebar-collapse" onClick={onToggle} type="button" aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button>

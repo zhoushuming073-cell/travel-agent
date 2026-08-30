@@ -5,10 +5,12 @@ import type { AgentEvent, PlanningProgress, UiPlan } from "../types.ts";
 import { AgentActivity } from "./AgentActivity.tsx";
 import { EvidencePanel } from "./EvidencePanel.tsx";
 import { ExecutionMode } from "./ExecutionMode.tsx";
-import { Icon, type IconName } from "./Icon.tsx";
+import { Icon } from "./Icon.tsx";
+import { MOTION, weatherMotion } from "../lib/animationCatalog.ts";
 import { ItineraryTimeline } from "./ItineraryTimeline.tsx";
 import { MapPanel } from "./MapPanel.tsx";
 import { SpotImage } from "./SpotImage.tsx";
+import { LottieMotion } from "./LottieMotion.tsx";
 import { loadProviders, type ProviderStatusResponse } from "../services/planningApi.ts";
 
 interface Props {
@@ -23,13 +25,14 @@ interface Props {
 }
 
 function paceLabel(value?: string): string { return value === "relax" || value === "slow" ? "轻松" : value === "tight" ? "紧凑" : "适中"; }
-function weatherIcon(code?: number): IconName { return code === undefined ? "cloud" : code <= 1 ? "sun" : code <= 3 ? "cloudSun" : code >= 51 ? "rain" : "cloud"; }
 function variantLabel(id: string): string { return id === "relax" ? "舒适版" : id === "hot" ? "精华版" : "错峰版"; }
 function stabilityLabel(score?: number): string { return score === undefined ? "暂未核验" : score <= 35 ? "较稳定" : score <= 65 ? "一般" : "需关注"; }
 
 function Weather({ plan, selectedDay }: { plan: UiPlan; selectedDay: number | null }) {
   const selected = plan.daysPlan.find((day) => day.day === selectedDay) ?? plan.daysPlan[0];
-  return <section className="ready-weather-card"><header><b>{plan.city} · 逐日天气</b><span>超过预报范围则保持待核验</span></header><div className="weather-forecast-row">{plan.daysPlan.map((day) => { const weather = day.weather; return <article className={selected?.day === day.day ? "active" : ""} key={day.day}><small>第 {day.day} 天</small><i><Icon name={weatherIcon(weather?.weatherCode)}/></i><strong>{weather?.quality === "forecast" ? `${weather.temperatureMin ?? "—"}° / ${weather.temperatureMax ?? "—"}°` : "待核验"}</strong><span>{weather?.quality === "forecast" ? `降雨 ${weather.precipitationProbability ?? "—"}%` : "未用今日天气代替"}</span></article>; })}</div>{selected && <p className="weather-note"><b>{selected.date}</b>{selected.weather?.quality === "forecast" ? Number(selected.weather.precipitationProbability ?? 0) >= 60 ? "降雨概率较高，建议保留室内备选。" : "当前预报未触发强降雨替换规则。" : "出行日期可能超过当前预报范围，临近出发时再复核。"}</p>}</section>;
+  const forecast = plan.weather?.forecast16?.length ? plan.weather.forecast16 : plan.daysPlan.map((day) => day.weather).filter(Boolean);
+  const tripDates = new Set(plan.daysPlan.map((day) => day.date));
+  return <section className="ready-weather-card"><header><b>{plan.city} · Open-Meteo 未来 16 天</b><span>{plan.weather?.fetchedAt ? `更新于 ${new Date(plan.weather.fetchedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : "超过预报范围则保持待核验"}</span></header><div className="weather-forecast-row sixteen-day">{forecast.map((weather) => { const tripDate = tripDates.has(weather?.date ?? ""); const selectedDate = selected?.date === weather?.date; return <article className={`${selectedDate ? "active " : ""}${tripDate ? "trip-day" : ""}`.trim()} key={weather?.date}><small>{weather?.date?.slice(5).replace("-", "/") ?? "日期待定"}{tripDate ? " · 行程" : ""}</small><i><LottieMotion src={weatherMotion(weather?.weatherCode, false, weather?.windSpeed)} className="weather-motion" label={`${weather?.date ?? ""}天气图标`} fallback={<Icon name="cloud"/>}/></i><strong>{weather?.quality === "forecast" ? `${weather.temperatureMin ?? "—"}° / ${weather.temperatureMax ?? "—"}°` : "待核验"}</strong><span>{weather?.quality === "forecast" ? `降雨 ${weather.precipitationProbability ?? "—"}%` : "尚不可预报"}</span></article>; })}</div>{selected && <p className="weather-note"><b>{selected.date}</b>{selected.weather?.quality === "forecast" ? Number(selected.weather.precipitationProbability ?? 0) >= 60 ? "降雨概率较高，建议保留室内备选。" : "当前预报未触发强降雨替换规则。" : "出行日期可能超过 Open-Meteo 未来 16 天窗口，临近出发时再复核。"}</p>}</section>;
 }
 
 function Crowd({ plan }: { plan: UiPlan }) {
@@ -59,7 +62,7 @@ function Crowd({ plan }: { plan: UiPlan }) {
 function Trends({ plan }: { plan: UiPlan }) {
   const facts = plan.travelFacts?.filter((fact) => fact.field === "趋势热度" || fact.field === "时令适配") ?? [];
   const rows = [...new Map(facts.map((fact) => [fact.subject, fact.subject])).keys()].slice(0, 6);
-  return <section className="ready-trend-card"><header><b>近期关注 × 时令报道信号</b><span>均为公开网络弱信号，不代表实时客流或到访日物候</span></header>{rows.length ? rows.map((subject) => { const hot = facts.find((fact) => fact.subject === subject && fact.field === "趋势热度"); const season = facts.find((fact) => fact.subject === subject && fact.field === "时令适配"); const value = (fact?: typeof hot) => typeof fact?.value === "object" && fact.value ? fact.value as Record<string, unknown> : {}; const hotScore = hot?.status === "predicted" ? Number(value(hot).score) : null; const seasonScore = season?.status === "predicted" ? Number(value(season).score) : null; const sourceUrl = season?.sourceUrl || hot?.sourceUrl; return <article key={subject}><div><strong>{subject}</strong><small>{seasonScore != null ? String(value(season).label ?? "近期时令报道信号") : "没有可用于到访日的时令报道信号"}</small></div><span><b>{hotScore != null ? hotScore : "—"}</b><small>关注信号</small></span><span><b>{seasonScore != null ? seasonScore : "—"}</b><small>时令信号</small></span>{sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer">来源</a> : <em>暂无来源</em>}</article>; }) : <p className="empty-evidence">当前没有可归因到路线景点的趋势或时令报道信号。</p>}</section>;
+  return <section className="ready-trend-card"><header><b><LottieMotion src={MOTION.fire} className="trend-fire-motion" label="近期关注信号"/>近期关注 × 时令报道信号</b><span>均为公开网络弱信号，不代表实时客流或到访日物候</span></header>{rows.length ? rows.map((subject) => { const hot = facts.find((fact) => fact.subject === subject && fact.field === "趋势热度"); const season = facts.find((fact) => fact.subject === subject && fact.field === "时令适配"); const value = (fact?: typeof hot) => typeof fact?.value === "object" && fact.value ? fact.value as Record<string, unknown> : {}; const hotScore = hot?.status === "predicted" ? Number(value(hot).score) : null; const seasonScore = season?.status === "predicted" ? Number(value(season).score) : null; const sourceUrl = season?.sourceUrl || hot?.sourceUrl; return <article key={subject}><div><strong>{subject}</strong><small>{seasonScore != null ? String(value(season).label ?? "近期时令报道信号") : "没有可用于到访日的时令报道信号"}</small></div><span><b>{hotScore != null ? hotScore : "—"}</b><small>关注信号</small></span><span><b>{seasonScore != null ? seasonScore : "—"}</b><small>时令信号</small></span>{sourceUrl ? <a href={sourceUrl} target="_blank" rel="noreferrer">来源</a> : <em>暂无来源</em>}</article>; }) : <p className="empty-evidence">当前没有可归因到路线景点的趋势或时令报道信号。</p>}</section>;
 }
 
 function Hotels({ plan }: { plan: UiPlan }) {
