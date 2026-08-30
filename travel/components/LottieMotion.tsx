@@ -3,24 +3,40 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AnimationItem } from "lottie-web";
 
+type LottieRuntime = typeof import("lottie-web/build/player/lottie_light");
+type FallbackMode = "loading-and-error" | "error-only";
+
+let runtimePromise: Promise<LottieRuntime> | null = null;
+
+export function preloadLottieRuntime(): Promise<LottieRuntime> {
+  runtimePromise ??= import("lottie-web/build/player/lottie_light");
+  return runtimePromise;
+}
+
+if (typeof window !== "undefined") void preloadLottieRuntime();
+
 interface Props {
   src: string;
   className?: string;
   label?: string;
   loop?: boolean;
   fallback?: ReactNode;
+  fallbackMode?: FallbackMode;
 }
 
-export function LottieMotion({ src, className = "", label, loop = true, fallback }: Props) {
+export function LottieMotion({ src, className = "", label, loop = true, fallback, fallbackMode = "loading-and-error" }: Props) {
   const containerRef = useRef<HTMLSpanElement>(null);
-  const [ready, setReady] = useState(false);
+  const [readySrc, setReadySrc] = useState<string | null>(null);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const ready = readySrc === src;
+  const failed = failedSrc === src;
 
   useEffect(() => {
     let animation: AnimationItem | null = null;
     let disposed = false;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    void import("lottie-web/build/player/lottie_light").then(({ default: lottie }) => {
+    void preloadLottieRuntime().then(({ default: lottie }) => {
       if (disposed || !containerRef.current) return;
       animation = lottie.loadAnimation({
         container: containerRef.current,
@@ -32,10 +48,20 @@ export function LottieMotion({ src, className = "", label, loop = true, fallback
       });
       animation.addEventListener("DOMLoaded", () => {
         if (disposed) return;
-        setReady(true);
+        setFailedSrc(null);
+        setReadySrc(src);
         if (reducedMotion) animation?.goToAndStop(0, true);
       });
-    }).catch(() => undefined);
+      animation.addEventListener("data_failed", () => {
+        if (disposed) return;
+        setReadySrc(null);
+        setFailedSrc(src);
+      });
+    }).catch(() => {
+      if (disposed) return;
+      setReadySrc(null);
+      setFailedSrc(src);
+    });
 
     return () => {
       disposed = true;
@@ -43,8 +69,10 @@ export function LottieMotion({ src, className = "", label, loop = true, fallback
     };
   }, [loop, src]);
 
-  return <span className={`lottie-motion ${ready ? "is-ready" : ""} ${className}`.trim()} role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
-    {!ready && fallback ? <span className="lottie-fallback">{fallback}</span> : null}
+  const showFallback = Boolean(fallback) && (failed || !ready && fallbackMode === "loading-and-error");
+
+  return <span className={`lottie-motion ${ready ? "is-ready" : failed ? "is-error" : "is-loading"} ${className}`.trim()} role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
+    {showFallback ? <span className="lottie-fallback">{fallback}</span> : null}
     <span ref={containerRef} className="lottie-canvas"/>
   </span>;
 }

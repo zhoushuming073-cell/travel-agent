@@ -86,7 +86,7 @@ export function DataAcquisition({ request, profile, progress, onCancel }: Props)
     <section className="agent-stage-panel panel data-agent-panel">
       <div className="agent-stage-head centered research-stage-head">
         <div><span className="section-code">STAGE 2 · RESEARCH</span><h2>AI 正在搜集与核验旅行信息</h2><p>按照真实任务返回顺序逐项取证，每张卡至少停留 {MIN_CARD_DWELL_MS / 1000} 秒。</p></div>
-        <LottieMotion src={MOTION.search} className="research-motion" label="正在联网搜索旅行信息" fallback={<Icon name="search"/>}/>
+        <LottieMotion src={MOTION.search} className="research-motion" label="正在联网搜索旅行信息" fallbackMode="error-only" fallback={<Icon name="search"/>}/>
         {onCancel ? <button className="task-cancel" type="button" onClick={onCancel}>取消规划</button> : null}
       </div>
 

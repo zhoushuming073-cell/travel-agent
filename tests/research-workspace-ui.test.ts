@@ -31,4 +31,21 @@ test("research stage uses paced evidence cards and never swaps to a success anim
   assert.match(research, /不是预制搜索结果/);
   assert.match(research, /source\?\.provider/);
   assert.match(research, /source\?\.detail/);
+  assert.match(research, /fallbackMode="error-only"/);
+});
+
+test("primary stage animations never flash a loading placeholder", async () => {
+  const [profile, motion, styles, layout] = await Promise.all([
+    source("travel/components/RequirementProfile.tsx"),
+    source("travel/components/LottieMotion.tsx"),
+    source("app/travel/[[...tripId]]/styles/motion.css"),
+    source("app/layout.tsx"),
+  ]);
+  assert.match(profile, /face-scanning\.json[^\n]+fallbackMode="error-only"/);
+  assert.match(motion, /fallbackMode === "loading-and-error"/);
+  assert.match(motion, /readySrc === src/);
+  assert.match(styles, /\.lottie-canvas[^}]+visibility:\s*hidden/);
+  assert.match(styles, /\.lottie-motion\.is-ready > \.lottie-canvas[^}]+visibility:\s*visible/);
+  assert.match(layout, /preload[^\n]+face-scanning\.json/);
+  assert.match(layout, /preload[^\n]+search\.json/);
 });

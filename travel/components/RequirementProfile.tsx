@@ -94,7 +94,7 @@ export function RequirementProfile({ request, profile, progress, onEdit, onCance
 
       <div className="template-profile-core">
         <div className="face-scan-stage" role="img" aria-label="人脸扫描与用户画像构建动画">
-          <LottieMotion src="/animations/face-scanning.json" className="face-scan-lottie" label="正在构建用户画像" fallback={<Icon name="sparkles"/>}/>
+          <LottieMotion src="/animations/face-scanning.json" className="face-scan-lottie" label="正在构建用户画像" fallbackMode="error-only" fallback={<Icon name="sparkles"/>}/>
           <div className="template-orbit-tags" aria-label="已识别的用户画像标签">
             {tags.slice(0, 6).map((tag, index) => <span className={`tag-${index + 1}`} key={`${tag}-${index}`}>{tag}</span>)}
           </div>

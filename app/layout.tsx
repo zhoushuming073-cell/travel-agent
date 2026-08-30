@@ -31,6 +31,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
+      <head>
+        <link rel="preload" href="/animations/face-scanning.json" as="fetch" type="application/json" crossOrigin="anonymous"/>
+        <link rel="preload" href="/animations/search.json" as="fetch" type="application/json" crossOrigin="anonymous"/>
+      </head>
       <body>{children}</body>
     </html>
   );
