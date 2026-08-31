@@ -14,6 +14,12 @@ export type AiFailureCode =
 export const YUANJING_CHAT_COMPLETIONS =
   "https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions";
 
+// Yuanjing currently reports QPM throttling when planning calls are made in a
+// short burst. Keep the circuit slightly longer than one minute so the durable
+// stage retry performs a real second model call instead of immediately falling
+// into deterministic recovery while the local circuit is still open.
+export const AI_RATE_LIMIT_COOLDOWN_MS = 65_000;
+
 const DEFAULT_MODELS: Record<AiPurpose, string[]> = {
   extract: ["deepseek-v4-flash"],
   // The competition document fixes the Pro model id below. Flash remains an
@@ -99,7 +105,7 @@ export function openModelCircuit(endpoint: string, model: string, error: unknown
   const durations: Record<AiFailureCode, number> = {
     MODEL_NOT_FOUND: 6 * 60 * 60 * 1000,
     UNAUTHORIZED: 60 * 60 * 1000,
-    RATE_LIMITED: 2 * 60 * 1000,
+    RATE_LIMITED: AI_RATE_LIMIT_COOLDOWN_MS,
     PROVIDER_UNAVAILABLE: 60 * 1000,
     NETWORK_ERROR: 30 * 1000,
     TIMEOUT: 60 * 1000,

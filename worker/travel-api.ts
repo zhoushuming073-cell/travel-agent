@@ -18,6 +18,7 @@ import {
   aiEndpoint,
   aiModelCandidates,
   aiPrimaryModel,
+  AI_RATE_LIMIT_COOLDOWN_MS,
   classifyAiFailure,
   closeModelCircuit,
   modelFamily,
@@ -3553,7 +3554,7 @@ async function advancePlanningJob(jobId: string, env: any) {
     const progress = await progressForStage(jobId, stage, envelope, [`! 本阶段第 ${attempts} 次调用失败，将从检查点自动重试`, `! ${message}`]);
     await updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), attemptCount: Number(job.attemptCount || 0) + 1, progress });
     await addTravelJobEvent({ jobId, eventType: "stage_retry", step: stage, message: `${stageLabels[stage] || stage}将在检查点重试`, detail: { attempts, limit, error: message }, createdAt: Date.now() });
-    return { status: "working", currentStep: stage, retryable: true, retryAfterMs: /429|频繁|额度/.test(message) ? 60_000 : Math.min(60_000, attempts * 10_000), progress };
+    return { status: "working", currentStep: stage, retryable: true, retryAfterMs: /429|频繁|额度/.test(message) ? AI_RATE_LIMIT_COOLDOWN_MS + 5_000 : Math.min(60_000, attempts * 10_000), progress };
   }
 }
 

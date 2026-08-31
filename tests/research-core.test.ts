@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyAiFailure, closeModelCircuit, modelCircuitState, openModelCircuit } from "../worker/domain/model-routing.ts";
+import { AI_RATE_LIMIT_COOLDOWN_MS, classifyAiFailure, closeModelCircuit, modelCircuitState, openModelCircuit } from "../worker/domain/model-routing.ts";
 import { createAdaptiveResearchBudget, prioritizeResearchGaps, researchUtility, shouldContinueResearch } from "../worker/domain/research-budget.ts";
 import { deduplicateEvidence, scoreResearchEvidence, synthesizeFact } from "../worker/domain/research-evidence.ts";
 import { buildResearchGapMap, deterministicResearchRequests } from "../worker/domain/research-planner.ts";
@@ -25,6 +25,16 @@ test("model-not-found opens a long circuit instead of multiplying identical call
   assert.equal(modelCircuitState(endpoint, model, 2_000)?.code, "MODEL_NOT_FOUND");
   closeModelCircuit(endpoint, model);
   assert.equal(modelCircuitState(endpoint, model, 2_000), null);
+});
+
+test("rate-limited Yuanjing calls reopen before the durable 70-second retry", () => {
+  const endpoint = "https://example.test/chat/completions";
+  const model = "deepseek-v4-flash";
+  const opened = openModelCircuit(endpoint, model, new Error("429 QPM限流"), 10_000);
+  assert.equal(opened.code, "RATE_LIMITED");
+  assert.equal(opened.until, 10_000 + AI_RATE_LIMIT_COOLDOWN_MS);
+  assert.equal(modelCircuitState(endpoint, model, 10_000 + AI_RATE_LIMIT_COOLDOWN_MS - 1)?.code, "RATE_LIMITED");
+  assert.equal(modelCircuitState(endpoint, model, 10_000 + AI_RATE_LIMIT_COOLDOWN_MS), null);
 });
 
 test("research budget grows with task complexity but remains protected by a hard cap", () => {
