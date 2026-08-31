@@ -17,6 +17,7 @@ interface Env {
   AI_REPAIR_FALLBACK_MODEL?: string;
   AI_EXPLAIN_MODEL?: string;
   AI_COMPATIBLE_MODEL_FALLBACKS?: string;
+  AI_SKIP_MODELS?: string;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
   DEEPSEEK_EXTRACT_MODEL?: string;

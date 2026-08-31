@@ -52,8 +52,9 @@ export function aiModelCandidates(env: Record<string, unknown>, purpose: AiPurpo
     explain: [env.AI_EXPLAIN_MODEL, env.DEEPSEEK_MODEL, env.AI_PLANNER_MODEL, env.DEEPSEEK_PLANNER_MODEL],
   };
   const sharedFallbacks = clean(env.AI_COMPATIBLE_MODEL_FALLBACKS).split(/[,，;\s]+/).filter(Boolean);
+  const skipped = new Set(clean(env.AI_SKIP_MODELS).split(/[,，;\s]+/).filter(Boolean));
   return [...new Set([...configured[purpose].map(clean).filter(Boolean), ...sharedFallbacks, ...DEFAULT_MODELS[purpose]])]
-    .filter((model) => !/^glm(?:-|$)/i.test(model));
+    .filter((model) => !/^glm(?:-|$)/i.test(model) && !skipped.has(model));
 }
 
 export function aiPrimaryModel(env: Record<string, unknown>, purpose: AiPurpose) {

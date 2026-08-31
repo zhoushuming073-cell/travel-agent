@@ -178,7 +178,10 @@ async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 18000,
         continue;
       }
       let detail = "";
-      try { detail = cleanText(JSON.parse(text)?.error?.message || JSON.parse(text)?.reason); } catch { detail = cleanText(text).slice(0, 160); }
+      try {
+        const parsed = JSON.parse(text);
+        detail = cleanText(parsed?.error?.message || parsed?.reason || parsed?.msg || parsed?.message || (parsed?.code != null ? `code ${parsed.code}` : ""));
+      } catch { detail = cleanText(text).slice(0, 160); }
       if (response.status === 429) {
         const error = `${source}请求过于频繁（429）${detail ? `：${detail}` : "，请稍后重试"}`;
         await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error, rateLimited: true });
@@ -304,8 +307,8 @@ function timeToMinutes(text: unknown, fallback: number) {
   return match ? clamp(Number(match[1]) * 60 + Number(match[2]), 0, 1439) : fallback;
 }
 
-function list(value: unknown) {
-  return Array.isArray(value) ? value.map(item => cleanText(item)).filter(Boolean) : [];
+function list<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? value.filter((item): item is T => item !== null && item !== undefined && item !== "") : [];
 }
 
 function normalizeName(name: unknown) {
@@ -2673,6 +2676,69 @@ export function recoverPlannerVariant(profile: any, knowledge: any, variantIndex
   };
 }
 
+export function enforceRequiredCoverage(draft: any, knowledge: any) {
+  const requiredSpots = list(knowledge?.spots).filter((spot: any) => spot.requiredByUser && cleanText(spot.id));
+  const spotMap = new Map(list(knowledge?.spots).map((spot: any) => [cleanText(spot.id), spot]));
+  const matrix = knowledge?.trafficMatrix;
+  const changes: any[] = [];
+  if (!requiredSpots.length) return { replaced: 0, rebuilt: 0, changes };
+
+  const legMinutes = (fromId: string, toId: string) => {
+    if (!fromId || !toId || fromId === toId) return 0;
+    const leg = list(matrix?.legs).find((item: any) => (item.fromId === fromId && item.toId === toId) || (item.fromId === toId && item.toId === fromId));
+    return Number(leg?.durationMin || 45);
+  };
+
+  for (let variantIndex = 0; variantIndex < list(draft?.variants).length; variantIndex += 1) {
+    let variant = draft.variants[variantIndex];
+    const selected = new Set(list(variant?.days).flatMap((day: any) => list(day.activities).map((activity: any) => cleanText(activity.spotId)).filter(Boolean)));
+    let missing = requiredSpots.filter((spot: any) => !selected.has(spot.id));
+    for (const required of missing) {
+      const candidates = list(variant?.days).flatMap((day: any) => list(day.activities).map((activity: any) => ({ day, activity, spot: spotMap.get(cleanText(activity.spotId)) })))
+        .filter((entry: any) => entry.activity?.spotId && !entry.spot?.requiredByUser && !["meal-landmark", "nightscape"].includes(cleanText(entry.spot?.timeRole)))
+        .sort((left: any, right: any) => {
+          const score = (entry: any) => {
+            const neighborIds = list(entry.day?.activities).map((activity: any) => cleanText(activity.spotId)).filter((id: string) => id && id !== cleanText(entry.activity.spotId));
+            const proximity = neighborIds.length ? Math.min(...neighborIds.map((id: string) => legMinutes(required.id, id))) : 30;
+            const valuePenalty = Number(entry.spot?.plannerScore || 0) * 0.2;
+            return (entry.spot ? 0 : -100) + proximity + valuePenalty;
+          };
+          return score(left) - score(right);
+        });
+      const replacement = candidates[0];
+      if (!replacement) break;
+      const previousId = cleanText(replacement.activity.spotId);
+      const start = timeToMinutes(replacement.activity.startTime, timeToMinutes(knowledge?.profile?.dayStart, 9 * 60));
+      const end = timeToMinutes(replacement.activity.endTime, start + Number(replacement.activity.durationMin || 90));
+      replacement.activity.type = required.timeRole === "meal-landmark" ? "meal" : "attraction";
+      replacement.activity.spotId = required.id;
+      replacement.activity.durationMin = Math.max(60, end - start || Math.min(120, Number(required.recommendedDurationMin || 90)));
+      replacement.activity.endTime = minutesToTime(start + replacement.activity.durationMin);
+      replacement.activity.reason = "用户明确指定的必选项；硬约束编译器将模型遗漏实体绑定到原有可执行时段";
+      replacement.activity.evidenceRefs = [...new Set([required.id, ...list(replacement.activity.evidenceRefs)])];
+      replacement.activity.alternativeSpotIds = [...new Set([previousId, ...list(replacement.activity.alternativeSpotIds)].filter(Boolean))];
+      delete replacement.activity.transportFromPrevious;
+      if (replacement.activity.type === "meal") replacement.activity.label = `${required.name}用餐`;
+      selected.delete(previousId);
+      selected.add(required.id);
+      changes.push({ variantId: variant.id, action: "replaced", requiredSpotId: required.id, requiredSpotName: required.name, replacedSpotId: previousId, day: replacement.day.day });
+    }
+
+    missing = requiredSpots.filter((spot: any) => !selected.has(spot.id));
+    if (missing.length) {
+      const previousVariantSpotIds = list(draft?.variants).slice(0, variantIndex).flatMap((item: any) => list(item.days).flatMap((day: any) => list(day.activities).map((activity: any) => cleanText(activity.spotId)).filter(Boolean)));
+      variant = recoverPlannerVariant(knowledge.profile || {}, knowledge, variantIndex, variant, `模型草案遗漏必选实体：${missing.map((spot: any) => spot.name).join("、")}`, previousVariantSpotIds);
+      draft.variants[variantIndex] = variant;
+      changes.push({ variantId: variant.id, action: "rebuilt", requiredSpotIds: missing.map((spot: any) => spot.id), requiredSpotNames: missing.map((spot: any) => spot.name) });
+    }
+  }
+  return {
+    replaced: changes.filter((change) => change.action === "replaced").length,
+    rebuilt: changes.filter((change) => change.action === "rebuilt").length,
+    changes,
+  };
+}
+
 function bindTrafficMatrixFacts(draft: any, knowledge: any) {
   const matrix = knowledge?.trafficMatrix;
   if (!matrix?.legs?.length) return draft;
@@ -3053,6 +3119,12 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     return state;
   }
   if (stage === "critic_review") {
+    const coverageRepair = enforceRequiredCoverage(state.draft, effectiveKnowledge);
+    if (coverageRepair.changes.length) state.modelAudit.compilerIssues.push({
+      code: "REQUIRED_COVERAGE_ENFORCED", severity: "warning",
+      message: `硬约束编译器在 Critic 前修复 ${coverageRepair.replaced} 个模型遗漏的必选绑定${coverageRepair.rebuilt ? `，并重建 ${coverageRepair.rebuilt} 套无法局部修复的方案` : ""}`,
+      changes: coverageRepair.changes,
+    });
     const deterministicAudit = auditPlannerDraft(state.draft, effectiveKnowledge);
     try {
       const critique = await aiJson(env, {
@@ -3077,6 +3149,12 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
   }
   if (stage.startsWith("audit_")) {
     if (state.draft.variants.length !== 3) throw new Error(`规划模型方案检查点不完整：${state.draft.variants.length}/3`);
+    const coverageRepair = enforceRequiredCoverage(state.draft, effectiveKnowledge);
+    if (coverageRepair.changes.length) state.modelAudit.compilerIssues.push({
+      code: "REQUIRED_COVERAGE_REENFORCED", severity: "warning", stage,
+      message: `AI 修复后再次补回 ${coverageRepair.replaced} 个必选绑定${coverageRepair.rebuilt ? `，重建 ${coverageRepair.rebuilt} 套方案` : ""}`,
+      changes: coverageRepair.changes,
+    });
     bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
     const legalization = legalizePlannerTimelines(state.draft, effectiveKnowledge);
     if (legalization.shiftedActivities) state.modelAudit.compilerIssues.push({ code: "TIMELINE_LEGALIZED", severity: "warning", message: `Travel Compiler 按交通矩阵顺延 ${legalization.shiftedActivities} 个节点，共 ${legalization.shiftedMinutes} 分钟` });
@@ -3467,7 +3545,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const plannerCandidates = aiModelCandidates(env, "planner");
       const serviceForModel = (model: string) => services.find((service: any) => service.provider === `联通元景 AI：${model}`);
       const primaryService: any = serviceForModel(purposeModels.plannerModel);
-      const validatedModel = plannerCandidates.find((model) => serviceForModel(model)?.status === "healthy") || null;
+      const validatedModel = plannerCandidates.find((model) => Number(serviceForModel(model)?.successCount || 0) > 0) || null;
       const aiStatus = !aiApiKey(env)
         ? "unconfigured"
         : primaryService?.status === "healthy"
@@ -3495,7 +3573,9 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
         thinking: { planner: "user-controlled", repair: "on-conflict", reasoningContentExposed: false },
         network: { enabled: true, mode: "后端受控 Research Agent", tools: ["多 Provider 搜索编排", "不可信网页读取与访问状态", "证据过滤/去重/冲突合成", "Wikimedia / 高德 POI", "天气、酒店与交通专用数据源"] },
         note: validatedModel
-          ? `最近真实请求已验证 ${validatedModel} 可用；各阶段按候选顺序自动兼容路由。算法负责预算、缓存、证据等级、客流推断、交通矩阵、硬约束和降级恢复。`
+          ? primaryService?.status === "healthy"
+            ? `最近真实请求已验证 ${validatedModel} 可用；各阶段按候选顺序自动兼容路由。算法负责预算、缓存、证据等级、客流推断、交通矩阵、硬约束和降级恢复。`
+            : `${validatedModel} 已有真实成功调用，但最近一次请求失败，当前按 degraded 展示并保留具体错误；不会把“曾成功”冒充“当前完全正常”。`
           : "密钥和模型名已配置，但尚无该规划模型的成功调用记录；configured 不再等同于 ready。",
       },
       services,
@@ -3882,6 +3962,23 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     { id: "season", label: "近期趋势与时令报道信号", provider: intelligence.news.status === "ready" ? intelligence.news.provider : "未返回", state: intelligence.news.status === "ready" ? "success" : "unavailable", detail: "仅使用可归因公开报道" },
   ], "route"));
   const generated = generatedInput || await generatePlannerDraft(profile, knowledge, env, replanContext);
+  const finalCoverageRepair = enforceRequiredCoverage(generated.draft, knowledge);
+  if (finalCoverageRepair.changes.length) {
+    bindTrafficMatrixFacts(generated.draft, knowledge);
+    legalizePlannerTimelines(generated.draft, knowledge);
+    const safetyRepair = applyFinalTimelineSafetyRepair(generated.draft, knowledge);
+    bindTrafficMatrixFacts(generated.draft, knowledge);
+    generated.audit = auditPlannerDraft(generated.draft, knowledge);
+    generated.modelAudit.compilerIssues.push({
+      code: "FINAL_REQUIRED_COVERAGE_ENFORCED", severity: "warning",
+      message: `最终编译阶段补回 ${finalCoverageRepair.replaced} 个必选绑定${finalCoverageRepair.rebuilt ? `，重建 ${finalCoverageRepair.rebuilt} 套方案` : ""}；随后重排 ${safetyRepair.reflowedActivities} 个节点`,
+      changes: finalCoverageRepair.changes,
+    });
+    if (generated.audit.hardIssues.length) {
+      const summary = generated.audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
+      throw new Error(`必选项补全后的最终编译仍存在硬冲突：${summary}`);
+    }
+  }
   const research = generated.research || knowledge.research || null;
   const plannerSpotById = new Map(plannerSpots.map((spot: any) => [spot.id, spot]));
   const spotsById = new Map(spots.map((spot: any) => {

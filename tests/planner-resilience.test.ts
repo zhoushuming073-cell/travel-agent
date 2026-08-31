@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactPlannerKnowledge, normalizePlannerVariant, recoverPlannerVariant } from "../worker/travel-api.ts";
+import { compactPlannerKnowledge, enforceRequiredCoverage, normalizePlannerVariant, recoverPlannerVariant } from "../worker/travel-api.ts";
 
 const profile = { city: "上海", startDate: "2026-09-03", days: 3, dayStart: "09:00", dayEnd: "21:00", pace: "relaxed" };
 
@@ -45,4 +45,33 @@ test("planner input compacts the full traffic matrix but preserves high-value le
   assert.ok(compact.trafficMatrix.legs.some((leg: { fromId: string; toId: string }) => leg.fromId === "s0" || leg.toId === "s0"));
   assert.equal(compact.trafficMatrix.totalCandidateLegs, legs.length);
   assert.equal(compact.trafficMatrix.compactedForModel, true);
+});
+
+test("hard-constraint compiler restores every user-required POI in every AI variant", () => {
+  const required = [
+    { id: "west-lake", name: "西湖", requiredByUser: true, timeRole: "daylight-outdoor", plannerScore: 100 },
+    { id: "lingyin", name: "灵隐寺", requiredByUser: true, timeRole: "daylight-outdoor", plannerScore: 100 },
+  ];
+  const flexible = Array.from({ length: 6 }, (_, index) => ({ id: `optional-${index}`, name: `可选景点${index}`, requiredByUser: false, timeRole: "flexible", plannerScore: 60 + index }));
+  const draft = {
+    variants: ["hot", "niche", "relax"].map((id, variantIndex) => ({
+      id, title: id, style: id, strategy: `AI ${id}`,
+      days: [1, 2].map((day, dayIndex) => ({
+        day, returnHotelTime: "17:00", activities: [
+          { type: "attraction", spotId: flexible[variantIndex * 2 + dayIndex].id, startTime: "09:00", endTime: "10:30", durationMin: 90, reason: "AI选择" },
+          { type: "meal", label: "午餐", startTime: "12:00", endTime: "13:00", durationMin: 60 },
+        ],
+      })),
+    })),
+  };
+  const knowledge = { profile: { ...profile, city: "杭州", days: 2 }, spots: [...required, ...flexible], trafficMatrix: { legs: [], nodes: [] } };
+  const result = enforceRequiredCoverage(draft, knowledge);
+  assert.equal(result.replaced, 6);
+  assert.equal(result.rebuilt, 0);
+  for (const variant of draft.variants) {
+    const ids = variant.days.flatMap((day) => day.activities.map((activity) => activity.spotId).filter(Boolean));
+    assert.ok(ids.includes("west-lake"), `${variant.id} should include 西湖`);
+    assert.ok(ids.includes("lingyin"), `${variant.id} should include 灵隐寺`);
+    assert.match(variant.strategy, /^AI /, "AI strategy remains the route's design basis");
+  }
 });

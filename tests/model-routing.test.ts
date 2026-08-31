@@ -25,6 +25,7 @@ test("keeps documented Pro first and automatically falls back to verified Flash"
   assert.deepEqual(aiModelCandidates({}, "planner"), ["deepseek-v4-pro-0813", "deepseek-v4-flash"]);
   assert.deepEqual(aiModelCandidates({}, "repair"), ["deepseek-v4-pro-0813", "deepseek-v4-flash"]);
   assert.deepEqual(aiModelCandidates({ AI_PLANNER_MODEL: "deepseek-v4-flash" }, "planner"), ["deepseek-v4-flash", "deepseek-v4-pro-0813"]);
+  assert.deepEqual(aiModelCandidates({ AI_PLANNER_MODEL: "deepseek-v4-flash", AI_SKIP_MODELS: "deepseek-v4-pro-0813" }, "planner"), ["deepseek-v4-flash"]);
 });
 
 test("keeps legacy secret and model variable names compatible", () => {
