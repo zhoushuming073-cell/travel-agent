@@ -21,9 +21,10 @@ test("uses V4 Flash for extraction and chat and rejects stale GLM configuration"
   assert.deepEqual(aiModelCandidates({ AI_EXTRACT_MODEL: "glm-5" }, "extract"), ["deepseek-v4-flash"]);
 });
 
-test("keeps planning, decision and repair on DeepSeek V4 Pro", () => {
-  assert.deepEqual(aiModelCandidates({}, "planner"), ["deepseek-v4-pro-0813"]);
-  assert.deepEqual(aiModelCandidates({}, "repair"), ["deepseek-v4-pro-0813"]);
+test("keeps documented Pro first and automatically falls back to verified Flash", () => {
+  assert.deepEqual(aiModelCandidates({}, "planner"), ["deepseek-v4-pro-0813", "deepseek-v4-flash"]);
+  assert.deepEqual(aiModelCandidates({}, "repair"), ["deepseek-v4-pro-0813", "deepseek-v4-flash"]);
+  assert.deepEqual(aiModelCandidates({ AI_PLANNER_MODEL: "deepseek-v4-flash" }, "planner"), ["deepseek-v4-flash", "deepseek-v4-pro-0813"]);
 });
 
 test("keeps legacy secret and model variable names compatible", () => {

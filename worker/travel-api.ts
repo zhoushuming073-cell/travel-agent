@@ -148,7 +148,10 @@ function providerNameFor(url: string, source: string): string {
   if (/bing\.com/.test(hostname)) return "Bing 新闻 RSS";
   if (/gdeltproject\.org/.test(hostname)) return "GDELT";
   if (/mcpmarket\.cn/.test(hostname)) return `MCPMarket：${source}`;
-  if (/元景|DeepSeek|联通/.test(source)) return "联通元景 AI";
+  if (/元景|DeepSeek|联通/i.test(source)) {
+    const model = source.match(/deepseek-[a-z0-9._-]+/i)?.[0];
+    return model ? `联通元景 AI：${model}` : "联通元景 AI";
+  }
   return cleanText(source, hostname || "外部服务").slice(0, 80);
 }
 
@@ -2860,13 +2863,13 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
       const deliberation = await aiRequest(env, {
         purpose: "planner", thinking: true, allowReasoningOnly: true, maxTokens: 1200, requestTimeoutMs: 45000,
         messages: [
-          { role: "system", content: "你是 DeepSeek V4 Pro 行程决策器。先深度分析约束，只需给后续成稿模型一份精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
+          { role: "system", content: "你是资深旅行行程决策器。先深度分析约束，只需给后续成稿模型一份精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
           { role: "user", content: JSON.stringify(plannerInput) },
         ],
       });
       decisionMemo = cleanText(deliberation.content || deliberation.reasoningContent).slice(0, 6000);
     } catch (error: any) {
-      modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `V4 Pro 深度分析未在 45 秒预算内形成备忘录，继续由同一 V4 Pro 成稿并接受编译器校验：${cleanText(error?.message)}` });
+      modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `规划模型的深度分析未在 45 秒预算内形成备忘录，继续成稿并接受编译器校验：${cleanText(error?.message)}` });
     }
   }
   await new Promise(resolve => setTimeout(resolve, 1200));
@@ -2881,7 +2884,7 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
       const supplemental = await aiJson(env, {
         purpose: "planner", thinking: false, maxTokens: 5200, requestTimeoutMs: 120000,
         messages: [
-          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证，verifiedWebContext、天气和交通矩阵均在输入中。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}，不得输出另外两套。${decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${decisionMemo}` : ""}` },
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证，verifiedWebContext、天气和交通矩阵均在输入中。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}，不得输出另外两套。${decisionMemo ? `\n共享 AI 决策备忘录（不是新增事实）：\n${decisionMemo}` : ""}` },
           { role: "user", content: JSON.stringify({ ...plannerInput, objective, existingVariantSummaries: draft.variants.map((variant: any) => ({ id: variant.id, strategy: variant.strategy, spotIds: variant.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
         ],
       });
@@ -2891,10 +2894,10 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
       modelAudit.plannerModel = supplemental.model;
       if (supplemental.formatRepaired) modelAudit.formatRepairs += 1;
     } catch (error: any) {
-      throw new Error(`DeepSeek V4 Pro 未能补全 ${objective.name} 方案：${cleanText(error?.message, "规划模型调用失败")}`);
+      throw new Error(`规划模型未能补全 ${objective.name} 方案：${cleanText(error?.message, "规划模型调用失败")}`);
     }
   }
-  if (draft.variants.length !== 3) throw new Error(`DeepSeek V4 Pro 未能生成可靠时间轴：最终只有 ${draft.variants.length} 套方案`);
+  if (draft.variants.length !== 3) throw new Error(`规划模型未能生成可靠时间轴：最终只有 ${draft.variants.length} 套方案`);
   bindTrafficMatrixFacts(draft, knowledge);
   const initialLegalization = legalizePlannerTimelines(draft, knowledge);
   if (initialLegalization.shiftedActivities) modelAudit.compilerIssues.push({
@@ -2940,7 +2943,7 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
   modelAudit.compilerIssues.push(...audit.issues);
   if (audit.hardIssues.length) {
     const summary = audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
-    throw new Error(`DeepSeek V4 Pro 经 ${modelAudit.repairRounds} 轮修复后仍有 ${audit.hardIssues.length} 个时间或约束冲突，系统拒绝返回低质量算法拼接行程${summary ? `。主要问题：${summary}` : ""}`);
+    throw new Error(`规划模型经 ${modelAudit.repairRounds} 轮修复后仍有 ${audit.hardIssues.length} 个时间或约束冲突，系统拒绝返回低质量算法拼接行程${summary ? `。主要问题：${summary}` : ""}`);
   }
   return { draft, audit, modelAudit };
 }
@@ -3004,13 +3007,13 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       const deliberation = await aiRequest(env, {
         purpose: "planner", thinking: true, allowReasoningOnly: true, maxTokens: 1200, requestTimeoutMs: 150000,
         messages: [
-          { role: "system", content: "你是 DeepSeek V4 Pro 行程决策器。形成精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
+          { role: "system", content: "你是资深旅行行程决策器。形成精炼决策备忘录，不输出完整 JSON。重点判断必去覆盖、餐饮型地点饭点、夜景日落后时段、开放时间、天气、交通间隔、午晚餐、缓冲和三方案差异。不得添加输入中没有的事实。" },
           { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext }) },
         ],
       });
       state.decisionMemo = cleanText(deliberation.content || deliberation.reasoningContent).slice(0, 6000);
     } catch (error: any) {
-      state.modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `V4 Pro 深度分析未形成备忘录，继续由同一模型成稿：${cleanText(error?.message)}` });
+      state.modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `规划模型的深度分析未形成备忘录，继续由可用模型成稿：${cleanText(error?.message)}` });
     }
     return state;
   }
@@ -3027,7 +3030,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       supplemental = await aiJson(env, {
         purpose: "planner", thinking: false, maxTokens: 5400, requestTimeoutMs: 150000,
         messages: [
-          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities。允许 days、daysPlan、itinerary 等常见日期容器，后端会安全归一化。` : ""}${state.decisionMemo ? `\n共享 V4 Pro 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
+          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities。允许 days、daysPlan、itinerary 等常见日期容器，后端会安全归一化。` : ""}${state.decisionMemo ? `\n共享 AI 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
           { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((item: any) => ({ id: item.id, strategy: item.strategy, spotIds: item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
         ],
       });
@@ -3073,7 +3076,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     return state;
   }
   if (stage.startsWith("audit_")) {
-    if (state.draft.variants.length !== 3) throw new Error(`V4 Pro 方案检查点不完整：${state.draft.variants.length}/3`);
+    if (state.draft.variants.length !== 3) throw new Error(`规划模型方案检查点不完整：${state.draft.variants.length}/3`);
     bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
     const legalization = legalizePlannerTimelines(state.draft, effectiveKnowledge);
     if (legalization.shiftedActivities) state.modelAudit.compilerIssues.push({ code: "TIMELINE_LEGALIZED", severity: "warning", message: `Travel Compiler 按交通矩阵顺延 ${legalization.shiftedActivities} 个节点，共 ${legalization.shiftedMinutes} 分钟` });
@@ -3091,7 +3094,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       state.modelAudit.compilerIssues.push(...state.audit.issues);
       if (state.audit.hardIssues.length) {
         const summary = state.audit.hardIssues.slice(0, 8).map((issue: any) => `${cleanText(issue.code)}：${cleanText(issue.message)}`).join("；");
-        throw new Error(`V4 Pro 经两轮修复后仍有 ${state.audit.hardIssues.length} 个硬冲突${summary ? `：${summary}` : ""}`);
+        throw new Error(`规划模型经两轮修复后仍有 ${state.audit.hardIssues.length} 个硬冲突${summary ? `：${summary}` : ""}`);
       }
     }
     return state;
@@ -3211,7 +3214,7 @@ function liveProgress(profile: any, city: any, title: string, items: string[], s
 const SESSION_COOKIE = "smart_travel_session";
 const WORKFLOW_STAGES = ["parse_profile", "collect_sources", "build_knowledge", "build_matrix", "planner_research", "planner_memo", "variant_hot", "variant_niche", "variant_relax", "critic_review", "audit_initial", "repair_round_1", "audit_round_1", "repair_round_2", "audit_final", "final_transit", "compile_result"];
 const stageLabels: Record<string, string> = {
-  parse_profile: "正在由 V4 Flash 正式理解需求", collect_sources: "正在并行获取天气、景点与住宿候选", build_knowledge: "正在核验必选实体、趋势、时令与拥挤风险", build_matrix: "正在建立透明交通候选矩阵", planner_research: "Research Agent 正在判断信息缺口并联网取证", planner_memo: "V4 Pro 正在形成深度决策备忘录", variant_hot: "正在生成经典覆盖方案", variant_niche: "正在生成自然摄影方案", variant_relax: "正在生成轻松避峰方案", critic_review: "独立 Critic 正在审查三套路线", audit_initial: "正在执行第一轮硬约束审计", repair_round_1: "正在修复第一轮硬冲突", audit_round_1: "正在复核第一轮修复", repair_round_2: "正在进行最后一轮定向修复", audit_final: "正在执行最终硬约束审计", final_transit: "正在核验最终相邻交通段并重排时间", compile_result: "正在编译可信度与最终结果",
+  parse_profile: "正在由需求理解模型整理关键信息", collect_sources: "正在并行获取天气、景点与住宿候选", build_knowledge: "正在核验必选实体、趋势、时令与拥挤风险", build_matrix: "正在建立透明交通候选矩阵", planner_research: "Research Agent 正在判断信息缺口并联网取证", planner_memo: "规划模型正在形成深度决策备忘录", variant_hot: "正在生成经典覆盖方案", variant_niche: "正在生成自然摄影方案", variant_relax: "正在生成轻松避峰方案", critic_review: "独立 Critic 正在审查三套路线", audit_initial: "正在执行第一轮硬约束审计", repair_round_1: "正在修复第一轮硬冲突", audit_round_1: "正在复核第一轮修复", repair_round_2: "正在进行最后一轮定向修复", audit_final: "正在执行最终硬约束审计", final_transit: "正在核验最终相邻交通段并重排时间", compile_result: "正在编译可信度与最终结果",
 };
 
 function cookieValue(request: Request, name: string): string {
@@ -3415,7 +3418,7 @@ async function advancePlanningJob(jobId: string, env: any) {
     const deterministicFailure = /时间轴不可执行|最终审计检查点未通过|确定性编译器拒绝|所有阶段已结束|检查点缺失/.test(message);
     const limit = deterministicFailure ? 1 : stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
     if (stage === "parse_profile" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("repair_")) {
-      await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景 V4 Flash" : "联通元景 DeepSeek V4 Pro", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
+      await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景需求理解模型" : "联通元景规划模型（自动兼容路由）", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
     }
     await putTravelJobArtifact(jobId, attemptKey, { attempts, lastError: message, updatedAt: new Date().toISOString() });
     if (attempts >= limit) {
@@ -3453,17 +3456,47 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
 
     if (url.pathname === "/api/health") {
       const [services, metrics] = await Promise.all([providerHealthSnapshot(), runtimeMetrics()]);
+      const purposeModels = {
+        extractionModel: aiPrimaryModel(env, "extract"),
+        researchModel: aiPrimaryModel(env, "research"),
+        enrichmentModel: aiPrimaryModel(env, "enrich"),
+        plannerModel: aiPrimaryModel(env, "planner"),
+        criticModel: aiPrimaryModel(env, "critic"),
+        repairModel: aiPrimaryModel(env, "repair"),
+      };
+      const plannerCandidates = aiModelCandidates(env, "planner");
+      const serviceForModel = (model: string) => services.find((service: any) => service.provider === `联通元景 AI：${model}`);
+      const primaryService: any = serviceForModel(purposeModels.plannerModel);
+      const validatedModel = plannerCandidates.find((model) => serviceForModel(model)?.status === "healthy") || null;
+      const aiStatus = !aiApiKey(env)
+        ? "unconfigured"
+        : primaryService?.status === "healthy"
+          ? "ready"
+          : validatedModel
+            ? "degraded"
+          : primaryService?.status === "degraded"
+            ? "degraded"
+            : primaryService?.status === "unavailable"
+              ? "unavailable"
+              : "configured_unverified";
       return json({
       ok: true,
       ai: {
-        status: aiApiKey(env) ? "configured" : "unconfigured",
+        status: aiStatus,
+        configured: Boolean(aiApiKey(env)),
         provider: "联通元景",
-        model: aiPrimaryModel(env, "planner"),
-        extractionModel: aiPrimaryModel(env, "extract"), researchModel: aiPrimaryModel(env, "research"), enrichmentModel: aiPrimaryModel(env, "enrich"), plannerModel: aiPrimaryModel(env, "planner"), criticModel: aiPrimaryModel(env, "critic"), repairModel: aiPrimaryModel(env, "repair"),
+        model: purposeModels.plannerModel,
+        ...purposeModels,
+        plannerCandidates,
+        validatedModel,
+        fallbackActive: Boolean(validatedModel && validatedModel !== purposeModels.plannerModel),
+        validation: primaryService ? { status: primaryService.status, lastSuccessAt: primaryService.lastSuccessAt, lastFailureAt: primaryService.lastFailureAt, lastErrorCode: primaryService.lastErrorCode, lastErrorMessage: primaryService.lastErrorMessage } : { status: "unknown", lastSuccessAt: null, lastFailureAt: null, lastErrorCode: null, lastErrorMessage: null },
         repairFallbackModel: aiModelCandidates(env, "repair")[1] || null,
         thinking: { planner: "user-controlled", repair: "on-conflict", reasoningContentExposed: false },
         network: { enabled: true, mode: "后端受控 Research Agent", tools: ["多 Provider 搜索编排", "不可信网页读取与访问状态", "证据过滤/去重/冲突合成", "Wikimedia / 高德 POI", "天气、酒店与交通专用数据源"] },
-        note: "V4 Flash 负责需求结构化；V4 Pro 分别承担研究问题规划、证据抽取、三方案规划、独立 Critic 与局部修复。算法负责预算、缓存、证据等级、客流推断、交通矩阵、硬约束和降级恢复。",
+        note: validatedModel
+          ? `最近真实请求已验证 ${validatedModel} 可用；各阶段按候选顺序自动兼容路由。算法负责预算、缓存、证据等级、客流推断、交通矩阵、硬约束和降级恢复。`
+          : "密钥和模型名已配置，但尚无该规划模型的成功调用记录；configured 不再等同于 ready。",
       },
       services,
       metrics: { persistence: metrics.persistence, activeJobs: metrics.activeJobs, cacheEntries: metrics.cacheEntries, cacheHits: metrics.cacheHits, requests24h: metrics.requests24h },
@@ -3835,7 +3868,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
   const prepared = preparedInput || await preparePlanKnowledge(profile, city, env, report);
   const { providerBundle, weather, hotel, rawSpots, required, intelligence, ranked, trafficMatrix, spots, fetchedAt, plannerSpots, knowledge } = prepared;
   const requiredNameById = new Map(prepared.requiredNameEntries || []);
-  await report?.(liveProgress(profile, city, "公共交通矩阵已建立，V4 Pro 正在生成三套方案……", [
+  await report?.(liveProgress(profile, city, "公共交通矩阵已建立，规划模型正在生成三套方案……", [
     `✓ 候选景点知识包：${plannerSpots.length} 个实体`,
     `✓ 规划前交通矩阵：${trafficMatrix.legs.length} 条路线`,
     `✓ 矩阵来源：${trafficMatrix.source}`,
@@ -3863,7 +3896,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
   for (let variantIndex = 0; variantIndex < 3; variantIndex += 1) {
     const draftVariant = generated.draft.variants[variantIndex];
     const variantId = ["hot", "niche", "relax"][variantIndex];
-    if (!draftVariant || draftVariant.days.length !== profile.days) throw new Error(`DeepSeek V4 Pro 返回的${variantId}方案天数不完整，已拒绝算法补齐`);
+    if (!draftVariant || draftVariant.days.length !== profile.days) throw new Error(`规划模型返回的${variantId}方案天数不完整，已拒绝算法补齐`);
     let daysPlan = Array.from({ length: profile.days }, (_, dayIndex) => {
       const draftDay = draftVariant.days[dayIndex];
       return planDayFromDraft(draftDay, dayIndex, spotsById, trafficMatrix, weather.tripForecast[dayIndex], profile);
@@ -3904,7 +3937,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
 
   for (const plan of alternatives) {
     plan.evaluation = planEvaluation(plan, profile, spots.length);
-    plan.optimization = { algorithm: `${modelFamily(generated.modelAudit.plannerModel)} ${generated.modelAudit.deepReasoningUsed ? "深度决策" : "快速决策"} + Research Agent + 多目标路线优化 + Travel Compiler`, candidateCount: spots.length, selectedCount: plan.evaluation.evidence.selectedCount, requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`, note: generated.modelAudit.planningMode === "deterministic_recovery" ? "规划模型未返回可编译结构；系统已明确降级为确定性多目标路线优化，并继续执行开放时间、交通、用餐和必去约束校验。" : `Research Agent 先按信息增益取证；交通矩阵在模型调用前生成；V4 Pro ${generated.modelAudit.deepReasoningUsed ? "形成决策备忘录后" : "在用户关闭深度思考时直接"}生成三套草案，独立 Critic 与确定性编译器再检查硬冲突。` };
+    plan.optimization = { algorithm: `${modelFamily(generated.modelAudit.plannerModel)} ${generated.modelAudit.deepReasoningUsed ? "深度决策" : "快速决策"} + Research Agent + 多目标路线优化 + Travel Compiler`, candidateCount: spots.length, selectedCount: plan.evaluation.evidence.selectedCount, requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`, note: generated.modelAudit.planningMode === "deterministic_recovery" ? "规划模型未返回可编译结构；系统已明确降级为确定性多目标路线优化，并继续执行开放时间、交通、用餐和必去约束校验。" : `Research Agent 先按信息增益取证；交通矩阵在模型调用前生成；实际模型 ${cleanText(generated.modelAudit.plannerModel, "unknown")} ${generated.modelAudit.deepReasoningUsed ? "形成决策备忘录后" : "在用户关闭深度思考时直接"}生成三套草案，独立 Critic 与确定性编译器再检查硬冲突。` };
     plan.candidatePool = spots.slice(0, 16).map((spot: any) => ({ id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore, scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis, requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences, selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)) }));
     Object.assign(plan, analyzePlanTrustV2(plan, profile));
     plan.decisionTrace = buildResearchDecisionTrace(plan, research);

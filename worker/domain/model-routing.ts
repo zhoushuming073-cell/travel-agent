@@ -16,11 +16,14 @@ export const YUANJING_CHAT_COMPLETIONS =
 
 const DEFAULT_MODELS: Record<AiPurpose, string[]> = {
   extract: ["deepseek-v4-flash"],
-  research: ["deepseek-v4-pro-0813"],
-  enrich: ["deepseek-v4-pro-0813"],
-  planner: ["deepseek-v4-pro-0813"],
-  critic: ["deepseek-v4-pro-0813"],
-  repair: ["deepseek-v4-pro-0813"],
+  // The competition document fixes the Pro model id below. Flash remains an
+  // explicit compatibility fallback because model access is granted per key:
+  // a syntactically valid Pro id can still return 404 for an unentitled key.
+  research: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
+  enrich: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
+  planner: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
+  critic: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
+  repair: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
   explain: ["deepseek-v4-flash", "deepseek-v4-pro-0813"],
 };
 
