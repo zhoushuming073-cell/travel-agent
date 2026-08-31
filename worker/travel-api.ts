@@ -2011,9 +2011,24 @@ export function reflowDayAfterTransit(day: any, profile: any) {
   let originalActivities = (day.blocks || [])
     .filter((block: any) => block.type !== "leg")
     .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
-  const plannedEnd = originalActivities.reduce((latest: number, block: any) => Math.max(latest, timeToMinutes(block.endTime, 0)), 0);
+  const legByPair = new Map((day.blocks || []).filter((block: any) => block.type === "leg").map((block: any) => [`${block.from}->${block.to}`, block]));
+  const projectedEndAfterTransit = (activities: any[]) => {
+    let projectedCursor = timeToMinutes(profile.dayStart, 540);
+    let previousProjectedSpot: any = null;
+    for (const block of activities) {
+      const originalStart = timeToMinutes(block.startTime, projectedCursor);
+      const originalEnd = timeToMinutes(block.endTime, originalStart + Number(block.durationMin || 0));
+      const duration = originalEnd > originalStart ? originalEnd - originalStart : Math.max(15, Number(block.durationMin || 0));
+      const currentSpot = block.item || null;
+      const leg: any = currentSpot && previousProjectedSpot ? legByPair.get(`${previousProjectedSpot.name}->${currentSpot.name}`) : null;
+      projectedCursor = Math.max(originalStart, projectedCursor + Number(leg?.durationMin || 0)) + duration;
+      if (currentSpot) previousProjectedSpot = currentSpot;
+    }
+    return projectedCursor;
+  };
+  const projectedEnd = projectedEndAfterTransit(originalActivities);
   const hasDinner = originalActivities.some((block: any) => block.mealType === "dinner");
-  if (plannedEnd > 18 * 60 && !hasDinner) {
+  if (projectedEnd > 18 * 60 && !hasDinner) {
     const nearby = [...originalActivities].reverse().find((block: any) => block.item && timeToMinutes(block.endTime, 0) <= 18 * 60)
       || originalActivities.find((block: any) => block.item && timeToMinutes(block.startTime, 0) >= 18 * 60);
     originalActivities = [...originalActivities, {
@@ -2022,7 +2037,6 @@ export function reflowDayAfterTransit(day: any, profile: any) {
       reason: "最终交通核验发现当天延续到 18:00 后，自动保留顺路晚餐时段",
     }].sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
   }
-  const legByPair = new Map((day.blocks || []).filter((block: any) => block.type === "leg").map((block: any) => [`${block.from}->${block.to}`, block]));
   const rebuilt: any[] = [];
   let cursor = timeToMinutes(profile.dayStart, 540);
   let previousSpot: any = null;

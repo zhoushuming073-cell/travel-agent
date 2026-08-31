@@ -79,6 +79,18 @@ test("final transit requires dinner only for an actual evening itinerary and ins
   };
   assert.doesNotThrow(() => reflowDayAfterTransit(eveningDay, { dayStart: "09:00", dayEnd: "21:00" }));
   assert.ok(eveningDay.blocks.some((block: { mealType?: string }) => block.mealType === "dinner"));
+
+  const transitExtendedDay = {
+    day: 1, date: "2026-08-30", weather: {}, items: [],
+    blocks: [
+      { type: "rest", mealType: "lunch", label: "午餐", startTime: "12:00", endTime: "13:00", durationMin: 60 },
+      { type: "attraction", item: { id: "a", name: "景点A", lat: 30.2, lng: 120.1 }, startTime: "14:00", endTime: "16:00", durationMin: 120 },
+      { type: "leg", from: "景点A", to: "景点B", startTime: "16:00", endTime: "17:30", durationMin: 90, source: "高德地图官方公交/地铁" },
+      { type: "attraction", item: { id: "b", name: "景点B", lat: 30.3, lng: 120.2 }, startTime: "16:15", endTime: "17:30", durationMin: 75 },
+    ],
+  };
+  assert.doesNotThrow(() => reflowDayAfterTransit(transitExtendedDay, { dayStart: "09:00", dayEnd: "21:00" }));
+  assert.ok(transitExtendedDay.blocks.some((block: { mealType?: string }) => block.mealType === "dinner"), "verified transit that extends the day past 18:00 must trigger dinner before validation");
 });
 
 test("D1 runtime persists leases, artifacts, events and provider attempts", () => {
