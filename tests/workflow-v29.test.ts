@@ -91,6 +91,19 @@ test("final transit requires dinner only for an actual evening itinerary and ins
   };
   assert.doesNotThrow(() => reflowDayAfterTransit(transitExtendedDay, { dayStart: "09:00", dayEnd: "21:00" }));
   assert.ok(transitExtendedDay.blocks.some((block: { mealType?: string }) => block.mealType === "dinner"), "verified transit that extends the day past 18:00 must trigger dinner before validation");
+
+  const oneMinuteOverflowDay = {
+    day: 2, date: "2026-08-31", weather: {}, items: [],
+    blocks: [
+      { type: "rest", mealType: "lunch", label: "午餐", startTime: "12:00", endTime: "13:00", durationMin: 60 },
+      { type: "attraction", item: { id: "a", name: "景点A", requiredByUser: false, lat: 30.2, lng: 120.1 }, startTime: "14:00", endTime: "17:00", durationMin: 180 },
+      { type: "leg", from: "景点A", to: "景点B", startTime: "17:00", endTime: "17:30", durationMin: 30, source: "高德地图官方公交/地铁" },
+      { type: "attraction", item: { id: "b", name: "景点B", requiredByUser: true, lat: 30.3, lng: 120.2 }, startTime: "17:30", endTime: "20:01", durationMin: 151 },
+    ],
+  };
+  assert.doesNotThrow(() => reflowDayAfterTransit(oneMinuteOverflowDay, { dayStart: "09:00", dayEnd: "21:00" }));
+  assert.equal((oneMinuteOverflowDay as typeof oneMinuteOverflowDay & { finalTransitAdjustment?: { trimmedActivityMinutes?: number } }).finalTransitAdjustment?.trimmedActivityMinutes, 1);
+  assert.ok(oneMinuteOverflowDay.blocks.every((block: { endTime?: string }) => !block.endTime || Number(block.endTime.slice(0, 2)) * 60 + Number(block.endTime.slice(3)) <= 21 * 60));
 });
 
 test("D1 runtime persists leases, artifacts, events and provider attempts", () => {

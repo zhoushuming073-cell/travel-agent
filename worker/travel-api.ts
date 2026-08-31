@@ -2074,6 +2074,7 @@ export function reflowDayAfterTransit(day: any, profile: any) {
   day.totalTransportMin = totalTransportMin;
   const dayEnd = timeToMinutes(profile.dayEnd, 1260);
   let overflow = Math.max(0, cursor - dayEnd);
+  let trimmedActivityMinutes = 0;
   if (overflow > 0) {
     for (let index = rebuilt.length - 1; index >= 0 && overflow > 0; index -= 1) {
       const buffer = rebuilt[index];
@@ -2095,6 +2096,36 @@ export function reflowDayAfterTransit(day: any, profile: any) {
       overflow -= reduction;
     }
   }
+  if (overflow > 0) {
+    const candidates = rebuilt.map((block: any, index: number) => ({ block, index }))
+      .filter(({ block }: any) => block.type === "attraction" && block.item)
+      .sort((left: any, right: any) => Number(Boolean(left.block.item?.requiredByUser)) - Number(Boolean(right.block.item?.requiredByUser)) || right.index - left.index);
+    for (const { block, index } of candidates) {
+      if (overflow <= 0) break;
+      const minimumDuration = block.item?.requiredByUser ? 60 : 45;
+      const available = Math.max(0, Number(block.durationMin || 0) - minimumDuration);
+      const reduction = Math.min(overflow, available);
+      if (!reduction) continue;
+      block.durationMin -= reduction;
+      block.endTime = minutesToTime(timeToMinutes(block.endTime, 0) - reduction);
+      block.item.durationMin = block.durationMin;
+      block.item.endTime = block.endTime;
+      for (let nextIndex = index + 1; nextIndex < rebuilt.length; nextIndex += 1) {
+        const later = rebuilt[nextIndex];
+        later.startTime = minutesToTime(timeToMinutes(later.startTime, 0) - reduction);
+        later.endTime = minutesToTime(timeToMinutes(later.endTime, 0) - reduction);
+        if (later.item) {
+          later.item.startTime = later.startTime;
+          later.item.endTime = later.endTime;
+          later.item.crowd = crowdRiskForVisit(later.item.crowd, later.startTime, day.date, day.weather);
+        }
+      }
+      cursor -= reduction;
+      overflow -= reduction;
+      trimmedActivityMinutes += reduction;
+    }
+  }
+  if (trimmedActivityMinutes) day.finalTransitAdjustment = { type: "minor-overflow-compression", trimmedActivityMinutes, reason: "最终公交核验后压缩少量景点停留时间，保留用餐、必选点与用户返程上限" };
   const conflicts: string[] = [];
   if (cursor > dayEnd) conflicts.push(`最终公交核验后结束时间 ${minutesToTime(cursor)} 超出用户要求 ${minutesToTime(dayEnd)}`);
   const lunch = originalActivities.find((block: any) => block.mealType === "lunch");
