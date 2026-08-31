@@ -22,3 +22,6 @@
 @import "./styles/profile.css";
 @import "./styles/motion.css";
 @import "./styles/acquisition.css";
+@import "./styles/themes/travel-theme-palettes.css";
+@import "./styles/themes/travel-theme-adapter.css";
+@import "./styles/themes/theme-picker.css";

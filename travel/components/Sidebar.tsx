@@ -5,6 +5,7 @@ import type { WorkspaceSnapshot } from "../types.ts";
 import { MOTION } from "../lib/animationCatalog.ts";
 import { Icon } from "./Icon.tsx";
 import { LottieMotion } from "./LottieMotion.tsx";
+import { ThemePicker } from "./ThemePicker.tsx";
 
 interface Props {
   workspaces: WorkspaceSnapshot[];
@@ -103,6 +104,7 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
       </section>
       <div className="sidebar-footer">
         <div className="sidebar-user"><span className="user-avatar"><Icon name="sparkles"/></span><div className="sidebar-label"><b>本地工作区</b><small>旅行数据保存在此浏览器</small></div></div>
+        <ThemePicker/>
       </div>
     </aside>
     {mobileOpen ? <button className="mobile-sidebar-backdrop" type="button" aria-label="关闭旅行列表" onClick={onCloseMobile}/> : null}

@@ -1,0 +1,100 @@
+.sidebar-footer { position: relative; }
+.travel-theme-picker .visually-hidden { width: 1px; height: 1px; position: absolute; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.sidebar-footer .sidebar-user { padding-right: 45px; }
+.sidebar-footer .travel-theme-picker { width: 36px; position: absolute; right: 2px; bottom: 5px; }
+.sidebar-footer .theme-picker-trigger {
+  width: 36px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--travel-sidebar-line);
+  border-radius: 8px;
+  color: var(--travel-sidebar-muted);
+  background: var(--travel-sidebar-surface);
+}
+.sidebar-footer .theme-picker-trigger:hover,
+.sidebar-footer .theme-picker-trigger[aria-expanded="true"] {
+  border-color: var(--travel-sidebar-line);
+  color: var(--travel-sidebar-text);
+  background: var(--travel-sidebar-surface);
+}
+.theme-picker-trigger svg,.theme-picker-close svg { width: 17px; height: 17px; }
+.theme-picker-popover {
+  width: min(410px,calc(100vw - 32px));
+  position: absolute;
+  left: calc(100% + 10px);
+  right: auto;
+  bottom: calc(100% + 9px);
+  z-index: 90;
+  padding: 14px;
+  border: 1px solid var(--travel-line);
+  border-radius: 12px;
+  color: var(--travel-text);
+  background: var(--travel-surface);
+  box-shadow: 0 18px 48px var(--travel-shadow-strong);
+}
+.theme-picker-popover > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.theme-picker-popover > header div { display: grid; gap: 2px; }
+.theme-picker-popover > header strong { font-size: 14px; }
+.theme-picker-popover > header small { color: var(--travel-muted); font-size: 10px; }
+.theme-picker-section-head { display: grid; gap: 1px; margin-bottom: 8px; padding-top: 10px; border-top: 1px solid var(--travel-line-soft); }
+.theme-picker-section-head b { font-size: 11px; }
+.theme-picker-section-head small { color: var(--travel-muted); font-size: 9px; }
+.settings-section { min-width: 0; }
+.theme-picker-close {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  color: var(--travel-muted);
+  background: transparent;
+}
+.theme-picker-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.theme-option {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 45px minmax(0,1fr) 16px;
+  gap: 9px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--travel-line-soft);
+  border-radius: 9px;
+  color: var(--travel-text-2);
+  background: var(--travel-surface);
+  text-align: left;
+}
+.theme-option:hover { border-color: var(--travel-brand); background: var(--travel-brand-soft); }
+.theme-option.active { border-color: var(--travel-brand); box-shadow: inset 0 0 0 1px var(--travel-brand); }
+.theme-option > span:not(.theme-option-preview) { min-width: 0; display: grid; gap: 1px; }
+.theme-option b,.theme-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-option b { color: var(--travel-text); font-size: 11px; }
+.theme-option small { color: var(--travel-muted); font-size: 8px; }
+.theme-option > svg { width: 15px; height: 15px; color: var(--travel-brand); }
+.theme-option-preview {
+  width: 45px;
+  height: 34px;
+  display: grid;
+  grid-template-columns: 15px 1fr;
+  grid-template-rows: 1fr 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb,var(--theme-option-brand) 20%,#fff);
+  border-radius: 6px;
+  background: var(--theme-option-canvas);
+}
+.theme-option-preview i { display: block; }
+.theme-option-preview i:first-child { grid-row: 1/-1; background: var(--theme-option-sidebar); }
+.theme-option-preview i:nth-child(2) { margin: 5px 5px 1px; border-radius: 2px; background: #fff; }
+.theme-option-preview i:last-child { margin: 0 5px 5px; border-radius: 2px; background: linear-gradient(90deg,var(--theme-option-brand) 65%,var(--theme-option-accent) 65%); }
+.settings-extension-note { display: flex; align-items: center; gap: 7px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--travel-line-soft); color: var(--travel-muted); font-size: 9px; }
+.settings-extension-note svg { width: 13px; height: 13px; }
+
+@media (max-width:620px) {
+  .theme-picker-popover { position: fixed; left: 14px; right: 14px; top: 64px; bottom: 14px; width: auto; overflow: auto; }
+  .theme-picker-grid { grid-template-columns: 1fr; }
+}
+
+.react-sidebar.is-collapsed .sidebar-footer .sidebar-user { padding-right: 0; padding-bottom: 42px; }
+.react-sidebar.is-collapsed .sidebar-footer .travel-theme-picker { right: 50%; bottom: 0; transform: translateX(50%); }

@@ -1,0 +1,260 @@
+/* Maps travel theme tokens onto the current UI without changing its geometry. */
+html[data-travel-theme] {
+  --bg:var(--travel-canvas); --surface:var(--travel-surface); --surface-soft:var(--travel-surface-soft);
+  --text:var(--travel-text); --muted:var(--travel-muted); --quiet:var(--travel-muted);
+  --line:var(--travel-line); --line-strong:var(--travel-line);
+  --blue:var(--travel-brand); --blue-dark:var(--travel-brand-strong);
+  --green:var(--travel-success); --teal:var(--travel-info); --amber:var(--travel-warning); --red:var(--travel-danger);
+  --shadow:0 12px 34px var(--travel-shadow); --shadow-strong:0 18px 48px var(--travel-shadow-strong);
+  --day-1:var(--travel-day-1); --day-2:var(--travel-day-2); --day-3:var(--travel-day-3);
+}
+html[data-travel-theme] body { background:var(--travel-canvas); color:var(--travel-text); }
+html[data-travel-theme] .react-workspace-shell {
+  --brand:var(--travel-brand); --brand-strong:var(--travel-brand-strong); --brand-soft:var(--travel-brand-soft);
+  --info:var(--travel-info); --warning:var(--travel-warning); --surface:var(--travel-surface); --canvas:var(--travel-canvas);
+  --text:var(--travel-text); --text-2:var(--travel-text-2); --line:var(--travel-line); --line-soft:var(--travel-line-soft);
+  --muted:var(--travel-muted); --accent:var(--travel-brand);
+  color:var(--travel-text); background:var(--travel-canvas);
+}
+
+html[data-travel-theme] .travel-sidebar.react-sidebar { border-right-color:var(--travel-sidebar-line); background:var(--travel-sidebar-bg); }
+html[data-travel-theme] .sidebar-brand .travel-logo-mark { color:#fff; background:var(--travel-sidebar-accent); }
+html[data-travel-theme] .sidebar-brand .sidebar-label,
+html[data-travel-theme] .sidebar-brand .sidebar-label b { color:var(--travel-sidebar-text); }
+html[data-travel-theme] .sidebar-brand .sidebar-label small,
+html[data-travel-theme] .trip-history-group > header,
+html[data-travel-theme] .history-item small,
+html[data-travel-theme] .sidebar-user small { color:var(--travel-sidebar-muted); }
+html[data-travel-theme] .sidebar-collapse { border-color:var(--travel-sidebar-line); color:var(--travel-sidebar-text); background:var(--travel-sidebar-surface); }
+html[data-travel-theme] .sidebar-new-trip { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .sidebar-new-trip:hover { background:var(--travel-brand-strong); }
+html[data-travel-theme] .sidebar-search { border-color:var(--travel-sidebar-line); color:var(--travel-sidebar-muted); background:var(--travel-sidebar-surface); }
+html[data-travel-theme] .sidebar-search input { color:var(--travel-sidebar-text); }
+html[data-travel-theme] .sidebar-search input::placeholder,
+html[data-travel-theme] .sidebar-search kbd { color:var(--travel-sidebar-muted); }
+html[data-travel-theme] .sidebar-search kbd,
+html[data-travel-theme] .trip-history-group > header b { border-color:var(--travel-sidebar-line); background:var(--travel-sidebar-surface); color:var(--travel-sidebar-muted); }
+html[data-travel-theme] .history-item { color:var(--travel-sidebar-muted); }
+html[data-travel-theme] .history-item b,
+html[data-travel-theme] .sidebar-user b { color:var(--travel-sidebar-text); }
+html[data-travel-theme] .history-item > i { background:var(--travel-sidebar-muted); }
+html[data-travel-theme] .history-item.active { color:var(--travel-sidebar-text); background:var(--travel-sidebar-active); box-shadow:inset 2px 0 var(--travel-sidebar-accent); }
+html[data-travel-theme] .history-item.active > i { background:var(--travel-sidebar-accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--travel-sidebar-accent) 14%,transparent); }
+html[data-travel-theme] .history-item.active b,
+html[data-travel-theme] .history-item.active small { color:var(--travel-sidebar-text); }
+html[data-travel-theme] .user-avatar { border-color:var(--travel-sidebar-line); color:var(--travel-sidebar-text); background:var(--travel-sidebar-surface); }
+html[data-travel-theme] .sidebar-empty { color:var(--travel-sidebar-muted); }
+
+html[data-travel-theme] .workspace-header { border-bottom-color:var(--travel-line-soft); background:var(--travel-header-bg); }
+html[data-travel-theme] .workspace-title span { color:var(--travel-muted); }
+html[data-travel-theme] .workspace-state { color:var(--travel-text-2); background:var(--travel-surface-soft); }
+html[data-travel-theme] .workspace-state.live { color:var(--travel-success); background:color-mix(in srgb,var(--travel-success) 12%,var(--travel-surface)); }
+html[data-travel-theme] .react-workspace-shell button:focus-visible,
+html[data-travel-theme] .react-workspace-shell input:focus-visible,
+html[data-travel-theme] .react-workspace-shell textarea:focus-visible,
+html[data-travel-theme] .react-workspace-shell select:focus-visible,
+html[data-travel-theme] .react-workspace-shell a:focus-visible { outline-color:color-mix(in srgb,var(--travel-focus) 65%,transparent); }
+
+html[data-travel-theme] .persistent-composer.react-composer,
+html[data-travel-theme] .composer-history,
+html[data-travel-theme] .ready-quality-strip,
+html[data-travel-theme] .ready-grid > .panel,
+html[data-travel-theme] .ready-grid > .itinerary.panel,
+html[data-travel-theme] .ready-grid > .decision-panel.panel,
+html[data-travel-theme] .quick-param-grid,
+html[data-travel-theme] .concept-examples,
+html[data-travel-theme] .query-input-wrap,
+html[data-travel-theme] .inline-parameter-panel,
+html[data-travel-theme] .validation-crowd,
+html[data-travel-theme] .plan-comparison > div,
+html[data-travel-theme] .variant-tabs button,
+html[data-travel-theme] .weather-forecast-row article,
+html[data-travel-theme] .spot-card { background-color:var(--travel-surface); border-color:var(--travel-line-soft); }
+html[data-travel-theme] .persistent-composer.react-composer { box-shadow:0 10px 28px var(--travel-shadow); }
+html[data-travel-theme] .persistent-composer .secondary-button,
+html[data-travel-theme] .composer-spark { border-color:var(--travel-brand); color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .primary-button,
+html[data-travel-theme] .react-validation-layout .compiler-card > button { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .primary-button:hover,
+html[data-travel-theme] .react-validation-layout .compiler-card > button:hover { background:var(--travel-brand-strong); }
+
+html[data-travel-theme] .quick-param-grid button:hover,
+html[data-travel-theme] .quick-param-grid button.text-detected,
+html[data-travel-theme] .quick-param-grid .more-params.active,
+html[data-travel-theme] .weather-forecast-row article.active,
+html[data-travel-theme] .timeline-stop.selected { background:var(--travel-brand-soft); }
+html[data-travel-theme] .quick-param-grid button:hover,
+html[data-travel-theme] .quick-param-grid button.text-detected,
+html[data-travel-theme] .quick-param-grid .more-params.active,
+html[data-travel-theme] .variant-tabs button.active,
+html[data-travel-theme] .decision-tabs button.active,
+html[data-travel-theme] .parameter-field .chip.active,
+html[data-travel-theme] .section-kicker,
+html[data-travel-theme] .section-code { color:var(--travel-brand); }
+html[data-travel-theme] .timeline-stop.selected { box-shadow:inset 3px 0 var(--travel-brand); }
+html[data-travel-theme] .variant-tabs button.active { border-bottom-color:var(--travel-brand); }
+html[data-travel-theme] .decision-tabs button.active { box-shadow:inset 0 -2px var(--travel-brand); }
+html[data-travel-theme] .health-metric strong,
+html[data-travel-theme] .compiler-footnote { color:var(--travel-brand-strong); }
+
+html[data-travel-theme] .profile-completion,
+html[data-travel-theme] .weather-note,
+html[data-travel-theme] .planning-insights .planning-record,
+html[data-travel-theme] .empty-evidence,
+html[data-travel-theme] .candidate-metrics span { background:var(--travel-surface-soft); }
+html[data-travel-theme] .requirement-summary-grid article,
+html[data-travel-theme] .ai-understanding { border-color:var(--travel-line-soft); background:var(--travel-surface); }
+
+html[data-travel-theme] .task-cancel,
+html[data-travel-theme] .spot-opening-alert { color:var(--travel-danger); }
+html[data-travel-theme] .forecast-state.unavailable { color:var(--travel-warning); }
+html[data-travel-theme] .reason-row span::before,
+html[data-travel-theme] .workspace-state.live { color:var(--travel-success); }
+
+/* Remaining high-visibility foundations that predate the semantic token layer. */
+html[data-travel-theme] .workspace-actions > button,
+html[data-travel-theme] .secondary-button,
+html[data-travel-theme] .task-cancel,
+html[data-travel-theme] .parameter-panel-close,
+html[data-travel-theme] .ready-trip-actions button { border-color:var(--travel-line); color:var(--travel-text-2); background:var(--travel-surface); }
+html[data-travel-theme] .react-stage-progress li { color:var(--travel-muted); }
+html[data-travel-theme] .react-stage-progress li::before { background:var(--travel-line-soft); }
+html[data-travel-theme] .react-stage-progress li.done::before,
+html[data-travel-theme] .react-stage-progress li.active::before { background:var(--travel-brand); }
+html[data-travel-theme] .react-stage-progress li.done,
+html[data-travel-theme] .react-stage-progress li.active { color:var(--travel-brand-strong); }
+html[data-travel-theme] .react-stage-progress i { border-color:var(--travel-line); background:var(--travel-surface); }
+html[data-travel-theme] .react-stage-progress li.done i,
+html[data-travel-theme] .react-stage-progress li.done.active i { color:#fff; border-color:var(--travel-brand); background:var(--travel-brand); }
+html[data-travel-theme] .react-stage-progress li.active i { color:var(--travel-brand); border-color:var(--travel-brand); box-shadow:0 0 0 5px color-mix(in srgb,var(--travel-brand) 10%,transparent); }
+html[data-travel-theme] .panel,
+html[data-travel-theme] .timeline-day,
+html[data-travel-theme] .react-validation-layout .validation-candidate-grid > button { border-color:var(--travel-line-soft); background:var(--travel-surface); }
+html[data-travel-theme] .react-validation-layout .validation-candidate-grid > button.active { border-color:var(--travel-brand); box-shadow:0 0 0 3px color-mix(in srgb,var(--travel-brand) 10%,transparent); }
+
+/* Interactive surfaces: remove the legacy green/blue literals from every workflow step. */
+html[data-travel-theme] .empty-copy h1,
+html[data-travel-theme] .try-say h2,
+html[data-travel-theme] .query-content label,
+html[data-travel-theme] .quick-param-grid button strong,
+html[data-travel-theme] .concept-examples button b { color:var(--travel-text); }
+html[data-travel-theme] .empty-copy > p,
+html[data-travel-theme] .query-helper,
+html[data-travel-theme] .quick-param-grid button,
+html[data-travel-theme] .concept-examples button,
+html[data-travel-theme] .concept-examples button small { color:var(--travel-text-2); }
+html[data-travel-theme] .empty-copy > p strong,
+html[data-travel-theme] .query-helper button { color:var(--travel-brand); }
+html[data-travel-theme] .hero-capabilities span { border-color:var(--travel-line-soft); color:var(--travel-text-2); background:color-mix(in srgb,var(--travel-surface) 88%,transparent); }
+html[data-travel-theme] .query-input-wrap,
+html[data-travel-theme] .query-content textarea { border-color:var(--travel-line-soft); color:var(--travel-text); background:var(--travel-surface); }
+html[data-travel-theme] .query-content textarea::placeholder { color:var(--travel-muted); }
+html[data-travel-theme] .query-helper { border-top-color:var(--travel-line-soft); }
+html[data-travel-theme] .query-helper button:hover { color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+
+html[data-travel-theme] .quick-param-grid button { border-color:var(--travel-line-soft); background:transparent; }
+html[data-travel-theme] .quick-param-grid button + button { border-left-color:var(--travel-line-soft); }
+html[data-travel-theme] .quick-param-grid button > i { color:var(--travel-brand); background:var(--travel-brand-soft); }
+html[data-travel-theme] .quick-param-grid button > span,
+html[data-travel-theme] .quick-param-grid button small,
+html[data-travel-theme] .quick-param-swipe-hint { color:var(--travel-muted); }
+html[data-travel-theme] .quick-param-grid button:hover,
+html[data-travel-theme] .quick-param-grid button.text-detected,
+html[data-travel-theme] .quick-param-grid .more-params.active { border-color:var(--travel-brand); color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .quick-param-grid button.text-detected > i,
+html[data-travel-theme] .quick-param-grid .more-params.active > i { color:#fff; background:var(--travel-brand); }
+
+html[data-travel-theme] .concept-examples button { border-color:var(--travel-line-soft); background:var(--travel-surface); }
+html[data-travel-theme] .concept-examples button:hover { border-color:var(--travel-brand); background:var(--travel-brand-soft); }
+html[data-travel-theme] .concept-examples button > i { color:var(--travel-brand); background:var(--travel-brand-soft); }
+html[data-travel-theme] .concept-examples button:hover > i { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .generation-disclaimer { color:var(--travel-muted); }
+
+html[data-travel-theme] .parameter-field input,
+html[data-travel-theme] .parameter-field select,
+html[data-travel-theme] .counter-control,
+html[data-travel-theme] .parameter-field .chip,
+html[data-travel-theme] .parameter-field .segmented,
+html[data-travel-theme] .reasoning-toggle > button { border-color:var(--travel-line); color:var(--travel-text-2); background:var(--travel-surface); }
+html[data-travel-theme] .parameter-field input,
+html[data-travel-theme] .parameter-field select { color:var(--travel-text); }
+html[data-travel-theme] .parameter-field > span,
+html[data-travel-theme] .parameter-field small { color:var(--travel-muted); }
+html[data-travel-theme] .counter-control button { color:var(--travel-brand); background:var(--travel-brand-soft); }
+html[data-travel-theme] .counter-control button:hover { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .parameter-field .chip:hover,
+html[data-travel-theme] .parameter-field .chip.active,
+html[data-travel-theme] .parameter-field .segmented button:hover,
+html[data-travel-theme] .parameter-field .segmented button.active { border-color:var(--travel-brand); color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .parameter-field .segmented button { border-color:transparent; color:var(--travel-text-2); background:transparent; }
+html[data-travel-theme] .reasoning-toggle > button.active { border-color:var(--travel-brand); color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .reasoning-toggle > button i { background:var(--travel-line); }
+html[data-travel-theme] .reasoning-toggle > button.active i { background:var(--travel-brand); }
+
+html[data-travel-theme] .mobile-menu-button,
+html[data-travel-theme] .dialog-close,
+html[data-travel-theme] .map-zoom button { border-color:var(--travel-line); color:var(--travel-text-2); background:var(--travel-surface); }
+html[data-travel-theme] .mobile-menu-button:hover,
+html[data-travel-theme] .dialog-close:hover,
+html[data-travel-theme] .map-zoom button:hover { border-color:var(--travel-brand); color:var(--travel-brand); background:var(--travel-brand-soft); }
+
+html[data-travel-theme] .decision-tabs button,
+html[data-travel-theme] .variant-tabs button,
+html[data-travel-theme] .timeline-day-head,
+html[data-travel-theme] .timeline-stop,
+html[data-travel-theme] .execution-mode footer button,
+html[data-travel-theme] .trust-dashboard button { color:var(--travel-text-2); }
+html[data-travel-theme] .decision-tabs button:hover,
+html[data-travel-theme] .variant-tabs button:hover,
+html[data-travel-theme] .timeline-day-head:hover,
+html[data-travel-theme] .timeline-stop:hover,
+html[data-travel-theme] .execution-mode footer button:hover,
+html[data-travel-theme] .trust-dashboard button:hover { color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .decision-tabs button.active,
+html[data-travel-theme] .variant-tabs button.active,
+html[data-travel-theme] .timeline-stop.selected { color:var(--travel-brand-strong); }
+html[data-travel-theme] .timeline-stop.selected,
+html[data-travel-theme] .react-map-marker.active { border-color:var(--travel-brand); background:var(--travel-brand-soft); }
+html[data-travel-theme] .react-map-marker { border-color:var(--travel-line); color:var(--travel-text-2); background:var(--travel-surface); }
+html[data-travel-theme] .react-map-marker > span { color:var(--travel-text); }
+html[data-travel-theme] .react-map-marker > i { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .react-map-marker.active { color:var(--travel-text); background:color-mix(in srgb,var(--travel-surface) 96%,transparent); }
+html[data-travel-theme] .react-map-marker.active > i,
+html[data-travel-theme] .selected-map-location-motion { color:var(--travel-brand); background:transparent; }
+
+html[data-travel-theme] .variant-compare-button,
+html[data-travel-theme] .map-actions button { border-color:var(--travel-line); color:var(--travel-text-2); background:var(--travel-surface); }
+html[data-travel-theme] .variant-compare-button:hover,
+html[data-travel-theme] .map-actions button:hover { border-color:var(--travel-brand); color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .agent-input-row input { border-color:var(--travel-line); color:var(--travel-text); background:var(--travel-surface-soft); }
+html[data-travel-theme] .agent-input-row button,
+html[data-travel-theme] .data-stage-actions #dataStageContinueButton { color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .agent-input-row button:hover,
+html[data-travel-theme] .data-stage-actions #dataStageContinueButton:hover { background:var(--travel-brand-strong); }
+html[data-travel-theme] .agent-input-row button:disabled { color:var(--travel-muted); background:var(--travel-line-soft); }
+html[data-travel-theme] .source-panel .mini-title button,
+html[data-travel-theme] .data-stage-heading button,
+html[data-travel-theme] .text-button { color:var(--travel-brand); background:transparent; }
+html[data-travel-theme] .source-panel .mini-title button:hover,
+html[data-travel-theme] .data-stage-heading button:hover,
+html[data-travel-theme] .text-button:hover { color:var(--travel-brand-strong); background:var(--travel-brand-soft); }
+html[data-travel-theme] .react-stage-progress li > button:not(:disabled):hover span { color:var(--travel-brand-strong); }
+html[data-travel-theme] .ready-trip-actions button.active,
+html[data-travel-theme] .ready-trip-actions button:last-child { border-color:var(--travel-brand); color:#fff; background:var(--travel-brand); }
+html[data-travel-theme] .ready-trip-actions button.active:hover,
+html[data-travel-theme] .ready-trip-actions button:last-child:hover { background:var(--travel-brand-strong); }
+
+html[data-travel-theme] .sidebar-nav button { color:var(--travel-sidebar-muted); background:transparent; }
+html[data-travel-theme] .sidebar-nav button span { color:var(--travel-sidebar-accent); }
+html[data-travel-theme] .sidebar-nav button:hover,
+html[data-travel-theme] .sidebar-nav button.active { color:var(--travel-sidebar-text); background:var(--travel-sidebar-active); }
+
+html[data-travel-theme] .history-delete { color:var(--travel-sidebar-muted); background:transparent; }
+html[data-travel-theme] .history-delete:hover { color:var(--travel-danger); background:color-mix(in srgb,var(--travel-danger) 12%,var(--travel-sidebar-surface)); }
+html[data-travel-theme] .history-delete-confirm { border-color:var(--travel-sidebar-line); color:var(--travel-sidebar-text); background:var(--travel-sidebar-surface); }
+html[data-travel-theme] .history-delete-confirm button { border-color:var(--travel-sidebar-line); color:var(--travel-sidebar-text); background:transparent; }
+html[data-travel-theme] .history-delete-confirm button:first-of-type { color:var(--travel-danger); }
+
+html[data-travel-theme] .primary-button:disabled,
+html[data-travel-theme] .secondary-button:disabled,
+html[data-travel-theme] button:disabled { cursor:not-allowed; }

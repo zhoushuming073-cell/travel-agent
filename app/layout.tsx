@@ -1,5 +1,18 @@
 import type { Metadata } from "next";
+import { TRAVEL_THEME_IDS } from "./travel/[[...tripId]]/styles/themes/travel-theme-registry.ts";
 import "./globals.css";
+
+const DEFAULT_TRAVEL_THEME = "arctic-blue";
+const TRAVEL_THEME_STORAGE_KEY = "travel-ui-theme";
+const travelThemeBootScript = `(() => {
+  const themes = ${JSON.stringify(TRAVEL_THEME_IDS)};
+  let theme = "${DEFAULT_TRAVEL_THEME}";
+  try {
+    const stored = localStorage.getItem("${TRAVEL_THEME_STORAGE_KEY}");
+    if (stored && themes.includes(stored)) theme = stored;
+  } catch {}
+  document.documentElement.dataset.travelTheme = theme;
+})();`;
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://smart-travel-cn-2026.zhoushuming.chatgpt.site"),
@@ -30,8 +43,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" data-travel-theme={DEFAULT_TRAVEL_THEME} suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: travelThemeBootScript }}/>
         <link rel="preload" href="/animations/face-scanning.json" as="fetch" type="application/json" crossOrigin="anonymous"/>
         <link rel="preload" href="/animations/search.json" as="fetch" type="application/json" crossOrigin="anonymous"/>
       </head>

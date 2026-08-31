@@ -1,0 +1,130 @@
+/* Travel Assistant color palettes. Apply one id to <html data-travel-theme="...">. */
+html[data-travel-theme="arctic-blue"] {
+  --travel-canvas:#F6F8FC; --travel-surface:#FFFFFF; --travel-surface-soft:#EEF3FA;
+  --travel-text:#182235; --travel-text-2:#59697F; --travel-muted:#7B899C;
+  --travel-line:#D9E2EE; --travel-line-soft:#E7EDF5;
+  --travel-brand:#4E7DFF; --travel-brand-strong:#315ED8; --travel-brand-soft:#EAF0FF;
+  --travel-info:#3986E8; --travel-success:#2AAE8A; --travel-warning:#D88B34; --travel-danger:#D65E6A;
+  --travel-sidebar-bg:#EAF1F8; --travel-sidebar-surface:#F4F7FB; --travel-sidebar-text:#203047;
+  --travel-sidebar-muted:#6F8095; --travel-sidebar-line:#D4DFEB; --travel-sidebar-active:#DCE8FA; --travel-sidebar-accent:#4E7DFF;
+  --travel-header-bg:#F8FAFD; --travel-focus:#4E7DFF;
+  --travel-day-1:#4E7DFF; --travel-day-2:#2AAE8A; --travel-day-3:#E69A3B;
+  --travel-shadow:rgba(52,78,118,.10); --travel-shadow-strong:rgba(52,78,118,.16);
+}
+
+html[data-travel-theme="ivory-coral"] {
+  --travel-canvas:#FBF8F3; --travel-surface:#FFFDF9; --travel-surface-soft:#F7EFE8;
+  --travel-text:#302A27; --travel-text-2:#685D56; --travel-muted:#8A7D74;
+  --travel-line:#E7DDD3; --travel-line-soft:#F0E8E1;
+  --travel-brand:#EF7D64; --travel-brand-strong:#CE5F49; --travel-brand-soft:#FFF0EA;
+  --travel-info:#4B78B8; --travel-success:#45A786; --travel-warning:#D58A3A; --travel-danger:#D65F67;
+  --travel-sidebar-bg:#F4ECE4; --travel-sidebar-surface:#FBF6F0; --travel-sidebar-text:#3A312C;
+  --travel-sidebar-muted:#81736A; --travel-sidebar-line:#E3D6CB; --travel-sidebar-active:#FBE1D8; --travel-sidebar-accent:#EF7D64;
+  --travel-header-bg:#FCF9F5; --travel-focus:#EF7D64;
+  --travel-day-1:#EF7D64; --travel-day-2:#45A786; --travel-day-3:#D9A54A;
+  --travel-shadow:rgba(104,75,56,.10); --travel-shadow-strong:rgba(104,75,56,.16);
+}
+
+html[data-travel-theme="lavender-indigo"] {
+  --travel-canvas:#F7F5FB; --travel-surface:#FFFFFF; --travel-surface-soft:#F0ECFA;
+  --travel-text:#262038; --travel-text-2:#625A75; --travel-muted:#80778F;
+  --travel-line:#DED8EB; --travel-line-soft:#EBE7F3;
+  --travel-brand:#6C5CE7; --travel-brand-strong:#5142C5; --travel-brand-soft:#EEEAFE;
+  --travel-info:#567BC8; --travel-success:#36A78E; --travel-warning:#D88A38; --travel-danger:#D45E75;
+  --travel-sidebar-bg:#EEEAF7; --travel-sidebar-surface:#F7F4FB; --travel-sidebar-text:#312A47;
+  --travel-sidebar-muted:#766D89; --travel-sidebar-line:#DCD5EA; --travel-sidebar-active:#E3DDF8; --travel-sidebar-accent:#6C5CE7;
+  --travel-header-bg:#F9F7FC; --travel-focus:#6C5CE7;
+  --travel-day-1:#6C5CE7; --travel-day-2:#36A78E; --travel-day-3:#D89A42;
+  --travel-shadow:rgba(79,60,126,.10); --travel-shadow-strong:rgba(79,60,126,.16);
+}
+
+html[data-travel-theme="aqua-sand"] {
+  --travel-canvas:#F8F7F2; --travel-surface:#FFFFFF; --travel-surface-soft:#EAF5F5;
+  --travel-text:#24363A; --travel-text-2:#5B7073; --travel-muted:#7B8B8D;
+  --travel-line:#D9E5E4; --travel-line-soft:#E8EFEE;
+  --travel-brand:#3C9FAF; --travel-brand-strong:#287D8B; --travel-brand-soft:#E7F6F7;
+  --travel-info:#4F80BD; --travel-success:#36A47E; --travel-warning:#D58E3C; --travel-danger:#D35F68;
+  --travel-sidebar-bg:#EDF4F4; --travel-sidebar-surface:#F7FAFA; --travel-sidebar-text:#294247;
+  --travel-sidebar-muted:#718589; --travel-sidebar-line:#D4E2E2; --travel-sidebar-active:#DDF0F1; --travel-sidebar-accent:#3C9FAF;
+  --travel-header-bg:#FAF9F5; --travel-focus:#3C9FAF;
+  --travel-day-1:#3C9FAF; --travel-day-2:#36A47E; --travel-day-3:#D7A044;
+  --travel-shadow:rgba(56,94,98,.10); --travel-shadow-strong:rgba(56,94,98,.16);
+}
+
+html[data-travel-theme="graphite-violet"] {
+  --travel-canvas:#F7F7FA; --travel-surface:#FFFFFF; --travel-surface-soft:#F0F1F5;
+  --travel-text:#1F222A; --travel-text-2:#5F6470; --travel-muted:#7D828D;
+  --travel-line:#DDE0E7; --travel-line-soft:#ECEEF2;
+  --travel-brand:#625BFF; --travel-brand-strong:#4841D9; --travel-brand-soft:#ECEBFF;
+  --travel-info:#4778C9; --travel-success:#34A680; --travel-warning:#D48C35; --travel-danger:#D45F6C;
+  --travel-sidebar-bg:#ECEEF3; --travel-sidebar-surface:#F6F7F9; --travel-sidebar-text:#252933;
+  --travel-sidebar-muted:#717784; --travel-sidebar-line:#D8DCE4; --travel-sidebar-active:#E1E2FB; --travel-sidebar-accent:#625BFF;
+  --travel-header-bg:#FAFAFC; --travel-focus:#625BFF;
+  --travel-day-1:#625BFF; --travel-day-2:#34A680; --travel-day-3:#D89840;
+  --travel-shadow:rgba(39,42,52,.10); --travel-shadow-strong:rgba(39,42,52,.16);
+}
+
+html[data-travel-theme="sky-peach"] {
+  --travel-canvas:#F8FBFE; --travel-surface:#FFFFFF; --travel-surface-soft:#EEF7FF;
+  --travel-text:#203047; --travel-text-2:#5E7188; --travel-muted:#7E8FA2;
+  --travel-line:#DCE8F2; --travel-line-soft:#EAF1F7;
+  --travel-brand:#4C9CEB; --travel-brand-strong:#337CC3; --travel-brand-soft:#E9F4FF;
+  --travel-info:#4C9CEB; --travel-success:#37B28C; --travel-warning:#E29A46; --travel-danger:#E06D77;
+  --travel-sidebar-bg:#EDF5FB; --travel-sidebar-surface:#F7FBFE; --travel-sidebar-text:#263B54;
+  --travel-sidebar-muted:#71869A; --travel-sidebar-line:#D7E6F0; --travel-sidebar-active:#DDEFFF; --travel-sidebar-accent:#FF9B8B;
+  --travel-header-bg:#FAFCFE; --travel-focus:#4C9CEB;
+  --travel-day-1:#4C9CEB; --travel-day-2:#37B28C; --travel-day-3:#FF9B8B;
+  --travel-shadow:rgba(62,102,142,.10); --travel-shadow-strong:rgba(62,102,142,.16);
+}
+
+html[data-travel-theme="champagne-navy"] {
+  --travel-canvas:#FAF8F4; --travel-surface:#FFFDF9; --travel-surface-soft:#F4EFE6;
+  --travel-text:#1E2C43; --travel-text-2:#58677B; --travel-muted:#7C7A77;
+  --travel-line:#E3DCCF; --travel-line-soft:#EFE9DF;
+  --travel-brand:#C99A4C; --travel-brand-strong:#A9772D; --travel-brand-soft:#F8EDD9;
+  --travel-info:#315C8C; --travel-success:#3D9D7F; --travel-warning:#C8872D; --travel-danger:#CB6268;
+  --travel-sidebar-bg:#F3EFE7; --travel-sidebar-surface:#FBF8F2; --travel-sidebar-text:#26364E;
+  --travel-sidebar-muted:#756F67; --travel-sidebar-line:#E0D7C9; --travel-sidebar-active:#F2E4CB; --travel-sidebar-accent:#315C8C;
+  --travel-header-bg:#FBF9F5; --travel-focus:#315C8C;
+  --travel-day-1:#315C8C; --travel-day-2:#3D9D7F; --travel-day-3:#C99A4C;
+  --travel-shadow:rgba(70,61,46,.10); --travel-shadow-strong:rgba(70,61,46,.16);
+}
+
+html[data-travel-theme="rose-slate"] {
+  --travel-canvas:#FAF7F8; --travel-surface:#FFFFFF; --travel-surface-soft:#F4EBEF;
+  --travel-text:#2B2B33; --travel-text-2:#66616A; --travel-muted:#827A81;
+  --travel-line:#E4DADE; --travel-line-soft:#F0E8EB;
+  --travel-brand:#D9819B; --travel-brand-strong:#B9607C; --travel-brand-soft:#F8E9EF;
+  --travel-info:#617A98; --travel-success:#3BA287; --travel-warning:#D28A3E; --travel-danger:#CE5D6A;
+  --travel-sidebar-bg:#F1E9EC; --travel-sidebar-surface:#F9F5F6; --travel-sidebar-text:#34323A;
+  --travel-sidebar-muted:#7A7279; --travel-sidebar-line:#DFD3D8; --travel-sidebar-active:#F3DCE5; --travel-sidebar-accent:#617A98;
+  --travel-header-bg:#FBF8F9; --travel-focus:#D9819B;
+  --travel-day-1:#617A98; --travel-day-2:#3BA287; --travel-day-3:#D9819B;
+  --travel-shadow:rgba(89,65,74,.10); --travel-shadow-strong:rgba(89,65,74,.16);
+}
+
+html[data-travel-theme="mint-cobalt"] {
+  --travel-canvas:#F5FBFA; --travel-surface:#FFFFFF; --travel-surface-soft:#EAF7F3;
+  --travel-text:#17313A; --travel-text-2:#587078; --travel-muted:#778B90;
+  --travel-line:#D7E7E3; --travel-line-soft:#E7F0EE;
+  --travel-brand:#315FD6; --travel-brand-strong:#2449AD; --travel-brand-soft:#EAF0FF;
+  --travel-info:#315FD6; --travel-success:#36AF8B; --travel-warning:#D8943D; --travel-danger:#D65F6A;
+  --travel-sidebar-bg:#E8F3F1; --travel-sidebar-surface:#F5FAF9; --travel-sidebar-text:#1E3A41;
+  --travel-sidebar-muted:#6F8589; --travel-sidebar-line:#D2E3DF; --travel-sidebar-active:#DCEAEF; --travel-sidebar-accent:#65C9B4;
+  --travel-header-bg:#F8FCFB; --travel-focus:#315FD6;
+  --travel-day-1:#315FD6; --travel-day-2:#36AF8B; --travel-day-3:#D99B43;
+  --travel-shadow:rgba(43,92,94,.10); --travel-shadow-strong:rgba(43,92,94,.16);
+}
+
+html[data-travel-theme="sunset-lilac"] {
+  --travel-canvas:#FBF8FB; --travel-surface:#FFFFFF; --travel-surface-soft:#F5EEFA;
+  --travel-text:#2A2230; --travel-text-2:#685E70; --travel-muted:#817689;
+  --travel-line:#E3DAEA; --travel-line-soft:#EEE8F2;
+  --travel-brand:#E88964; --travel-brand-strong:#C86B49; --travel-brand-soft:#FCEFE8;
+  --travel-info:#8069C9; --travel-success:#3DAA85; --travel-warning:#D8903A; --travel-danger:#D46470;
+  --travel-sidebar-bg:#F1ECF6; --travel-sidebar-surface:#F9F6FB; --travel-sidebar-text:#342A3C;
+  --travel-sidebar-muted:#796F81; --travel-sidebar-line:#DDD5E5; --travel-sidebar-active:#F4DED8; --travel-sidebar-accent:#8A74D6;
+  --travel-header-bg:#FCF9FC; --travel-focus:#8A74D6;
+  --travel-day-1:#8A74D6; --travel-day-2:#3DAA85; --travel-day-3:#E88964;
+  --travel-shadow:rgba(84,63,92,.10); --travel-shadow-strong:rgba(84,63,92,.16);
+}
