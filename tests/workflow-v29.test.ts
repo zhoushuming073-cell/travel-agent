@@ -7,6 +7,7 @@ import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit } 
 
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
+const providerClientSource = readFileSync(join(root, "worker", "providers", "provider-client.ts"), "utf8");
 const persistenceSource = readFileSync(join(root, "worker", "persistence.ts"), "utf8");
 const frontendSource = readFileSync(join(root, "travel", "services", "planningApi.ts"), "utf8");
 const workspaceSource = readFileSync(join(root, "travel", "TravelWorkspaceApp.tsx"), "utf8");
@@ -155,7 +156,7 @@ test("deterministic final validation errors do not repeat the same unchanged sta
 });
 
 test("model failures degrade safely instead of multiplying calls or killing the whole trip", () => {
-  assert.match(apiSource, /!\/联通元景\/\.test\(source\)/);
+  assert.match(providerClientSource, /!\/联通元景\/\.test\(source\)/);
   assert.match(apiSource, /结构化重规划复用（未重复调用模型）/);
   assert.match(apiSource, /MODEL_STRUCTURE_RECOVERED/);
   assert.match(apiSource, /recoverPlannerVariant/);

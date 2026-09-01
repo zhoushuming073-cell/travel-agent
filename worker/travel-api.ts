@@ -68,6 +68,27 @@ import { optimizeRouteBuckets } from "./domain/route-optimizer.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "./domain/decision-trace.ts";
 import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
 import { calibrateCrowdWithResearch, crowdRiskForVisit, predictCrowdRisk } from "./domain/crowd-risk.ts";
+import { clamp, cleanText, list, minutesToTime, normalizeName, timeToMinutes } from "./lib/value-utils.ts";
+import {
+  applyFinalTimelineSafetyRepair,
+  bindTrafficMatrixFacts,
+  compactPlannerKnowledge,
+  completePlannerVariant,
+  enforceRequiredCoverage,
+  legalizePlannerTimelines,
+  normalizePlannerVariant,
+  recoverPlannerVariant,
+} from "./planning/planner-normalization.ts";
+import {
+  amapCandidateRecord,
+  fallbackPoiCategory,
+  haversine,
+  isExcludedCandidatePoi,
+  nominatimCandidateRecord,
+  selectBestAmapDistrict,
+  wikiPageToSpot,
+} from "./providers/poi-normalization.ts";
+import { callMcp, fetchJson, fetchTextResource } from "./providers/provider-client.ts";
 import {
   acquireTravelJobLease,
   addTravelJobEvent,
@@ -98,6 +119,17 @@ import {
   updateTravelJob,
 } from "./persistence.ts";
 
+export {
+  applyFinalTimelineSafetyRepair,
+  compactPlannerKnowledge,
+  enforceRequiredCoverage,
+  fallbackPoiCategory,
+  isExcludedCandidatePoi,
+  normalizePlannerVariant,
+  recoverPlannerVariant,
+  selectBestAmapDistrict,
+};
+
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const NOMINATIM = "https://nominatim.openstreetmap.org";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
@@ -114,170 +146,11 @@ const COMMON_CHINA_CITIES = [
   ["重庆", 29.563, 106.5516], ["西安", 34.3416, 108.9398], ["南京", 32.0603, 118.7969],
   ["苏州", 31.2989, 120.5853], ["厦门", 24.4798, 118.0894], ["昆明", 25.0389, 102.7183],
 ] as const;
-const mcpMemory = new Map<string, { expiresAt: number; value: any }>();
 const unsplashMemory = new Map<string, { expiresAt: number; value: any }>();
 const intelligenceMemory = new Map<string, { expiresAt: number; value: any }>();
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...headers } });
-
-const clamp = (value: unknown, min: number, max: number) =>
-  Math.min(max, Math.max(min, Number(value) || min));
-
-const cleanText = (value: unknown, fallback = "") =>
-  String(value ?? fallback).replace(/[\u0000-\u001f]+/g, " ").trim();
-
-function fetchOptions(init: RequestInit = {}): RequestInit {
-  return {
-    ...init,
-    headers: {
-      accept: "application/json",
-      "user-agent": "SmartTravelAssistant/1.0 (OpenAI Sites demo)",
-      ...(init.headers || {}),
-    },
-  };
-}
-
-function providerNameFor(url: string, source: string): string {
-  let hostname = "";
-  try { hostname = new URL(url).hostname; } catch { hostname = ""; }
-  if (/restapi\.amap\.com/.test(hostname)) return "高德地图官方 Web 服务";
-  if (/wikipedia\.org|wikimedia\.org/.test(hostname)) return "Wikimedia";
-  if (/open-meteo\.com/.test(hostname)) return "Open-Meteo";
-  if (/project-osrm\.org/.test(hostname)) return "OSRM";
-  if (/openstreetmap\.org/.test(hostname)) return "OpenStreetMap / Nominatim";
-  if (/bing\.com/.test(hostname)) return "Bing 新闻 RSS";
-  if (/gdeltproject\.org/.test(hostname)) return "GDELT";
-  if (/mcpmarket\.cn/.test(hostname)) return `MCPMarket：${source}`;
-  if (/元景|DeepSeek|联通/i.test(source)) {
-    const model = source.match(/deepseek-[a-z0-9._-]+/i)?.[0];
-    return model ? `联通元景 AI：${model}` : "联通元景 AI";
-  }
-  return cleanText(source, hostname || "外部服务").slice(0, 80);
-}
-
-async function fetchJson(url: string, init: RequestInit = {}, timeoutMs = 18000, source = "上游服务") {
-  const startedAt = Date.now();
-  const provider = providerNameFor(url, source);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(url, fetchOptions({ ...init, signal: controller.signal }));
-      const text = await response.text();
-      if (response.ok) {
-        const value = text ? JSON.parse(text) : {};
-        await recordProviderHealth(provider, { ok: true, latencyMs: Date.now() - startedAt });
-        return value;
-      }
-      // Model quota errors usually need a wider cooldown than an in-request
-      // retry can provide. Let the durable stage runner handle those so one
-      // user action cannot multiply into nine near-identical AI calls.
-      if (response.status === 429 && attempt < 2 && !/联通元景/.test(source)) {
-        const retryAfter = Number(response.headers.get("retry-after") || 0);
-        await new Promise(resolve => setTimeout(resolve, retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 900 * (attempt + 1)));
-        continue;
-      }
-      let detail = "";
-      try {
-        const parsed = JSON.parse(text);
-        detail = cleanText(parsed?.error?.message || parsed?.reason || parsed?.msg || parsed?.message || (parsed?.code != null ? `code ${parsed.code}` : ""));
-      } catch { detail = cleanText(text).slice(0, 160); }
-      if (response.status === 429) {
-        const error = `${source}请求过于频繁（429）${detail ? `：${detail}` : "，请稍后重试"}`;
-        await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error, rateLimited: true });
-        throw new Error(error);
-      }
-      const error = `${source}返回 ${response.status}${detail ? `：${detail}` : ""}`;
-      await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error });
-      throw new Error(error);
-    } catch (error: any) {
-      if (error?.name === "AbortError") {
-        const message = `${source}响应超时`;
-        await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error: message });
-        throw new Error(message);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  throw new Error(`${source}请求失败`);
-}
-
-function parseMcpPayload(text: string) {
-  const dataLines = text.split(/\r?\n/).filter(line => line.startsWith("data:"));
-  const payload = dataLines.length ? dataLines[dataLines.length - 1].slice(5).trim() : text.trim();
-  if (!payload) return {};
-  return JSON.parse(payload);
-}
-
-async function mcpPost(endpoint: string, payload: any, sessionId = "", timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const headers: Record<string, string> = {
-      accept: "application/json, text/event-stream",
-      "content-type": "application/json",
-    };
-    if (sessionId) headers["mcp-session-id"] = sessionId;
-    const response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(payload), signal: controller.signal });
-    const text = await response.text();
-    if (!response.ok) throw new Error(`MCP HTTP ${response.status}`);
-    return { payload: parseMcpPayload(text), sessionId: response.headers.get("mcp-session-id") || sessionId };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function parseMcpToolText(value: unknown) {
-  const text = cleanText(value);
-  if (!text) return null;
-  try { return JSON.parse(text); } catch { return text; }
-}
-
-async function callMcp(endpoint: string, tool: string, args: any, options: { timeoutMs?: number; cacheMs?: number } = {}) {
-  const key = `${endpoint}|${tool}|${JSON.stringify(args)}`;
-  const provider = `MCPMarket：${tool}`;
-  const cached = mcpMemory.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
-    await recordProviderHealth(provider, { ok: true, latencyMs: 0, cacheHit: true });
-    return cached.value;
-  }
-  const persisted = await persistentCacheGet("mcp", key);
-  if (persisted !== null) {
-    mcpMemory.set(key, { expiresAt: Date.now() + (options.cacheMs || 5 * 60 * 1000), value: persisted });
-    await recordProviderHealth(provider, { ok: true, latencyMs: 1, cacheHit: true });
-    return persisted;
-  }
-  const timeoutMs = options.timeoutMs || 12000;
-  const startedAt = Date.now();
-  try {
-    const initialized = await mcpPost(endpoint, {
-      jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "smart-travel-cn", version: "1.0.0" } },
-    }, "", timeoutMs);
-    const sessionId = initialized.sessionId;
-    if (!sessionId) throw new Error("MCP 未返回会话标识");
-    await mcpPost(endpoint, { jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, timeoutMs);
-    const called = await mcpPost(endpoint, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: tool, arguments: args } }, sessionId, timeoutMs);
-    const rpc = called.payload;
-    if (rpc?.error) throw new Error(cleanText(rpc.error.message, "MCP 调用失败"));
-    const result = rpc?.result || {};
-    const textContent = (result.content || []).find((item: any) => item?.type === "text")?.text;
-    if (result.isError) throw new Error(cleanText(textContent, `${tool} 返回错误`));
-    const value = parseMcpToolText(textContent) ?? result.structuredContent ?? result;
-    const cacheMs = options.cacheMs || 5 * 60 * 1000;
-    mcpMemory.set(key, { expiresAt: Date.now() + cacheMs, value });
-    await persistentCachePut("mcp", key, value, cacheMs);
-    await recordProviderHealth(provider, { ok: true, latencyMs: Date.now() - startedAt });
-    return value;
-  } catch (error: any) {
-    const message = cleanText(error?.message, "MCP 调用失败");
-    await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error: message, rateLimited: /429|频繁|额度/.test(message) });
-    throw error;
-  }
-}
 
 function dateString(value: unknown, fallback = new Date().toISOString().slice(0, 10)) {
   const text = cleanText(value);
@@ -296,24 +169,6 @@ function diffDays(from: string, to: string) {
 
 function weekday(iso: string) {
   return new Intl.DateTimeFormat("zh-CN", { weekday: "short", timeZone: "UTC" }).format(new Date(`${iso}T00:00:00Z`));
-}
-
-function minutesToTime(total: number) {
-  const safe = Math.max(0, Math.round(total));
-  return `${String(Math.floor(safe / 60) % 24).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
-}
-
-function timeToMinutes(text: unknown, fallback: number) {
-  const match = cleanText(text).match(/(\d{1,2}):(\d{2})/);
-  return match ? clamp(Number(match[1]) * 60 + Number(match[2]), 0, 1439) : fallback;
-}
-
-function list<T = unknown>(value: unknown): T[] {
-  return Array.isArray(value) ? value.filter((item): item is T => item !== null && item !== undefined && item !== "") : [];
-}
-
-function normalizeName(name: unknown) {
-  return cleanText(name).replace(/[\s·•—－()（）景区风景名胜区旅游区]+/g, "").toLowerCase();
 }
 
 function secureImageUrl(value: unknown) {
@@ -431,30 +286,6 @@ async function searchVerifiedTravelContext(query: string, city: string, env: any
     unavailable: Object.entries(providers).filter(([, value]: any) => value.status === "unavailable").map(([name, value]: any) => ({ name, reason: value.error })),
     note: "联网工具仅返回可追溯的公开页面与地图 POI；未返回的开放、预约、客流和价格信息继续保持 Unknown。",
   };
-}
-
-async function fetchTextResource(url: string, init: RequestInit = {}, timeoutMs = 18000, source = "网页读取") {
-  const startedAt = Date.now();
-  const provider = providerNameFor(url, source);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, fetchOptions({ ...init, redirect: "follow", signal: controller.signal }));
-    const text = await response.text();
-    if (!response.ok) {
-      const message = `${source}返回 ${response.status}`;
-      await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error: message, rateLimited: response.status === 429 });
-      return { response, text, ok: false };
-    }
-    await recordProviderHealth(provider, { ok: true, latencyMs: Date.now() - startedAt });
-    return { response, text, ok: true };
-  } catch (error: any) {
-    const message = error?.name === "AbortError" ? `${source}响应超时` : cleanText(error?.message, `${source}网络失败`);
-    await recordProviderHealth(provider, { ok: false, latencyMs: Date.now() - startedAt, error: message });
-    throw new Error(message);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function htmlText(value: unknown) {
@@ -1023,30 +854,6 @@ async function extractProfile(input: any, env: any) {
   return { ...mergeTravelProfile(input, merged), extractionModel: extracted.model, extractionFormatRepaired: extracted.formatRepaired, extractionFallbackReason: extracted.fallbackReason || "" };
 }
 
-function adminBaseName(value: unknown) {
-  return cleanText(value).replace(/(?:特别行政区|壮族自治区|回族自治区|维吾尔自治区|自治区|自治州|地区|市|区|县|盟|旗)$/u, "");
-}
-
-export function selectBestAmapDistrict(query: string, districts: any[]) {
-  const wanted = cleanText(query);
-  const wantedBase = adminBaseName(wanted);
-  const explicitSuffix = /(?:特别行政区|自治区|自治州|地区|市|区|县|盟|旗)$/u.test(wanted);
-  return [...districts]
-    .filter((row) => cleanText(row?.name) && cleanText(row?.center))
-    .map((row) => {
-      const name = cleanText(row.name);
-      const level = cleanText(row.level);
-      const exact = name === wanted;
-      const cityForm = name === `${wantedBase}市`;
-      const sameBase = adminBaseName(name) === wantedBase;
-      const levelScore = explicitSuffix
-        ? (exact ? 80 : 0)
-        : level === "city" ? 45 : level === "province" ? 25 : level === "district" ? 5 : 0;
-      return { row, score: (exact ? 100 : 0) + (cityForm ? 70 : 0) + (sameBase ? 50 : 0) + levelScore };
-    })
-    .sort((left, right) => right.score - left.score)[0]?.row || null;
-}
-
 async function searchCities(query: string, limit = 8, env: any = null) {
   if (cleanText(query).length < 2) return [];
   const normalizedQuery = cleanText(query).replace(/市$/, "");
@@ -1146,143 +953,6 @@ async function weatherDirect(city: any, startDate: string, days: number) {
 
 async function weatherFor(city: any, startDate: string, days: number) {
   return weatherDirect(city, startDate, days);
-}
-
-function category(tags: any) {
-  if (tags.natural || tags.leisure === "park" || tags.tourism === "viewpoint") return "自然景观";
-  if (tags.historic || tags.amenity === "place_of_worship") return "历史文化";
-  if (tags.tourism === "museum" || tags.amenity === "arts_centre") return "博物展馆";
-  return "景点";
-}
-
-function poiFromElement(element: any, requiredByUser = false) {
-  const tags = element.tags || {};
-  const center = element.center || element;
-  const name = cleanText(tags["name:zh"] || tags.name);
-  const id = `osm-${element.type}-${element.id}`;
-  return {
-    id, name, lat: Number(center.lat), lng: Number(center.lon), category: category(tags),
-    durationMin: tags.tourism === "museum" ? 120 : tags.leisure === "park" ? 100 : 90,
-    openingHours: cleanText(tags.opening_hours), website: cleanText(tags.website || tags["contact:website"]),
-    wikipedia: cleanText(tags.wikipedia), wikidata: cleanText(tags.wikidata), wikimediaCommons: cleanText(tags.wikimedia_commons), image: cleanText(tags.image),
-    staticPoiQuality: tags.wikidata || tags.wikipedia || tags.website ? "较高" : "基础",
-    sourceUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
-    fetchedAt: new Date().toISOString(), requiredByUser,
-    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
-    openingStatus: { status: "unknown", label: tags.opening_hours ? `规则：${tags.opening_hours}` : "开放时间未知，出发前请复核" },
-    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过地图公开数据核验"] : ["来自 OpenStreetMap 的公开地点数据"],
-    transitStops: [],
-  };
-}
-
-function wikiCategory(title: string, extract: string) {
-  const text = `${title} ${extract}`;
-  if (/湖|山|峰|洞|瀑布|湿地|公园|花园|园林|岛|堤|自然保护区|风景区/.test(text)) return "自然景观";
-  if (/博物馆|美术馆|纪念馆|展览馆|科技馆/.test(text)) return "博物展馆";
-  if (/寺|庙|塔|教堂|故居|遗址|古镇|古城|祠|陵|历史|文化遗产|世界遗产/.test(text)) return "历史文化";
-  return "城市景观";
-}
-
-function wikiPageToSpot(page: any, city: any, requiredNames: string[], preferences: string[] = []) {
-  const coordinate = page?.coordinates?.[0];
-  if (!coordinate || !Number.isFinite(Number(coordinate.lat)) || !Number.isFinite(Number(coordinate.lon))) return null;
-  const name = cleanText(page.title);
-  const extract = cleanText(page.extract);
-  const text = `${name} ${extract}`;
-  const requiredByUser = requiredNames.some(required => {
-    const wanted = normalizeName(required), actual = normalizeName(name);
-    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
-  });
-  const familyEntertainmentWanted = preferences.some(item => /亲子|乐园|游乐|水上/.test(item));
-  if (/街道办事处|行政区|市辖区|下辖|地铁|车站|铁路|高速公路|国道|省道|医院|学校|大学|住宅区|写字楼|公司总部|机场/.test(text)) return null;
-  if (!requiredByUser && /铁路轮渡船/.test(text)) return null;
-  if (!requiredByUser && !familyEntertainmentWanted && /水上乐园|游乐园/.test(text)) return null;
-  if (/^[\u4e00-\u9fa5]{2,10}(市|区|县|省)$/.test(name)) return null;
-  if (!/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|古村|寺|庙|塔|湖|山|峰|洞|瀑布|湿地|花园|园林|宫|祠|陵|古城|历史文化|世界遗产|风景|自然保护区|教堂|广场|动物园|植物园|水库|岛|堤|桥|街区|宋城/.test(text)) return null;
-  const lat = Number(coordinate.lat), lng = Number(coordinate.lon);
-  if (haversine(city.lat, city.lng, lat, lng) > 80000) return null;
-  return {
-    id: `wikipedia-${page.pageid}`, name, lat, lng, category: requiredByUser ? "用户必选" : wikiCategory(name, extract),
-    durationMin: /博物馆|美术馆|纪念馆|宋城/.test(text) ? 120 : /公园|湖|山|湿地|风景区/.test(text) ? 110 : 90,
-    openingHours: "", website: "", wikipedia: `zh:${name}`, wikidata: cleanText(page?.pageprops?.wikibase_item),
-    wikimediaCommons: "", image: cleanText(page?.thumbnail?.source),
-    staticPoiQuality: "百科坐标已核验", sourceUrl: `https://zh.wikipedia.org/wiki/${encodeURIComponent(name.replace(/ /g, "_"))}`,
-    fetchedAt: new Date().toISOString(), requiredByUser,
-    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
-    openingStatus: { status: "unknown", label: "开放时间未知，出发前请复核" },
-    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过中文维基百科坐标核验"] : ["中文维基百科公开页面及坐标已核验", extract.slice(0, 70) || "公开百科地点"],
-    transitStops: [], extract,
-  };
-}
-
-export function fallbackPoiCategory(value: string) {
-  if (/博物馆|美术馆|展览|纪念馆/.test(value)) return "博物展馆";
-  if (/寺|庙|塔|古迹|遗址|故居|历史|文化|城墙|钟楼|鼓楼|古城/.test(value)) return "历史文化";
-  if (/公园|湖|山|湿地|自然|风景|植物/.test(value)) return "自然景观";
-  return "城市景观";
-}
-
-export function isExcludedCandidatePoi(name: string, poiType: string, requiredByUser = false) {
-  if (requiredByUser) return false;
-  const text = `${cleanText(name)} ${cleanText(poiType)}`;
-  if (/建设中|施工中|暂未开放|尚未开放|永久关闭|停止营业/.test(text)) return true;
-  if (/学校|幼儿园|小学|中学|大学|学院|培训机构|教育辅导|驾校/.test(text)) return true;
-  if (/停车场|卫生间|售票处|游客中心|服务区|入口广场|主入口|出口|打卡地/.test(text)) return true;
-  if (/购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType)) return true;
-  return false;
-}
-
-function amapCandidateRecord(row: any, city: any, requiredNames: string[]) {
-  const name = cleanText(row?.name || row?.title);
-  const poiType = cleanText(row?.type || row?.typeName || row?.category);
-  const location = cleanText(row?.location);
-  const [lng, lat] = location.split(",").map(Number);
-  if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || haversine(city.lat, city.lng, lat, lng) > 80000) return null;
-  const requiredByUser = requiredNames.some(required => {
-    const wanted = normalizeName(required), actual = normalizeName(name);
-    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
-  });
-  if (isExcludedCandidatePoi(name, poiType, requiredByUser)) return null;
-  if (/生活服务|摄影冲印|购物服务|商务住宅|公司企业|医疗保健|汽车服务|金融保险/.test(poiType) && !/景区|景点|公园|博物馆|美术馆|纪念馆|故居|遗址|古镇|寺|庙|塔|湖|山|湿地|街区/.test(name)) return null;
-  if (/照相馆|摄影工作室|眼镜|密室|剧本杀|购物城.*店|商场.*店|公司$|医院$|诊所$/.test(name)) return null;
-  const rating = Number(row?.biz_ext?.rating || row?.business?.rating || row?.rating || 0) || null;
-  return {
-    id: `amap-${cleanText(row.id, `${lat}-${lng}`)}`, name, lat, lng,
-    category: requiredByUser ? "用户必选" : fallbackPoiCategory(`${name} ${poiType}`), poiType,
-    durationMin: /博物馆|美术馆|纪念馆/.test(name) ? 120 : /公园|湖|山|湿地|风景/.test(name) ? 110 : 90,
-    openingHours: cleanText(row.business?.opentime_today || row.opentime || row.opening_hours), rating,
-    website: cleanText(row.website), staticPoiQuality: rating && rating >= 4 ? "较高" : "一般",
-    sourceUrl: row.id ? `https://www.amap.com/place/${encodeURIComponent(row.id)}` : "https://www.amap.com/",
-    fetchedAt: new Date().toISOString(), requiredByUser,
-    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
-    openingStatus: { status: "unknown", label: "开放时间需在出发前通过官方来源复核" },
-    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过高德地图 POI 坐标核验"] : ["中文维基不可用时由高德地图 POI 真实兜底"],
-    transitStops: [], address: cleanText(row.address), image: "",
-  };
-}
-
-function nominatimCandidateRecord(row: any, city: any, requiredNames: string[]) {
-  const name = cleanText(row?.name || row?.display_name?.split(",")?.[0]);
-  const lat = Number(row?.lat), lng = Number(row?.lon);
-  if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || haversine(city.lat, city.lng, lat, lng) > 80000) return null;
-  const requiredByUser = requiredNames.some(required => {
-    const wanted = normalizeName(required), actual = normalizeName(name);
-    return actual === wanted || actual.includes(wanted) || wanted.includes(actual);
-  });
-  return {
-    id: `nominatim-${cleanText(row.osm_type)}-${cleanText(row.osm_id, `${lat}-${lng}`)}`, name, lat, lng,
-    category: requiredByUser ? "用户必选" : fallbackPoiCategory(`${name} ${cleanText(row.type)} ${cleanText(row.category)}`),
-    durationMin: /博物馆|美术馆|纪念馆/.test(name) ? 120 : /公园|湖|山|湿地|风景/.test(name) ? 110 : 90,
-    openingHours: cleanText(row.extratags?.opening_hours), website: cleanText(row.extratags?.website),
-    wikipedia: cleanText(row.extratags?.wikipedia), wikidata: cleanText(row.extratags?.wikidata),
-    staticPoiQuality: "OSM/Nominatim 坐标已核验",
-    sourceUrl: row.osm_type && row.osm_id ? `https://www.openstreetmap.org/${row.osm_type}/${row.osm_id}` : "https://nominatim.openstreetmap.org/",
-    fetchedAt: new Date().toISOString(), requiredByUser,
-    crowd: { score: null, label: "未知", source: "未接入可验证官方客流" },
-    openingStatus: { status: "unknown", label: "开放时间需在出发前通过官方来源复核" },
-    recommendationReasons: requiredByUser ? ["用户明确指定的必选项", "已通过 OSM/Nominatim 坐标核验"] : ["中文维基不可用时由 OSM/Nominatim 真实兜底"],
-    transitStops: [], address: cleanText(row.display_name), image: "",
-  };
 }
 
 async function fallbackCandidateSpots(city: any, requiredNames: string[], preferences: string[], env: any = null) {
@@ -1428,12 +1098,6 @@ async function verifyRequired(city: any, names: string[], candidates: any[] = []
     });
   }
   return verified;
-}
-
-function haversine(lat1: number, lng1: number, lat2: number, lng2: number) {
-  const rad = Math.PI / 180;
-  const a = Math.sin((lat2 - lat1) * rad / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin((lng2 - lng1) * rad / 2) ** 2;
-  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 const PREFERENCE_TERMS: Record<string, string[]> = {
@@ -2560,388 +2224,6 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 10. 必须服从每个候选点的 timeRole、preferredWindows、avoidWindows 与 timeRationale：meal-landmark 必须用 type=meal 且保留 spotId，安排在 11:30—13:30 或 17:30—20:00；nightscape 必须在当日 sunset 后；展馆服从开放与预约；户外摄影优先早晚光线。
 11. 每日必须包含正常午餐；若当天延续到 18:00 后还必须包含晚餐。活动之间不得重叠，交通时间不能被吞掉，午晚餐不是可删除的装饰块。
 12. 每套天数严格等于 profile.days。若调用方要求三套，则输出 hot、niche、relax 且顺序不变；若明确要求“本次只生成某一套”，variants 必须只含该套，不能擅自输出另外两套。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
-
-export function compactPlannerKnowledge(knowledge: any) {
-  const matrix = knowledge?.trafficMatrix || {};
-  const requiredIds = new Set((knowledge?.spots || []).filter((spot: any) => spot.requiredByUser).map((spot: any) => spot.id));
-  const selected: any[] = [];
-  const seen = new Set<string>();
-  const add = (leg: any) => {
-    const key = `${leg.fromId}->${leg.toId}`;
-    if (!seen.has(key)) { seen.add(key); selected.push(leg); }
-  };
-  for (const leg of matrix.legs || []) {
-    if (leg.fromId === "hotel" || leg.toId === "hotel" || requiredIds.has(leg.fromId) || requiredIds.has(leg.toId)) add(leg);
-  }
-  const byOrigin = new Map<string, any[]>();
-  for (const leg of matrix.legs || []) {
-    const rows = byOrigin.get(leg.fromId) || [];
-    rows.push(leg);
-    byOrigin.set(leg.fromId, rows);
-  }
-  for (const rows of byOrigin.values()) {
-    rows.sort((left, right) => Number(left.durationMin || 9999) - Number(right.durationMin || 9999)).slice(0, 4).forEach(add);
-  }
-  return {
-    ...knowledge,
-    trafficMatrix: { ...matrix, legs: selected.slice(0, 120), totalCandidateLegs: matrix.legs?.length || 0, compactedForModel: true },
-    modelInputPolicy: "交通矩阵只向模型提供酒店/必选相关段和各点最近邻；完整矩阵仍由 Travel Compiler 审计与最终核验使用",
-  };
-}
-
-function modelArray(value: any, keys: string[]) {
-  if (Array.isArray(value)) return value;
-  for (const key of keys) if (Array.isArray(value?.[key])) return value[key];
-  if (value && typeof value === "object") {
-    const ordered = Object.entries(value)
-      .filter(([key, row]) => /^(?:day|d|第)?\s*\d+\s*(?:天)?$/i.test(key) && row && typeof row === "object")
-      .sort(([left], [right]) => Number(left.match(/\d+/)?.[0] || 0) - Number(right.match(/\d+/)?.[0] || 0))
-      .map(([, row]) => row);
-    if (ordered.length) return ordered;
-  }
-  return [];
-}
-
-function modelVariants(value: any) {
-  const direct = modelArray(value, ["variants", "plans", "alternatives"]);
-  if (direct.length) return direct;
-  const named = [value?.hot, value?.niche, value?.relax, value?.classic, value?.nature, value?.easy].filter(Boolean);
-  if (named.length) return named;
-  return value?.variant || value?.plan || value?.result ? [value.variant || value.plan || value.result] : [];
-}
-
-function modelDays(value: any) {
-  return modelArray(value, ["days", "daysPlan", "dayPlans", "dailyPlans", "daily_plans", "itinerary"]);
-}
-
-function modelActivities(value: any) {
-  return modelArray(value, ["activities", "items", "schedule", "timeline", "events"]);
-}
-
-function normalizePlannerDraft(value: any, profile: any) {
-  const variants = modelVariants(value).slice(0, 3);
-  return {
-    variants: variants.map((variant: any, variantIndex: number) => ({
-      id: ["hot", "niche", "relax"][variantIndex],
-      title: cleanText(variant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
-      style: cleanText(variant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
-      strategy: cleanText(variant?.strategy),
-      days: modelDays(variant).slice(0, profile.days).map((day: any, dayIndex: number) => ({
-        day: dayIndex + 1,
-        theme: cleanText(day?.theme, `第 ${dayIndex + 1} 天`),
-        returnHotelTime: cleanText(day?.returnHotelTime, profile.dayEnd),
-        totalActivityMin: clamp(day?.totalActivityMin, 0, 900),
-        totalTransportMin: clamp(day?.totalTransportMin, 0, 600),
-        activities: modelActivities(day).slice(0, 12).map((activity: any) => ({
-          type: ["attraction", "meal", "rest"].includes(cleanText(activity?.type)) ? cleanText(activity.type) : cleanText(activity?.spotId || activity?.poiId || activity?.placeId) ? "attraction" : /餐|午饭|晚饭|用餐/.test(cleanText(activity?.label || activity?.name)) ? "meal" : "rest",
-          spotId: cleanText(activity?.spotId || activity?.poiId || activity?.placeId) || undefined,
-          label: cleanText(activity?.label || activity?.name) || undefined,
-          startTime: cleanText(activity?.startTime || activity?.start), endTime: cleanText(activity?.endTime || activity?.end),
-          durationMin: clamp(activity?.durationMin || activity?.duration, 15, 360),
-          transportFromPrevious: activity?.transportFromPrevious || activity?.transit ? {
-            mode: cleanText((activity.transportFromPrevious || activity.transit).mode, "公共交通"),
-            durationMin: clamp((activity.transportFromPrevious || activity.transit).durationMin || (activity.transportFromPrevious || activity.transit).minutes, 1, 360),
-            matrixKey: cleanText((activity.transportFromPrevious || activity.transit).matrixKey) || undefined,
-          } : undefined,
-          reason: cleanText(activity?.reason, "依据候选景点知识包与交通矩阵"),
-          evidenceRefs: list(activity?.evidenceRefs).slice(0, 8),
-          alternativeSpotIds: list(activity?.alternativeSpotIds).slice(0, 4),
-          adjustmentCondition: cleanText(activity?.adjustmentCondition) || undefined,
-        })),
-      })),
-    })),
-  };
-}
-
-export function normalizePlannerVariant(value: any, profile: any, variantIndex: number) {
-  const variantId = ["hot", "niche", "relax"][variantIndex];
-  const rawVariant = modelVariants(value)[0] || value?.[variantId] || value?.variant || value?.plan || value?.result || value;
-  const normalized = normalizePlannerDraft({ variants: [rawVariant] }, profile).variants[0];
-  if (!normalized) return null;
-  return {
-    ...normalized,
-    id: ["hot", "niche", "relax"][variantIndex],
-    title: cleanText(rawVariant?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
-    style: cleanText(rawVariant?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
-  };
-}
-
-function completePlannerVariant(variant: any, profile: any) {
-  return Boolean(variant && variant.days?.length === Number(profile.days) && variant.days.every((day: any, index: number) => Number(day.day) === index + 1 && Array.isArray(day.activities) && day.activities.length > 0));
-}
-
-export function recoverPlannerVariant(profile: any, knowledge: any, variantIndex: number, partial: any, reason = "模型输出结构不完整", previousVariantSpotIds: string[] = []) {
-  const ids = ["hot", "niche", "relax"];
-  const titles = ["经典覆盖", "自然摄影", "轻松避峰"];
-  const styles = ["经典", "自然摄影", "轻松避峰"];
-  const variantId = ids[variantIndex];
-  const modelChosenIds = (partial?.days || []).flatMap((day: any) => (day.activities || []).map((activity: any) => cleanText(activity.spotId)).filter(Boolean));
-  const optimized = optimizeRouteBuckets({ profile, knowledge, objective: variantId as any, seedIds: modelChosenIds, previousVariantSpotIds });
-  const buckets = optimized.dayBuckets;
-  const dayStart = timeToMinutes(profile.dayStart, 9 * 60);
-  const dayEnd = timeToMinutes(profile.dayEnd, 21 * 60);
-  const days = buckets.map((daySpots, dayIndex) => {
-    const mealLandmark = daySpots.find((spot: any) => spot.timeRole === "meal-landmark");
-    const nightscape = daySpots.find((spot: any) => spot.timeRole === "nightscape");
-    const regular = daySpots.filter((spot: any) => spot !== mealLandmark && spot !== nightscape);
-    const activities: any[] = [];
-    let cursor = dayStart;
-    for (const spot of regular.slice(0, 1)) {
-      const duration = 90;
-      activities.push({ type: "attraction", spotId: spot.id, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + duration), durationMin: duration, reason: "保留模型已选/高优先候选，由可靠性编译器补全缺失日期", evidenceRefs: [spot.id], alternativeSpotIds: [] });
-      cursor += duration;
-    }
-    const lunchStart = Math.max(11 * 60 + 30, cursor + 20);
-    activities.push(mealLandmark
-      ? { type: "meal", spotId: mealLandmark.id, label: `${mealLandmark.name}用餐`, startTime: minutesToTime(lunchStart), endTime: minutesToTime(lunchStart + 75), durationMin: 75, reason: "餐饮型必去点进入正常饭点", evidenceRefs: [mealLandmark.id], alternativeSpotIds: [] }
-      : { type: "meal", label: "午餐与休息", startTime: minutesToTime(lunchStart), endTime: minutesToTime(lunchStart + 75), durationMin: 75, reason: "可靠性编译器保留正常用餐", evidenceRefs: [] });
-    cursor = lunchStart + 95;
-    for (const spot of regular.slice(1)) {
-      if (cursor + 90 > Math.min(dayEnd - 30, 17 * 60 + 30)) break;
-      activities.push({ type: "attraction", spotId: spot.id, startTime: minutesToTime(cursor), endTime: minutesToTime(cursor + 90), durationMin: 90, reason: "保留模型已选/高优先候选，并控制单日密度", evidenceRefs: [spot.id], alternativeSpotIds: [] });
-      cursor += 115;
-    }
-    if (nightscape) {
-      const sunset = timeToMinutes(knowledge?.weather?.[dayIndex]?.sunset, 18 * 60);
-      const start = Math.max(cursor, sunset, 18 * 60);
-      if (start + 90 <= dayEnd) activities.push({ type: "attraction", spotId: nightscape.id, startTime: minutesToTime(start), endTime: minutesToTime(start + 90), durationMin: 90, reason: "夜景型地点安排在日落后", evidenceRefs: [nightscape.id], alternativeSpotIds: [] });
-    }
-    const lastEnd = activities.reduce((latest, activity) => Math.max(latest, timeToMinutes(activity.endTime, latest)), dayStart);
-    if (lastEnd + 30 <= dayEnd) activities.push({ type: "rest", label: "弹性缓冲 / 返回住宿地", startTime: minutesToTime(lastEnd), endTime: minutesToTime(lastEnd + 30), durationMin: 30, reason: "为交通波动和临时调整预留缓冲", evidenceRefs: [] });
-    return { day: dayIndex + 1, theme: `${titles[variantIndex]} · 第 ${dayIndex + 1} 天`, returnHotelTime: minutesToTime(Math.min(dayEnd, lastEnd + 30)), totalActivityMin: activities.reduce((sum, activity) => sum + Number(activity.durationMin || 0), 0), totalTransportMin: 0, activities };
-  });
-  return {
-    id: variantId,
-    title: cleanText(partial?.title, titles[variantIndex]),
-    style: cleanText(partial?.style, styles[variantIndex]),
-    strategy: `${cleanText(partial?.strategy, titles[variantIndex])}；模型响应结构异常后由可靠性编译器内置的多目标路线优化器按偏好、客流、时令、交通聚类和方案差异补全时间轴`,
-    days,
-    recoveryReason: cleanText(reason),
-    optimizationDiagnostics: optimized.diagnostics,
-    objectiveScore: optimized.objectiveScore,
-  };
-}
-
-export function enforceRequiredCoverage(draft: any, knowledge: any) {
-  const requiredSpots = list(knowledge?.spots).filter((spot: any) => spot.requiredByUser && cleanText(spot.id));
-  const spotMap = new Map(list(knowledge?.spots).map((spot: any) => [cleanText(spot.id), spot]));
-  const matrix = knowledge?.trafficMatrix;
-  const changes: any[] = [];
-  if (!requiredSpots.length) return { replaced: 0, rebuilt: 0, changes };
-
-  const legMinutes = (fromId: string, toId: string) => {
-    if (!fromId || !toId || fromId === toId) return 0;
-    const leg = list(matrix?.legs).find((item: any) => (item.fromId === fromId && item.toId === toId) || (item.fromId === toId && item.toId === fromId));
-    return Number(leg?.durationMin || 45);
-  };
-
-  for (let variantIndex = 0; variantIndex < list(draft?.variants).length; variantIndex += 1) {
-    let variant = draft.variants[variantIndex];
-    const selected = new Set(list(variant?.days).flatMap((day: any) => list(day.activities).map((activity: any) => cleanText(activity.spotId)).filter(Boolean)));
-    let missing = requiredSpots.filter((spot: any) => !selected.has(spot.id));
-    for (const required of missing) {
-      const candidates = list(variant?.days).flatMap((day: any) => list(day.activities).map((activity: any) => ({ day, activity, spot: spotMap.get(cleanText(activity.spotId)) })))
-        .filter((entry: any) => entry.activity?.spotId && !entry.spot?.requiredByUser && !["meal-landmark", "nightscape"].includes(cleanText(entry.spot?.timeRole)))
-        .sort((left: any, right: any) => {
-          const score = (entry: any) => {
-            const neighborIds = list(entry.day?.activities).map((activity: any) => cleanText(activity.spotId)).filter((id: string) => id && id !== cleanText(entry.activity.spotId));
-            const proximity = neighborIds.length ? Math.min(...neighborIds.map((id: string) => legMinutes(required.id, id))) : 30;
-            const valuePenalty = Number(entry.spot?.plannerScore || 0) * 0.2;
-            return (entry.spot ? 0 : -100) + proximity + valuePenalty;
-          };
-          return score(left) - score(right);
-        });
-      const replacement = candidates[0];
-      if (!replacement) break;
-      const previousId = cleanText(replacement.activity.spotId);
-      const start = timeToMinutes(replacement.activity.startTime, timeToMinutes(knowledge?.profile?.dayStart, 9 * 60));
-      const end = timeToMinutes(replacement.activity.endTime, start + Number(replacement.activity.durationMin || 90));
-      replacement.activity.type = required.timeRole === "meal-landmark" ? "meal" : "attraction";
-      replacement.activity.spotId = required.id;
-      replacement.activity.durationMin = Math.max(60, end - start || Math.min(120, Number(required.recommendedDurationMin || 90)));
-      replacement.activity.endTime = minutesToTime(start + replacement.activity.durationMin);
-      replacement.activity.reason = "用户明确指定的必选项；硬约束编译器将模型遗漏实体绑定到原有可执行时段";
-      replacement.activity.evidenceRefs = [...new Set([required.id, ...list(replacement.activity.evidenceRefs)])];
-      replacement.activity.alternativeSpotIds = [...new Set([previousId, ...list(replacement.activity.alternativeSpotIds)].filter(Boolean))];
-      delete replacement.activity.transportFromPrevious;
-      if (replacement.activity.type === "meal") replacement.activity.label = `${required.name}用餐`;
-      selected.delete(previousId);
-      selected.add(required.id);
-      changes.push({ variantId: variant.id, action: "replaced", requiredSpotId: required.id, requiredSpotName: required.name, replacedSpotId: previousId, day: replacement.day.day });
-    }
-
-    missing = requiredSpots.filter((spot: any) => !selected.has(spot.id));
-    if (missing.length) {
-      const previousVariantSpotIds = list(draft?.variants).slice(0, variantIndex).flatMap((item: any) => list(item.days).flatMap((day: any) => list(day.activities).map((activity: any) => cleanText(activity.spotId)).filter(Boolean)));
-      variant = recoverPlannerVariant(knowledge.profile || {}, knowledge, variantIndex, variant, `模型草案遗漏必选实体：${missing.map((spot: any) => spot.name).join("、")}`, previousVariantSpotIds);
-      draft.variants[variantIndex] = variant;
-      changes.push({ variantId: variant.id, action: "rebuilt", requiredSpotIds: missing.map((spot: any) => spot.id), requiredSpotNames: missing.map((spot: any) => spot.name) });
-    }
-  }
-  return {
-    replaced: changes.filter((change) => change.action === "replaced").length,
-    rebuilt: changes.filter((change) => change.action === "rebuilt").length,
-    changes,
-  };
-}
-
-function bindTrafficMatrixFacts(draft: any, knowledge: any) {
-  const matrix = knowledge?.trafficMatrix;
-  if (!matrix?.legs?.length) return draft;
-  for (const variant of draft.variants || []) {
-    for (const day of variant.days || []) {
-      const spotActivities = (day.activities || [])
-        .filter((activity: any) => Boolean(activity.spotId))
-        .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
-      for (let index = 1; index < spotActivities.length; index += 1) {
-        const previous = spotActivities[index - 1];
-        const current = spotActivities[index];
-        const leg = matrix.legs.find((item: any) => item.fromId === previous.spotId && item.toId === current.spotId)
-          || matrix.legs.find((item: any) => item.fromId === current.spotId && item.toId === previous.spotId);
-        if (!leg || current.transportFromPrevious) continue;
-        current.transportFromPrevious = {
-          mode: "公共交通 / 步行（以地图复核为准）",
-          durationMin: Number(leg.durationMin),
-          matrixKey: `${previous.spotId}->${current.spotId}`,
-        };
-      }
-      day.totalTransportMin = spotActivities.slice(1).reduce((sum: number, activity: any) => sum + Number(activity.transportFromPrevious?.durationMin || 0), 0);
-    }
-  }
-  return draft;
-}
-
-function legalizePlannerTimelines(draft: any, knowledge: any) {
-  const matrix = knowledge?.trafficMatrix;
-  const spotMap = new Map((knowledge?.spots || []).map((spot: any) => [spot.id, spot]));
-  let shiftedActivities = 0;
-  let shiftedMinutes = 0;
-  for (const variant of draft.variants || []) {
-    for (const day of variant.days || []) {
-      const ordered = [...(day.activities || [])]
-        .sort((left: any, right: any) => timeToMinutes(left.startTime, 0) - timeToMinutes(right.startTime, 0));
-      let previousEnd = 0;
-      let previousSpot: any = null;
-      for (const activity of ordered) {
-        const originalStart = timeToMinutes(activity.startTime, previousEnd);
-        const originalEnd = timeToMinutes(activity.endTime, originalStart + Number(activity.durationMin || 0));
-        const durationFromTimes = originalEnd - originalStart;
-        const duration = durationFromTimes > 0 ? durationFromTimes : Math.max(15, Number(activity.durationMin || 0));
-        let minimumStart = previousEnd;
-        const semanticSpot: any = activity.spotId ? spotMap.get(activity.spotId) : null;
-        if (semanticSpot?.timeRole === "nightscape") {
-          minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60));
-        }
-        if (semanticSpot?.timeRole === "meal-landmark") {
-          if (originalStart < 11 * 60 + 30) minimumStart = Math.max(minimumStart, 11 * 60 + 30);
-          else if (originalStart > 13 * 60 + 30 && originalStart < 17 * 60 + 30) minimumStart = Math.max(minimumStart, 17 * 60 + 30);
-        }
-        if (activity.spotId && previousSpot?.spotId && matrix?.legs?.length) {
-          const leg = matrix.legs.find((item: any) => item.fromId === previousSpot.spotId && item.toId === activity.spotId)
-            || matrix.legs.find((item: any) => item.fromId === activity.spotId && item.toId === previousSpot.spotId);
-          if (leg) minimumStart = Math.max(minimumStart, previousSpot.end + Number(leg.durationMin));
-        }
-        const legalizedStart = Math.max(originalStart, minimumStart);
-        if (legalizedStart > originalStart) {
-          shiftedActivities += 1;
-          shiftedMinutes += legalizedStart - originalStart;
-          activity.startTime = minutesToTime(legalizedStart);
-          activity.endTime = minutesToTime(legalizedStart + duration);
-        }
-        activity.durationMin = duration;
-        const legalizedEnd = legalizedStart + duration;
-        previousEnd = legalizedEnd;
-        if (activity.spotId) previousSpot = { spotId: activity.spotId, end: legalizedEnd };
-      }
-      day.activities = ordered;
-    }
-  }
-  return { shiftedActivities, shiftedMinutes };
-}
-
-export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
-  const profile = knowledge?.profile || {};
-  const startLimit = timeToMinutes(profile.dayStart, 9 * 60);
-  const endLimit = timeToMinutes(profile.dayEnd, 21 * 60);
-  const spotMap = new Map((knowledge?.spots || []).map((spot: any) => [spot.id, spot]));
-  const matrix = knowledge?.trafficMatrix;
-  let insertedLunches = 0;
-  let insertedDinners = 0;
-  let removedFlexibleStops = 0;
-  let reflowedActivities = 0;
-
-  const reflow = (day: any, activities: any[]) => {
-    const ordered = [...activities].sort((left: any, right: any) => timeToMinutes(left.startTime, startLimit) - timeToMinutes(right.startTime, startLimit));
-    let cursor = startLimit;
-    let previousSpot: any = null;
-    for (const activity of ordered) {
-      const originalStart = timeToMinutes(activity.startTime, cursor);
-      const originalEnd = timeToMinutes(activity.endTime, originalStart + Number(activity.durationMin || 60));
-      const semanticSpot: any = activity.spotId ? spotMap.get(activity.spotId) : null;
-      let duration = Math.max(15, originalEnd - originalStart || Number(activity.durationMin || 60));
-      if (activity.type === "meal") duration = Math.min(90, Math.max(60, duration));
-      else if (activity.type === "rest") duration = Math.min(45, Math.max(20, duration));
-      else duration = Math.min(semanticSpot?.requiredByUser ? 120 : 100, Math.max(semanticSpot?.requiredByUser ? 60 : 45, duration));
-      let minimumStart = cursor;
-      const open = openingRange(semanticSpot?.openingHours);
-      if (open) minimumStart = Math.max(minimumStart, open[0]);
-      if (activity.type === "meal" && !activity.spotId && /午餐/.test(cleanText(activity.label))) minimumStart = Math.max(minimumStart, 11 * 60 + 30);
-      if (semanticSpot?.timeRole === "meal-landmark") {
-        activity.type = "meal";
-        minimumStart = Math.max(minimumStart, originalStart <= 14 * 60 ? 11 * 60 + 30 : 17 * 60 + 30);
-      }
-      if (semanticSpot?.timeRole === "nightscape") minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60));
-      if (activity.spotId && previousSpot?.spotId && matrix?.legs?.length) {
-        const leg = matrix.legs.find((item: any) => item.fromId === previousSpot.spotId && item.toId === activity.spotId)
-          || matrix.legs.find((item: any) => item.fromId === activity.spotId && item.toId === previousSpot.spotId);
-        if (leg) {
-          minimumStart = Math.max(minimumStart, previousSpot.end + Number(leg.durationMin));
-          activity.transportFromPrevious = { mode: "公共交通 / 步行（以地图复核为准）", durationMin: Number(leg.durationMin), matrixKey: `${previousSpot.spotId}->${activity.spotId}` };
-        }
-      }
-      const start = minimumStart;
-      activity.startTime = minutesToTime(start);
-      activity.endTime = minutesToTime(start + duration);
-      activity.durationMin = duration;
-      cursor = start + duration;
-      if (activity.spotId) previousSpot = { spotId: activity.spotId, end: cursor };
-      reflowedActivities += 1;
-    }
-    day.activities = ordered;
-    day.returnHotelTime = minutesToTime(Math.min(endLimit, Math.max(cursor, timeToMinutes(day.returnHotelTime, cursor))));
-    return cursor;
-  };
-
-  for (const variant of draft.variants || []) {
-    for (const day of variant.days || []) {
-      let activities = [...(day.activities || [])];
-      const hasLunch = activities.some((activity: any) => activity.type === "meal" && (() => { const start = timeToMinutes(activity.startTime, -1); return start >= 11 * 60 && start <= 13 * 60 + 30; })());
-      if (!hasLunch) {
-        activities.push({ type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:00", durationMin: 60, reason: "最终编译器补齐正常午餐，不跨区追店", evidenceRefs: [] });
-        insertedLunches += 1;
-      }
-      const plannedEnd = activities.reduce((latest: number, activity: any) => Math.max(latest, timeToMinutes(activity.endTime, 0)), 0);
-      const hasDinner = activities.some((activity: any) => activity.type === "meal" && (() => { const start = timeToMinutes(activity.startTime, -1); return start >= 17 * 60 && start <= 20 * 60; })());
-      if (plannedEnd > 18 * 60 && !hasDinner) {
-        activities.push({ type: "meal", label: "晚餐与休息", startTime: "17:30", endTime: "18:30", durationMin: 60, reason: "最终编译器为延续到晚间的行程补齐顺路晚餐", evidenceRefs: [] });
-        insertedDinners += 1;
-      }
-      let end = reflow(day, activities);
-      while (end > endLimit) {
-        const removable = [...day.activities].reverse().find((activity: any) => {
-          if (!activity.spotId) return activity.type === "rest";
-          const spot: any = spotMap.get(activity.spotId);
-          return !spot?.requiredByUser && !["meal-landmark", "nightscape"].includes(cleanText(spot?.timeRole));
-        });
-        if (!removable) break;
-        activities = day.activities.filter((activity: any) => activity !== removable);
-        removedFlexibleStops += 1;
-        end = reflow(day, activities);
-      }
-    }
-  }
-  return { insertedLunches, insertedDinners, removedFlexibleStops, reflowedActivities };
-}
 
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
   assertPlannerContext(knowledge);
