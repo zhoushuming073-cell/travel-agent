@@ -71,3 +71,17 @@ test("confirmed legacy travel selectors do not return", () => {
     assert.equal(styles.includes(`.${selector}`), false, `${selector} was retired and must not be styled again`);
   }
 });
+
+test("workspace navigation stays user-controlled during review and background planning", () => {
+  const app = read("travel/TravelWorkspaceApp.tsx");
+  const lifecycle = read("travel/hooks/usePlanningLifecycle.ts");
+  const sidebarStyles = read("app/travel/[[...tripId]]/styles/layout.css");
+
+  assert.doesNotMatch(app, /reviewStep === 0\)\) setSidebarCollapsed\(false\)/, "stage review must not force the sidebar open");
+  assert.doesNotMatch(app, />旅行参数<\/button>/, "the ambiguous header parameter action must stay removed");
+  assert.match(app, /if \(planningControllerRef\.current\) await persist\(\)/, "opening history should preserve the running workspace without cancelling it");
+  assert.doesNotMatch(app, /openWorkspace[\s\S]{0,240}cancelPlanning\(\)/, "opening history must not cancel the active planning job");
+  assert.match(app, /getStoredPlanningWorkspaceId/, "a planning task must remain attached to its originating workspace");
+  assert.doesNotMatch(lifecycle, /setTimeout\(\(\) => \{ void reconnectPlanning/, "planning recovery must not auto-take over a historical workspace");
+  assert.match(sidebarStyles, /\.react-sidebar\.is-collapsed \.history-item\.active/, "the collapsed rail must retain a clear active-trip state");
+});

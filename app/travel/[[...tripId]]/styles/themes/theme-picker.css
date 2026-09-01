@@ -96,5 +96,5 @@
   .theme-picker-grid { grid-template-columns: 1fr; }
 }
 
-.react-sidebar.is-collapsed .sidebar-footer .sidebar-user { padding-right: 0; padding-bottom: 42px; }
-.react-sidebar.is-collapsed .sidebar-footer .travel-theme-picker { right: 50%; bottom: 0; transform: translateX(50%); }
+.react-sidebar.is-collapsed .sidebar-footer .sidebar-user { padding-right: 0; padding-bottom: 0; }
+.react-sidebar.is-collapsed .sidebar-footer .travel-theme-picker { width: 36px; position: static; transform: none; }

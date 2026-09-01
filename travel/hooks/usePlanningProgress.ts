@@ -7,6 +7,7 @@ import type { PlanningProgress, TravelFormState, TravelProfile } from "../types.
 
 interface Options {
   workspaceId: string;
+  isWorkspaceActive: (workspaceId: string) => boolean;
   setProgress: Dispatch<SetStateAction<PlanningProgress | null>>;
   setProfile: Dispatch<SetStateAction<TravelProfile | null>>;
   setForm: Dispatch<SetStateAction<TravelFormState>>;
@@ -14,7 +15,7 @@ interface Options {
   setStage: Dispatch<SetStateAction<AgentState>>;
 }
 
-export function usePlanningProgress({ workspaceId, setProgress, setProfile, setForm, setEvents, setStage }: Options) {
+export function usePlanningProgress({ workspaceId, isWorkspaceActive, setProgress, setProfile, setForm, setEvents, setStage }: Options) {
   const profileStageStartedAt = useRef(0);
   const profileAdvanceTimer = useRef<number | null>(null);
   const researchAdvanceTimer = useRef<number | null>(null);
@@ -34,6 +35,7 @@ export function usePlanningProgress({ workspaceId, setProgress, setProfile, setF
   }, [clearStageTimers]);
 
   const handleProgress = useCallback((next: PlanningProgress) => {
+    if (!isWorkspaceActive(workspaceId)) return;
     setProgress(next);
     if (next.formSync) {
       setProfile(next.formSync);
@@ -46,6 +48,7 @@ export function usePlanningProgress({ workspaceId, setProgress, setProfile, setF
       const remaining = Math.max(0, 4200 - (performance.now() - profileStageStartedAt.current));
       if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
       profileAdvanceTimer.current = window.setTimeout(() => {
+        if (!isWorkspaceActive(workspaceId)) return;
         setStage("FETCHING_DATA");
         profileAdvanceTimer.current = null;
       }, remaining);
@@ -55,9 +58,11 @@ export function usePlanningProgress({ workspaceId, setProgress, setProfile, setF
       if (remaining > 0) {
         if (profileAdvanceTimer.current !== null) window.clearTimeout(profileAdvanceTimer.current);
         profileAdvanceTimer.current = window.setTimeout(() => {
+          if (!isWorkspaceActive(workspaceId)) return;
           setStage("FETCHING_DATA");
           profileAdvanceTimer.current = null;
           researchAdvanceTimer.current = window.setTimeout(() => {
+            if (!isWorkspaceActive(workspaceId)) return;
             setStage("GENERATING_ITINERARY");
             researchAdvanceTimer.current = null;
           }, 2200);
@@ -66,7 +71,7 @@ export function usePlanningProgress({ workspaceId, setProgress, setProfile, setF
         setStage("GENERATING_ITINERARY");
       }
     }
-  }, [setEvents, setForm, setProfile, setProgress, setStage, workspaceId]);
+  }, [isWorkspaceActive, setEvents, setForm, setProfile, setProgress, setStage, workspaceId]);
 
   return { beginProfileStage, clearStageTimers, handleProgress };
 }

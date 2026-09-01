@@ -71,20 +71,27 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
     onNew();
     onCloseMobile();
   };
+  const activateSearch = () => {
+    if (!collapsed) return;
+    onToggle();
+    requestAnimationFrame(() => searchRef.current?.focus());
+  };
   const confirmDelete = (workspaceId: string) => {
     onDelete(workspaceId);
     setPendingDeleteId(null);
   };
 
   return <>
-    <aside className={`travel-sidebar react-sidebar${collapsed ? " is-collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`} aria-label="旅行工作区导航">
+    <aside className={`travel-sidebar react-sidebar${collapsed && !mobileOpen ? " is-collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`} aria-label="旅行工作区导航">
       <a className="brand sidebar-brand" href="/travel/" aria-label="智能旅游助手首页">
         <span className="brand-mark travel-logo-mark"><LottieMotion src={MOTION.paperPlane} className="sidebar-plane-motion" label="智能旅游助手" loop={false} fallback={<Icon name="send"/>}/></span>
         <span className="sidebar-label"><b>智能旅游助手</b><small>AI TRAVEL ASSISTANT</small></span>
       </a>
-      <button className="sidebar-collapse" onClick={onToggle} type="button" aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button>
-      <button className="sidebar-new-trip" onClick={createTrip} type="button"><Icon name="plus"/><span className="sidebar-label">新建旅行</span></button>
-      <label className="sidebar-search"><Icon name="search"/><input ref={searchRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索旅行" aria-label="搜索旅行"/><kbd><span className="shortcut-mac">⌘</span><span className="shortcut-win">Ctrl</span> K</kbd></label>
+      <button className="sidebar-collapse" onClick={onToggle} type="button" aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"} title={collapsed ? "展开侧边栏" : "收起侧边栏"}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button>
+      <button className="sidebar-new-trip" onClick={createTrip} type="button" title={collapsed ? "新建旅行" : undefined}><Icon name="plus"/><span className="sidebar-label">新建旅行</span></button>
+      {collapsed && !mobileOpen
+        ? <button className="sidebar-search collapsed-search-button" type="button" onClick={activateSearch} aria-label="展开并搜索旅行" title="搜索旅行"><Icon name="search"/></button>
+        : <label className="sidebar-search"><Icon name="search"/><input ref={searchRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索旅行" aria-label="搜索旅行"/><kbd><span className="shortcut-mac">⌘</span><span className="shortcut-win">Ctrl</span> K</kbd></label>}
       <section className="sidebar-history" aria-label="旅行列表">
         {!workspaces.length ? <div className="sidebar-empty"><Icon name="mapPin"/><b>还没有旅行</b><span>创建第一段旅程后，它会出现在这里。</span></div> : !filtered.length ? <div className="sidebar-empty compact"><Icon name="search"/><b>没有匹配的旅行</b><span>换个城市或日期试试。</span></div> :
           <div className="trip-history-groups">{groups.map((group) => {
@@ -93,7 +100,7 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
             return <section className="trip-history-group" key={group}>
               <header><span>{group}</span><b>{rows.length}</b></header>
               <div>{rows.map((workspace) => <div className="history-item-row" key={workspace.id}>
-                <button className={`history-item${workspace.id === activeId ? " active" : ""}`} type="button" onClick={() => openWorkspace(workspace.id)}>
+                <button className={`history-item${workspace.id === activeId ? " active" : ""}`} type="button" onClick={() => openWorkspace(workspace.id)} aria-label={`打开${workspace.profile?.city ?? "未命名"}旅行`} title={collapsed ? `${workspace.profile?.city ?? "未命名"} · ${workspace.profile?.days ?? "?"}天` : undefined}>
                   <i></i><span><b>{workspace.profile?.city ?? "未命名"} · {workspace.profile?.days ?? "?"}天</b><small>{workspace.profile?.startDate ?? "日期未定"} · {workspace.state === "READY" ? "规划完成" : "进行中"}</small></span>
                 </button>
                 <button className="history-delete" type="button" aria-label={`删除${workspace.profile?.city ?? "未命名"}旅行`} title="删除旅行" onClick={() => setPendingDeleteId(workspace.id)}><Icon name="close"/></button>

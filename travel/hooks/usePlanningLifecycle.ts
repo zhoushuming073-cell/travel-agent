@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { AgentEvent, AgentState, ItineraryVersion } from "../../worker/domain/types.ts";
 import { abandonPlanningJob, cancelPlanningJob, reconnectPlanningJob, retryPlanningJob, runPlanningJob, type PlanningInput } from "../services/planningApi.ts";
 import { profileToForm } from "../state/workspace-config.ts";
@@ -10,6 +10,8 @@ type PlanningResult = Awaited<ReturnType<typeof runPlanningJob>>;
 
 interface Options {
   busy: boolean;
+  workspaceId: string;
+  isWorkspaceActive: (workspaceId: string) => boolean;
   setBusy: Dispatch<SetStateAction<boolean>>;
   setError: Dispatch<SetStateAction<string | null>>;
   planningControllerRef: MutableRefObject<AbortController | null>;
@@ -19,7 +21,7 @@ interface Options {
   handleProgress: (progress: PlanningProgress) => void;
   beginProfileStage: () => void;
   clearStageTimers: () => void;
-  saveResult: (result: PlanningResult, nextForm: TravelFormState) => Promise<void>;
+  saveResult: (workspaceId: string, result: PlanningResult, nextForm: TravelFormState) => Promise<void>;
   setDraft: Dispatch<SetStateAction<string>>;
   setForm: Dispatch<SetStateAction<TravelFormState>>;
   setProfile: Dispatch<SetStateAction<TravelProfile | null>>;
@@ -38,11 +40,12 @@ interface PlanningLifecycle {
   retryPlanning: () => Promise<void>;
   cancelPlanning: () => Promise<boolean>;
   abandonPlanning: () => void;
+  reconnectPlanning: (quiet?: boolean) => Promise<void>;
 }
 
 export function usePlanningLifecycle(options: Options): PlanningLifecycle {
   const {
-    busy, setBusy, setError, planningControllerRef,
+    busy, workspaceId, isWorkspaceActive, setBusy, setError, planningControllerRef,
     draft, form, planningInput, handleProgress, beginProfileStage, clearStageTimers, saveResult,
     setDraft, setForm, setProfile, setProgress, setPlans, setActivePlanId, setEvents, setVersions,
     setStage, setParametersOpen, setReviewStep,
@@ -50,6 +53,8 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
   const applyPlanningResult = useCallback(async (result: PlanningResult) => {
     clearStageTimers();
     const nextForm = profileToForm(result.request, form);
+    await saveResult(workspaceId, result, nextForm);
+    if (!isWorkspaceActive(workspaceId)) return;
     setProfile(result.request);
     setForm(nextForm);
     setPlans(result.alternatives);
@@ -57,8 +62,7 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
     setEvents(result.agentEvents ?? []);
     setProgress(result.progress ?? null);
     setStage("VALIDATING_ITINERARY");
-    await saveResult(result, nextForm);
-  }, [clearStageTimers, form, saveResult, setActivePlanId, setEvents, setForm, setPlans, setProfile, setProgress, setStage]);
+  }, [clearStageTimers, form, isWorkspaceActive, saveResult, setActivePlanId, setEvents, setForm, setPlans, setProfile, setProgress, setStage, workspaceId]);
 
   const reconnectPlanning = useCallback(async (quiet = false) => {
     if (busy) return;
@@ -72,18 +76,21 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
         if (!quiet) setError("没有可重新连接的后台规划任务");
         return;
       }
+      if (!isWorkspaceActive(workspaceId)) return;
       if (resumed.input.freeText) setDraft(resumed.input.freeText);
       await applyPlanningResult(resumed.result);
     } catch (caught) {
       if (!(caught instanceof DOMException && caught.name === "AbortError") && !quiet) {
-        setError(caught instanceof Error ? caught.message : "重新连接任务失败");
-        setStage("ERROR");
+        if (isWorkspaceActive(workspaceId)) {
+          setError(caught instanceof Error ? caught.message : "重新连接任务失败");
+          setStage("ERROR");
+        }
       }
     } finally {
-      setBusy(false);
+      if (isWorkspaceActive(workspaceId)) setBusy(false);
       if (planningControllerRef.current === controller) planningControllerRef.current = null;
     }
-  }, [applyPlanningResult, busy, handleProgress, planningControllerRef, setBusy, setDraft, setError, setStage]);
+  }, [applyPlanningResult, busy, handleProgress, isWorkspaceActive, planningControllerRef, setBusy, setDraft, setError, setStage, workspaceId]);
 
   const retryPlanning = useCallback(async () => {
     if (busy) return;
@@ -98,21 +105,16 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
       await applyPlanningResult(resumed.result);
     } catch (caught) {
       if (!(caught instanceof DOMException && caught.name === "AbortError")) {
-        setError(caught instanceof Error ? caught.message : "从检查点继续失败");
-        setStage("ERROR");
+        if (isWorkspaceActive(workspaceId)) {
+          setError(caught instanceof Error ? caught.message : "从检查点继续失败");
+          setStage("ERROR");
+        }
       }
     } finally {
-      setBusy(false);
+      if (isWorkspaceActive(workspaceId)) setBusy(false);
       if (planningControllerRef.current === controller) planningControllerRef.current = null;
     }
-  }, [applyPlanningResult, busy, handleProgress, planningControllerRef, setBusy, setDraft, setError, setStage]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void reconnectPlanning(true); }, 250);
-    return () => window.clearTimeout(timer);
-  // only attempt automatic cookie/session recovery once after mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applyPlanningResult, busy, handleProgress, isWorkspaceActive, planningControllerRef, setBusy, setDraft, setError, setStage, workspaceId]);
 
   const startPlanning = useCallback(async () => {
     if (!draft.trim() || busy) return;
@@ -130,21 +132,25 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
     const controller = new AbortController();
     planningControllerRef.current = controller;
     try {
-      const result = await runPlanningJob(planningInput(draft), handleProgress, controller.signal);
+      const result = await runPlanningJob(planningInput(draft), handleProgress, controller.signal, workspaceId);
       await applyPlanningResult(result);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") {
-        setStage("EMPTY");
-        setProgress(null);
+        if (isWorkspaceActive(workspaceId)) {
+          setStage("EMPTY");
+          setProgress(null);
+        }
         return;
       }
-      setError(caught instanceof Error ? caught.message : "规划工具暂时不可用");
-      setStage("ERROR");
+      if (isWorkspaceActive(workspaceId)) {
+        setError(caught instanceof Error ? caught.message : "规划工具暂时不可用");
+        setStage("ERROR");
+      }
     } finally {
-      setBusy(false);
+      if (isWorkspaceActive(workspaceId)) setBusy(false);
       if (planningControllerRef.current === controller) planningControllerRef.current = null;
     }
-  }, [applyPlanningResult, beginProfileStage, busy, draft, handleProgress, planningControllerRef, planningInput, setActivePlanId, setBusy, setError, setEvents, setParametersOpen, setPlans, setProgress, setReviewStep, setStage, setVersions]);
+  }, [applyPlanningResult, beginProfileStage, busy, draft, handleProgress, isWorkspaceActive, planningControllerRef, planningInput, setActivePlanId, setBusy, setError, setEvents, setParametersOpen, setPlans, setProgress, setReviewStep, setStage, setVersions, workspaceId]);
 
   const cancelPlanning = useCallback(async () => {
     planningControllerRef.current?.abort();
@@ -168,5 +174,5 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
     setError(null);
   }, [clearStageTimers, planningControllerRef, setBusy, setError, setParametersOpen, setProgress, setStage]);
 
-  return { startPlanning, retryPlanning, cancelPlanning, abandonPlanning };
+  return { startPlanning, retryPlanning, cancelPlanning, abandonPlanning, reconnectPlanning };
 }

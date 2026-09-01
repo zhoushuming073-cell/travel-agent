@@ -97,7 +97,7 @@ interface AdvanceResponse {
 }
 
 const ACTIVE_JOB_KEY = "smart-travel-active-job-v29";
-interface StoredJob { jobId: string; input: PlanningInput; createdAt: number; progress?: PlanningProgress }
+interface StoredJob { jobId: string; input: PlanningInput; createdAt: number; progress?: PlanningProgress; workspaceId?: string }
 
 function readStoredJob(): StoredJob | null {
   try { return JSON.parse(sessionStorage.getItem(ACTIVE_JOB_KEY) || "null") as StoredJob | null; } catch { return null; }
@@ -122,7 +122,8 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
         advanceFailures = 0;
         if (advanced.progress) {
           onProgress(advanced.progress);
-          writeStoredJob({ jobId, input, createdAt: readStoredJob()?.createdAt || Date.now(), progress: advanced.progress });
+          const stored = readStoredJob();
+          writeStoredJob({ jobId, input, createdAt: stored?.createdAt || Date.now(), progress: advanced.progress, workspaceId: stored?.workspaceId });
         }
         if (advanced.retryAfterMs) retryNotBefore = Date.now() + advanced.retryAfterMs;
       })
@@ -135,7 +136,8 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
       transientFailures = 0;
       if (status.progress) {
         onProgress(status.progress);
-        writeStoredJob({ jobId, input, createdAt: readStoredJob()?.createdAt || Date.now(), progress: status.progress });
+        const stored = readStoredJob();
+        writeStoredJob({ jobId, input, createdAt: stored?.createdAt || Date.now(), progress: status.progress, workspaceId: stored?.workspaceId });
       }
       if (status.status === "queued" || status.status === "working") {
         if (advanceFailure) {
@@ -175,6 +177,7 @@ export async function runPlanningJob(
   input: PlanningInput,
   onProgress: (progress: PlanningProgress) => void,
   signal?: AbortSignal,
+  workspaceId?: string,
 ): Promise<PlanningResult> {
   const idempotencyKey = crypto.randomUUID();
   const jobHeaders = { "x-idempotency-key": idempotencyKey };
@@ -183,13 +186,13 @@ export async function runPlanningJob(
     started = await requestJson<StartResponse>("/api/plan/start", { method: "POST", body: JSON.stringify(input), headers: jobHeaders, signal });
   } catch (error) {
     if (error instanceof PlanningRequestError && error.code === "CONCURRENT_JOB_LIMIT" && error.jobId) {
-      writeStoredJob({ jobId: error.jobId, input, createdAt: Date.now() });
+      writeStoredJob({ jobId: error.jobId, input, createdAt: Date.now(), workspaceId });
       return pollPlanningJob(error.jobId, input, onProgress, signal);
     }
     throw error;
   }
   onProgress(started.progress);
-  writeStoredJob({ jobId: started.jobId, input, createdAt: Date.now(), progress: started.progress });
+  writeStoredJob({ jobId: started.jobId, input, createdAt: Date.now(), progress: started.progress, workspaceId });
   return pollPlanningJob(started.jobId, input, onProgress, signal);
 }
 
@@ -199,7 +202,7 @@ export async function reconnectPlanningJob(onProgress: (progress: PlanningProgre
   const stored = readStoredJob();
   const input = stored?.input || ({ freeText: "", city: "", startDate: "", days: 3, budget: 0, style: "", preferences: [], pace: "medium", transport: "公共交通优先", hotelPreference: "", deepReasoning: true, partySize: 2 } as PlanningInput);
   if (active.progress) onProgress(active.progress);
-  writeStoredJob({ jobId: active.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: active.progress });
+  writeStoredJob({ jobId: active.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: active.progress, workspaceId: stored?.workspaceId });
   return { result: await pollPlanningJob(active.jobId, input, onProgress, signal), input };
 }
 
@@ -212,7 +215,7 @@ export async function retryPlanningJob(onProgress: (progress: PlanningProgress) 
   });
   const input = resumed.input || stored?.input || ({ freeText: "", city: "", startDate: "", days: 3, budget: 0, style: "", preferences: [], pace: "medium", transport: "公共交通优先", hotelPreference: "", deepReasoning: true, partySize: 2 } as PlanningInput);
   onProgress(resumed.progress);
-  writeStoredJob({ jobId: resumed.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: resumed.progress });
+  writeStoredJob({ jobId: resumed.jobId, input, createdAt: stored?.createdAt || Date.now(), progress: resumed.progress, workspaceId: stored?.workspaceId });
   return { result: await pollPlanningJob(resumed.jobId, input, onProgress, signal), input };
 }
 
@@ -227,6 +230,8 @@ export async function cancelPlanningJob(): Promise<boolean> {
 export function abandonPlanningJob(): void { writeStoredJob(null); }
 
 export function hasStoredPlanningJob(): boolean { return Boolean(readStoredJob()?.jobId); }
+
+export function getStoredPlanningWorkspaceId(): string | null { return readStoredJob()?.workspaceId ?? null; }
 
 export async function explainPlan(prompt: string, plan: UiPlan, profile: TravelProfile): Promise<string> {
   const context = {
