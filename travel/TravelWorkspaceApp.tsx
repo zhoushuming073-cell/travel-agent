@@ -19,7 +19,7 @@ import { StageProgress } from "./components/StageProgress.tsx";
 import { workspaceRepository } from "./data/localWorkspaceRepository.ts";
 import { usePlanningLifecycle } from "./hooks/usePlanningLifecycle.ts";
 import { usePlanningProgress } from "./hooks/usePlanningProgress.ts";
-import { explainPlan, monitorTrip, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
+import { explainPlan, getStoredPlanningWorkspaceId, monitorTrip, runPlanningJob, type PlanningInput } from "./services/planningApi.ts";
 import { WORKSPACE_STAGES } from "./state/machine.ts";
 import { createWorkspaceId, EMPTY_FORM, isExplanation, profileToForm, REVIEW_LABELS } from "./state/workspace-config.ts";
 import type { ComposerMessage, PendingChange, PlanningProgress, TravelFormState, TravelProfile, UiPlan, WorkspaceSnapshot } from "./types.ts";
@@ -44,17 +44,17 @@ export function TravelWorkspaceApp() {
   const [reviewStep, setReviewStep] = useState(3);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [resumeWorkspaceId, setResumeWorkspaceId] = useState<string | null>(null);
   const planningControllerRef = useRef<AbortController | null>(null);
+  const viewedWorkspaceIdRef = useRef(id);
   const monitorEventRef = useRef("");
   const monitoredReplanRef = useRef<(text: string) => Promise<void>>(async () => undefined);
 
   const activePlan = useMemo(() => plans.find((plan) => plan.id === activePlanId) ?? plans[0] ?? null, [activePlanId, plans]);
   const stageConfig = WORKSPACE_STAGES[stage];
-  const { beginProfileStage, clearStageTimers, handleProgress } = usePlanningProgress({ workspaceId: id, setProgress, setProfile, setForm, setEvents, setStage });
-
-  useEffect(() => {
-    if (stage === "BUILDING_PROFILE" || (stage === "READY" && reviewStep === 0)) setSidebarCollapsed(false);
-  }, [reviewStep, stage]);
+  viewedWorkspaceIdRef.current = id;
+  const isWorkspaceActive = useCallback((workspaceId: string) => viewedWorkspaceIdRef.current === workspaceId, []);
+  const { beginProfileStage, clearStageTimers, handleProgress } = usePlanningProgress({ workspaceId: id, isWorkspaceActive, setProgress, setProfile, setForm, setEvents, setStage });
 
   const refreshWorkspaces = useCallback(async () => {
     const stored = await workspaceRepository.list();
@@ -89,6 +89,7 @@ export function TravelWorkspaceApp() {
   const loadWorkspace = useCallback(async (nextId: string, updatePath = true) => {
     const stored = await workspaceRepository.get(nextId) as WorkspaceSnapshot | null;
     if (!stored) return;
+    viewedWorkspaceIdRef.current = stored.id;
     setId(stored.id);
     setStage(stored.state === "EXECUTING" ? "READY" : stored.state);
     setProfile(stored.profile);
@@ -102,8 +103,13 @@ export function TravelWorkspaceApp() {
     setProgress(stored.progress ?? null);
     setReviewStep(stored.state === "READY" || stored.state === "EXECUTING" ? 3 : Math.max(0, WORKSPACE_STAGES[stored.state].flow));
     setPendingChange(null);
+    const planningWorkspaceId = getStoredPlanningWorkspaceId();
+    const planningStillRunningHere = Boolean(planningControllerRef.current && planningWorkspaceId === stored.id);
+    setBusy(planningStillRunningHere);
     setMobileSidebarOpen(false);
     setError(null);
+    const resumable = ["BUILDING_PROFILE", "FETCHING_DATA", "ASSESSING_EVIDENCE", "GENERATING_ITINERARY", "VALIDATING_ITINERARY", "ERROR"].includes(stored.state);
+    setResumeWorkspaceId(resumable && planningWorkspaceId === stored.id && !planningControllerRef.current ? stored.id : null);
     if (updatePath) history.pushState({}, "", `/travel/${stored.id}`);
   }, []);
 
@@ -112,13 +118,6 @@ export function TravelWorkspaceApp() {
     document.body.classList.toggle("workspace-focus", stage !== "EMPTY");
     if (stage !== "EMPTY") setSidebarCollapsed(true);
   }, [stage]);
-
-  useEffect(() => {
-    void refreshWorkspaces().then(async () => {
-      const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
-      if (pathId && pathId !== "index.html") await loadWorkspace(pathId, false);
-    });
-  }, [loadWorkspace, refreshWorkspaces]);
 
   useEffect(() => {
     if (!draft.trim()) return;
@@ -141,7 +140,12 @@ export function TravelWorkspaceApp() {
       const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
       if (pathId && pathId !== "index.html") void loadWorkspace(pathId, false);
       else {
-        setId(createWorkspaceId()); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
+        const nextId = createWorkspaceId();
+        viewedWorkspaceIdRef.current = nextId;
+        planningControllerRef.current?.abort();
+        clearStageTimers();
+        setResumeWorkspaceId(null); setBusy(false);
+        setId(nextId); setStage("EMPTY"); setDraft(""); setForm(EMPTY_FORM);
         setProfile(null); setProgress(null); setPlans([]); setActivePlanId(null);
         setVersions([]); setEvents([]); setMessages([]); setPendingChange(null); setError(null);
         setParametersOpen(false); setReviewStep(3);
@@ -149,7 +153,7 @@ export function TravelWorkspaceApp() {
     };
     addEventListener("popstate", onPopState);
     return () => removeEventListener("popstate", onPopState);
-  }, [loadWorkspace]);
+  }, [clearStageTimers, loadWorkspace]);
 
   useEffect(() => {
     if (!error || stage !== "READY") return;
@@ -181,19 +185,48 @@ export function TravelWorkspaceApp() {
     replanContext,
   }), [form]);
 
-  const savePlanningResult = useCallback(async (result: Awaited<ReturnType<typeof runPlanningJob>>, nextForm: TravelFormState) => {
-    await workspaceRepository.save(snapshot({ state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], draft, form: nextForm, messages, progress: result.progress ?? null }));
+  const savePlanningResult = useCallback(async (workspaceId: string, result: Awaited<ReturnType<typeof runPlanningJob>>, nextForm: TravelFormState) => {
+    const stored = await workspaceRepository.get(workspaceId) as WorkspaceSnapshot | null;
+    const base = stored ?? (workspaceId === id ? snapshot() : null);
+    if (!base) return;
+    await workspaceRepository.save({ ...base, id: workspaceId, state: "VALIDATING_ITINERARY", profile: result.request, alternatives: result.alternatives, activePlanId: result.activeId, events: result.agentEvents ?? [], versions: [], form: nextForm, progress: result.progress ?? null, updatedAt: new Date().toISOString() });
     await refreshWorkspaces();
-  }, [draft, messages, refreshWorkspaces, snapshot]);
+  }, [id, refreshWorkspaces, snapshot]);
 
-  const { startPlanning, retryPlanning, cancelPlanning, abandonPlanning } = usePlanningLifecycle({
-    busy, setBusy, setError, planningControllerRef, draft, form, planningInput, handleProgress, beginProfileStage, clearStageTimers, saveResult: savePlanningResult,
+  const { startPlanning, retryPlanning, cancelPlanning, abandonPlanning, reconnectPlanning } = usePlanningLifecycle({
+    busy, workspaceId: id, isWorkspaceActive, setBusy, setError, planningControllerRef, draft, form, planningInput, handleProgress, beginProfileStage, clearStageTimers, saveResult: savePlanningResult,
     setDraft, setForm, setProfile, setProgress, setPlans, setActivePlanId, setEvents, setVersions,
     setStage, setParametersOpen, setReviewStep,
   });
 
+  useEffect(() => {
+    void refreshWorkspaces().then(async () => {
+      const pathId = location.pathname.match(/^\/travel\/([^/]+)\/?$/)?.[1];
+      if (pathId && pathId !== "index.html") {
+        await loadWorkspace(pathId, false);
+        return;
+      }
+      const planningWorkspaceId = getStoredPlanningWorkspaceId();
+      if (planningWorkspaceId) await loadWorkspace(planningWorkspaceId, false);
+    });
+  }, [loadWorkspace, refreshWorkspaces]);
+
+  useEffect(() => {
+    if (!resumeWorkspaceId || resumeWorkspaceId !== id) return;
+    setResumeWorkspaceId(null);
+    void reconnectPlanning(true);
+  }, [id, reconnectPlanning, resumeWorkspaceId]);
+
+  const beginPlanning = async () => {
+    if (!draft.trim() || busy) return;
+    await persist({ state: "BUILDING_PROFILE", alternatives: [], activePlanId: null, versions: [], events: [], progress: null });
+    await startPlanning();
+  };
+
   const openWorkspace = async (nextId: string) => {
-    if (!await cancelPlanning()) return;
+    if (nextId === id) return;
+    if (planningControllerRef.current) await persist();
+    viewedWorkspaceIdRef.current = nextId;
     await loadWorkspace(nextId);
   };
 
@@ -210,6 +243,7 @@ export function TravelWorkspaceApp() {
   };
 
   const sendComposer = async (text: string, origin: "user" | "monitor" = "user") => {
+    const composerWorkspaceId = id;
     const createdAt = new Date().toISOString();
     setMessages((current) => [...current, { id: `${origin}-${Date.now()}`, role: origin === "user" ? "user" : "assistant", text: origin === "user" ? text : `执行监控：${text}`, createdAt }]);
     if (!activePlan || !profile) return;
@@ -218,10 +252,10 @@ export function TravelWorkspaceApp() {
     if (isExplanation(text)) {
       try {
         const answer = await explainPlan(text, activePlan, profile);
-        setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", text: answer, createdAt: new Date().toISOString() }]);
+        if (isWorkspaceActive(composerWorkspaceId)) setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", text: answer, createdAt: new Date().toISOString() }]);
       } catch (caught) {
-        setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", text: caught instanceof Error ? caught.message : "解释服务暂时不可用", createdAt: new Date().toISOString() }]);
-      } finally { setBusy(false); }
+        if (isWorkspaceActive(composerWorkspaceId)) setMessages((current) => [...current, { id: `assistant-${Date.now()}`, role: "assistant", text: caught instanceof Error ? caught.message : "解释服务暂时不可用", createdAt: new Date().toISOString() }]);
+      } finally { if (isWorkspaceActive(composerWorkspaceId)) setBusy(false); }
       return;
     }
     setStage("REPLANNING");
@@ -243,14 +277,17 @@ export function TravelWorkspaceApp() {
       };
       const controller = new AbortController();
       planningControllerRef.current = controller;
-      const result = await runPlanningJob(planningInput(`${draft}\n\n在现有行程基础上执行以下调整，并尽量保持未点名的日期不变：${text}`, context), (next) => setProgress(next), controller.signal);
+      const result = await runPlanningJob(planningInput(`${draft}\n\n在现有行程基础上执行以下调整，并尽量保持未点名的日期不变：${text}`, context), (next) => { if (isWorkspaceActive(composerWorkspaceId)) setProgress(next); }, controller.signal, composerWorkspaceId);
+      if (!isWorkspaceActive(composerWorkspaceId)) return;
       const after = result.alternatives.find((plan) => plan.id === activePlan.variant) ?? result.alternatives[0];
       setPendingChange({ before: activePlan, after, result, adjustment: text, changeSet: after.changeSet ?? null });
       setStage("READY");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "局部重规划失败");
-      setStage("READY");
-    } finally { setBusy(false); }
+      if (isWorkspaceActive(composerWorkspaceId)) {
+        setError(caught instanceof Error ? caught.message : "局部重规划失败");
+        setStage("READY");
+      }
+    } finally { if (isWorkspaceActive(composerWorkspaceId)) setBusy(false); }
   };
   monitoredReplanRef.current = (text: string) => sendComposer(text, "monitor");
 
@@ -298,6 +335,7 @@ export function TravelWorkspaceApp() {
   const newTrip = async () => {
     if (!await cancelPlanning()) return;
     const nextId = createWorkspaceId();
+    viewedWorkspaceIdRef.current = nextId;
     setId(nextId);
     setStage("EMPTY");
     setDraft("");
@@ -346,9 +384,9 @@ export function TravelWorkspaceApp() {
   return <div className={`app-shell v2-shell react-workspace-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${profileWorkspaceVisible ? " profile-workspace-view" : ""}`}>
     <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={() => void newTrip()} onOpen={(nextId) => void openWorkspace(nextId)} onDelete={(nextId) => void deleteWorkspace(nextId)}/>
     <main className="workspace-canvas react-workspace-canvas">
-      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{headerEyebrow}</span><strong>{headerTitle}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{headerState}</span><button type="button" onClick={() => stage === "EMPTY" ? setParametersOpen((value) => !value) : void editRequirements()}>{stage === "EMPTY" && parametersOpen ? "收起参数" : "旅行参数"}</button></div></header>
+      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{headerEyebrow}</span><strong>{headerTitle}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{headerState}</span></div></header>
       {stage !== "EMPTY" && <StageProgress state={stage} selectedStep={readyForReview ? reviewStep : undefined} onSelect={readyForReview ? openReviewStep : undefined}/>}
-      {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onFormChange={setForm} onSubmit={() => void startPlanning()} parametersOpen={parametersOpen} onToggleParameters={() => setParametersOpen((value) => !value)}/>}
+      {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onFormChange={setForm} onSubmit={() => void beginPlanning()} parametersOpen={parametersOpen} onToggleParameters={() => setParametersOpen((value) => !value)}/>}
       {stage === "BUILDING_PROFILE" && (
         <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => void editRequirements()}/>
       )}
