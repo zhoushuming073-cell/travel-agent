@@ -13,6 +13,10 @@
 # testing
 /coverage
 
+# local design / visual QA artifacts
+/.design-qa/
+/design-qa.md
+
 # next.js
 /.next/
 /.vinext/
@@ -20,6 +24,10 @@
 
 # misc
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
 *.pem
 
 # debug
