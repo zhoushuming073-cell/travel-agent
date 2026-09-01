@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible problem in Smart Travel
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve Smart Travel. Please remove all secrets from reports and logs.
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ...
+        2. Enter ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, operating system, Node.js version, commit, and deployment type when relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected subsystem
+      options:
+        - Planning lifecycle or Agent
+        - Data provider, research, or evidence
+        - Route, transit, or itinerary validation
+        - D1 persistence or recovery
+        - Frontend UI or local workspace state
+        - Build, deployment, or documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Sanitized screenshots or logs
+      description: Optional. Remove API keys, tokens, cookies, personal data, and private URLs.
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Security check
+      options:
+        - label: I confirm this report contains no API keys, tokens, cookies, personal data, or other secrets.
+          required: true

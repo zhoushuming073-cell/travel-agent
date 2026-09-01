@@ -30,7 +30,10 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 ### 后端与数据
 
 - `worker/index.ts`：Cloudflare Worker 总入口；处理 `/api/*`，其余请求交给 Vinext。
-- `worker/travel-api.ts`：旅行 API、外部 provider、17 阶段规划执行器和最终结果装配。目前文件较大，修改时必须保持范围小并补回归测试。
+- `worker/travel-api.ts`：旅行 API、17 阶段规划的高层编排和最终结果装配。它是兼容现有调用的后端门面，修改时必须保持范围小并补回归测试。
+- `worker/providers/`：外部 provider 的 HTTP/MCP 调用、重试、缓存、健康记录和 POI 数据归一化。
+- `worker/planning/`：模型规划结果归一化、缺失内容恢复、必去地点覆盖和时间线安全修复。
+- `worker/lib/`：Worker 侧无业务状态的通用值处理工具。
 - `worker/persistence.ts`：D1 任务、阶段工件、事件、provider attempts、租约、缓存和配额。
 - `drizzle/`：正式 D1 迁移。
 - `db/schema.ts`：辅助类型描述；当前运行事实以迁移和 `worker/persistence.ts` 为准。
@@ -41,6 +44,8 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 - `worker/domain/model-routing.ts`：V4 Flash/V4 Pro 的任务路由、回退和熔断。
 - `worker/domain/profile-extraction.ts`：确定性解析、AI 提取结果合并和字段来源。
 - `worker/travel-api.ts` 中的阶段执行逻辑：需求解析、数据采集、研究、三方案生成、critic、修复、最终交通复核和编译。
+- `worker/planning/planner-normalization.ts`：规划模型输出的归一化、确定性恢复、约束覆盖和时间线修复。
+- `worker/providers/provider-client.ts`：模型与数据 provider 的传输、超时、有限重试、缓存和健康遥测。
 - `travel/hooks/usePlanningLifecycle.ts` 与 `travel/services/planningApi.ts`：浏览器驱动 `/api/plan/advance`，并负责恢复、重试和真实服务端取消。
 
 V4 Flash 用于需求提取和解释；V4 Pro 优先用于研究、增强、规划、critic 和修复。不要重新引入已经停用的 GLM 路由。
@@ -172,4 +177,4 @@ git pull --ff-only github main
 - 除非需求明确涉及视觉设计，否则保持现有四阶段工作流、十套主题、动画加载策略和移动端布局。
 - 不要删除看起来“没用”的代码、父目录旧实现或历史资料，除非任务明确列出删除目标且确认可恢复性。
 
-当需求可能违反上述约束或需要扩大范围时，先在 PR/对话中说明原因和影响，再等待确认。
+当需求可能违反上述约束或需要扩大范围时，先在对话或交付说明中说明原因和影响，再等待确认。

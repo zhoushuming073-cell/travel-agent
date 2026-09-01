@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused improvement to Smart Travel
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or maintainer problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior change.
+    validations:
+      required: true
+  - type: textarea
+    id: value
+    attributes:
+      label: User value
+      description: Who benefits, and how?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or smaller alternatives.
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Affected subsystem
+      options:
+        - Requirement extraction
+        - Research or evidence
+        - Planner, critic, or repair
+        - Route or transit validation
+        - Data provider integration
+        - D1 persistence or recovery
+        - Frontend workspace or UI
+        - Build, deployment, or documentation
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: reliability
+    attributes:
+      label: Reliability check
+      options:
+        - label: This proposal does not require presenting estimated or unavailable data as verified facts.
+          required: true

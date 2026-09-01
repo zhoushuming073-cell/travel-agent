@@ -1,36 +1,130 @@
-# 智能旅游助手（Sites 部署版）
+# Smart Travel
 
-面向中国城市的智能旅行决策网站。DeepSeek V4 Flash 先把自然语言需求整理成结构化约束，DeepSeek V4 Pro 再结合天气、酒店、高德地图 MCP 与受控联网核验生成三套差异化路线。
+**An open-source, evidence-aware multi-agent travel planning system for Chinese cities.**
 
-## 本地运行
+Smart Travel（智能旅游助手）把自然语言旅行需求转化为三套可审计、可恢复的中国城市行程。它不是简单让大模型生成攻略，而是把需求提取、外部数据查询、研究取证、路线优化、独立审查、修复和最终交通核验组织成持久化工作流。
+
+## What it does / 项目能力
+
+- Extracts dates, party size, budget, pace, preferences, exclusions, and must-visit places from natural language.
+- Runs a resumable 17-stage planning workflow instead of one long model request.
+- Produces exactly three differentiated itinerary variants: `hot`, `niche`, and `relax`.
+- Collects weather forecasts, map entities, transit candidates, hotel candidates, images, and controlled web evidence.
+- Optimizes route buckets against user constraints, travel time, opening information, meal windows, night views, crowd risk, and itinerary diversity.
+- Uses independent critic, contract audit, targeted repair, final transit validation, and result compilation stages.
+- Persists jobs, stage artifacts, leases, provider attempts, and checkpoints in Cloudflare D1.
+- Resumes after refresh or transient network failure and supports real server-side cancellation and retry.
+
+## Why it is different
+
+Smart Travel treats data quality as part of the product contract:
+
+- Evidence is attributed and ranked; snippets alone do not verify critical facts.
+- Unknown and conflicting facts remain explicit instead of being upgraded to certainty.
+- Transit legs distinguish verified provider results from estimates.
+- Hotel results are candidates and source-backed reference prices, never invented availability or transaction prices.
+- Crowd information is a risk prediction unless an authoritative real-time source actually supplied it.
+- Planner output is audited and repaired against required places, supported day count, time windows, meals, and final transit feasibility.
+- Durable checkpoints prevent a single provider or model failure from discarding all completed work.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  U[User] --> W[React Travel Workspace]
+  W -->|start / advance / status| API[Cloudflare Worker API]
+  API --> P[Profile extraction]
+  P --> R[Research and evidence]
+  R --> PL[Planner: hot / niche / relax]
+  PL --> C[Critic and repair]
+  C --> V[Contract and transit validation]
+  API <--> D1[(D1 checkpoints)]
+  R --> EXT[Weather / map / hotel / web / image providers]
+  V --> OUT[Three auditable itineraries]
+  OUT --> W
+```
+
+See [docs/architecture.md](docs/architecture.md) for the request flow, all 17 stages, persistence semantics, provider boundaries, and module responsibilities.
+
+## Project structure
+
+| Path | Responsibility |
+| --- | --- |
+| `app/` | Vinext route entry, global metadata, and route-scoped styles. |
+| `app/travel/[[...tripId]]/` | Thin route composition root for the travel workspace. |
+| `travel/` | Frontend feature/workspace: React UI, state, local history, planning lifecycle, and API client. It is not a duplicate route directory. |
+| `worker/index.ts` | Cloudflare Worker entry and Vinext handoff. |
+| `worker/travel-api.ts` | Travel API and high-level planning orchestration façade. |
+| `worker/providers/` | Provider transport and POI normalization boundaries. |
+| `worker/planning/` | Planner response normalization, hard-constraint coverage, and timeline safety repair. |
+| `worker/domain/` | Contracts, routing, evidence, trust, crowd risk, research, compiler, and other domain algorithms. |
+| `worker/persistence.ts` | D1 jobs, artifacts, events, leases, cache, provider health, quotas, and rate limits. |
+| `tests/` | Domain, contract, lifecycle, recovery, and structural regression tests. |
+| `drizzle/` | Authoritative D1 migrations. |
+| `.openai/` | OpenAI Sites project and D1 binding configuration. |
+
+## Quick start
+
+### Requirements
+
+- Node.js 22.13.0 or newer
+- npm with the committed `package-lock.json`
 
 ```bash
-npm install
+npm ci
+cp .dev.vars.example .dev.vars
 npm run dev
 ```
 
-生产构建：
+On Windows PowerShell:
+
+```powershell
+Copy-Item .dev.vars.example .dev.vars
+```
+
+Open `http://localhost:3000/travel/`.
+
+### Environment variables
+
+Put local server credentials only in the ignored `.dev.vars` file. The committed `.dev.vars.example` documents the supported variables without real secrets.
+
+| Variable | Purpose |
+| --- | --- |
+| `AI_API_KEY` | Server-side key for the OpenAI-compatible Yuanjing endpoint. |
+| `AI_API_BASE_URL` | OpenAI-compatible chat-completions endpoint. |
+| `AI_*_MODEL` | Purpose-specific extraction, research, planning, critic, repair, and explanation models. |
+| `AMAP_WEB_KEY` | Optional Amap Web Service access for official district and POI lookups. |
+| `UNSPLASH_ACCESS_KEY` | Optional image fallback. |
+| `RATE_LIMIT_SALT` | Server-side salt for public rate-limit identifiers. |
+| `DAILY_PLAN_QUOTA` | Daily planning quota. |
+| `NEWSNOW_BASE_URL`, `SOCIAL_MCP_*` | Optional, authorized trend-provider integrations. |
+
+`DEEPSEEK_API_KEY` remains a legacy-compatible alias. Never expose any key to browser JavaScript or commit `.env*` / `.dev.vars`.
+
+## Validation
 
 ```bash
+npm run test:domain
+npm run typecheck -- --incremental false
+npm run lint
 npm run build
 ```
 
-## 主要目录
+`npm test` currently runs the domain suite followed by the production build.
 
-- `app/travel/[[...tripId]]/`：Vinext 页面入口和分层样式。
-- `travel/`：React 工作区、四阶段交互、最终仪表盘、本地历史和规划生命周期。
-- `worker/domain/`：画像、模型路由、三方案合同、路线优化、证据和可靠性规则。
-- `worker/travel-api.ts`：受控联网工具、MCP 调用、17 阶段规划执行器和旅行 API。
-- `worker/persistence.ts`、`drizzle/`：D1 任务、阶段工件、事件、租约和正式迁移。
-- `worker/index.ts`：Cloudflare Worker 入口。
-- `tests/`：领域、合同、恢复和界面结构回归测试。
-- `.openai/hosting.json`：Sites 项目标识与托管配置。
+## Data reliability
 
-规划任务由页面按阶段调用 `/api/plan/advance` 推进，并把检查点保存到 D1。刷新或短时断网后可以恢复；完全关闭页面时任务暂停，不会在后台继续消耗模型额度。
+- **Weather:** Open-Meteo provides a 16-day forecast snapshot. Dates outside the available window stay unavailable and are not replaced with today's weather.
+- **Hotels:** only provider-returned candidates are shown. Prices are source-backed references, not guaranteed transaction prices or availability.
+- **Map and transit:** Amap or other provider results are marked verified only when returned for the exact leg; fallbacks remain estimates.
+- **Crowd risk:** a prediction with confidence and evidence coverage, never a fabricated live visitor count.
+- **Opening and reservation:** missing, stale, or conflicting information stays unknown/conflicting and is surfaced for pre-departure verification.
+- **Web evidence:** external pages are untrusted inputs, critical facts require stronger support, and source conflicts are retained.
 
-## 数据边界
+## Contributing
 
-- 天气使用 Open-Meteo 直连，保存未来 16 天快照；超出预报窗口的日期明确标为待核验。
-- 酒店仅展示酒店 MCP 实际返回的候选，不虚构房价或余房。
-- 高德 MCP 用于 POI 精确图片和公交/地铁路线；共享额度不足时透明回退。
-- 未接入官方来源的实时客流、景区预约等信息保持“未知”。
+External contributors should read [CONTRIBUTING.md](CONTRIBUTING.md), fork the repository, create a focused branch, and submit a pull request. Security concerns should follow [SECURITY.md](SECURITY.md).
+
+## License
+
+Smart Travel is available under the [MIT License](LICENSE).
