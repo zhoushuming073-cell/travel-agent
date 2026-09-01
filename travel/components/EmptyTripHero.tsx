@@ -25,6 +25,7 @@ const examples = [
 
 export function EmptyTripHero({ value, form, busy, onChange, onFormChange, onSubmit, parametersOpen, onToggleParameters }: Props) {
   const localHints = useMemo(() => deterministicProfileHints(value), [value]);
+  const unsupportedDuration = typeof localHints.days === "number" && localHints.days > 7;
   const preference = form.preferences.join("、") || form.style || "未设置";
   const quickParams: Array<[IconName, string, string, string, boolean]> = [
     ["mapPin", "目的地", form.city || "未设置", localHints.city ? "文本即时识别，等待 AI 校正" : form.city ? "参数设置" : "等待文字识别", Boolean(localHints.city)],
@@ -36,8 +37,8 @@ export function EmptyTripHero({ value, form, busy, onChange, onFormChange, onSub
     <div className="empty-copy"><h1 id="hero-title">智能旅游助手</h1><p>从一句想法，到一份 <strong>真正能出发的行程</strong></p><div className="hero-capabilities"><span><Icon name="search"/>联网查找真实景点</span><span><Icon name="check"/>标明信息可信度</span><span><Icon name="sparkles"/>生成三套差异路线</span><span><Icon name="mapPin"/>检查时间与交通</span></div></div>
     <div className="empty-layout">
       <div className="prompt-studio"><div className="query-card">
-        <div className="query-input-wrap"><div className="query-content"><label htmlFor="travel-request">描述你的旅行想法…</label><textarea id="travel-request" rows={5} value={value} onChange={(event) => onChange(event.target.value)} placeholder="例如：2026年10月去杭州玩4天，两个人，喜欢自然和摄影，必须去西湖和灵隐寺，希望不要太赶。"/><div className="query-helper"><span>日期、人数、必选项与时间限制会作为硬约束</span><button type="button" onClick={onToggleParameters}>{parametersOpen ? "收起参数" : "补充参数"}</button></div></div></div>
-        <button className="primary-button" type="button" onClick={onSubmit} disabled={busy || !value.trim()}><span>{busy ? "智能体正在工作" : "开始规划"}</span><Icon name={busy ? "sparkles" : "arrow"}/></button>
+        <div className="query-input-wrap"><div className="query-content"><label htmlFor="travel-request">描述你的旅行想法…</label><textarea id="travel-request" rows={5} value={value} onChange={(event) => onChange(event.target.value)} aria-describedby={unsupportedDuration ? "duration-limit-note" : undefined} placeholder="例如：2026年10月去杭州玩4天，两个人，喜欢自然和摄影，必须去西湖和灵隐寺，希望不要太赶。"/><div className="query-helper"><span id={unsupportedDuration ? "duration-limit-note" : undefined}>{unsupportedDuration ? "当前单次规划最多支持 7 天，请缩短行程后再开始。" : "日期、人数、必选项与时间限制会作为硬约束"}</span><button type="button" onClick={onToggleParameters}>{parametersOpen ? "收起参数" : "补充参数"}</button></div></div></div>
+        <button className="primary-button" type="button" onClick={onSubmit} disabled={busy || !value.trim() || unsupportedDuration}><span>{busy ? "智能体正在工作" : "开始规划"}</span><Icon name={busy ? "sparkles" : "arrow"}/></button>
       </div></div>
       <div className="city-illustration" aria-hidden="true"><img className="jiangnan-hero-art" src="/travel/assets/jiangnan-hero-v1.png" alt=""/></div>
     </div>

@@ -2,10 +2,16 @@
 AI_API_KEY=
 AI_API_BASE_URL=https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions
 AI_EXTRACT_MODEL=deepseek-v4-flash
+AI_RESEARCH_MODEL=deepseek-v4-pro-0813
+AI_ENRICH_MODEL=deepseek-v4-pro-0813
 AI_PLANNER_MODEL=deepseek-v4-pro-0813
+AI_CRITIC_MODEL=deepseek-v4-pro-0813
 AI_REPAIR_MODEL=deepseek-v4-pro-0813
 AI_REPAIR_FALLBACK_MODEL=
 AI_EXPLAIN_MODEL=deepseek-v4-flash
+# 逗号分隔的兼容模型回退；AI_SKIP_MODELS 中的模型不会被调用。
+AI_COMPATIBLE_MODEL_FALLBACKS=deepseek-v4-flash
+AI_SKIP_MODELS=
 
 # 旧环境变量仍被兼容，新部署建议使用上述 AI_* 变量
 DEEPSEEK_API_KEY=
@@ -13,6 +19,10 @@ DEEPSEEK_API_KEY=
 # 地图、天气、酒店与图片数据源
 AMAP_WEB_KEY=
 UNSPLASH_ACCESS_KEY=
+
+# 公共站点保护。RATE_LIMIT_SALT 应在真实环境中设置为随机服务端密钥。
+RATE_LIMIT_SALT=
+DAILY_PLAN_QUOTA=100
 
 # 可选社交趋势 MCP。默认留空，不会自动登录、绕过验证码或抓取社交平台。
 # 可选：自行部署的 NewsNow。未配置时仍会直连百度、头条与哔哩哔哩公开热榜。

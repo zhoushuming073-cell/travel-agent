@@ -3435,7 +3435,7 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
         await assertCommitAllowed();
         await putTravelJobArtifact(jobId, "prepared", prepared);
         const branches = [
-          { provider: prepared.weather?.mcpStatus === "ready" ? "MCPMarket 天气查询" : "Open-Meteo 直连兜底", capability: "天气", ok: prepared.providerBundle.weather.status === "ready", count: prepared.weather?.tripForecast?.length || 0, detail: prepared.weather?.mcpStatus === "fallback" ? `天气 MCP 失败：${prepared.weather?.mcpNote || "未返回"}；Open-Meteo 已兜底` : "天气 MCP 成功；Open-Meteo 补充日照时间" },
+          { provider: "Open-Meteo", capability: "天气", ok: prepared.providerBundle.weather.status === "ready", count: prepared.weather?.tripForecast?.length || 0, detail: prepared.providerBundle.weather.status === "ready" ? "Open-Meteo 已返回未来 16 天天气及日照时间" : prepared.providerBundle.weather.error },
           { provider: "高德官方 / Wikimedia / OSM", capability: "景点", ok: prepared.providerBundle.spots.status === "ready", count: prepared.rawSpots?.length || 0, detail: prepared.providerBundle.spots.error },
           { provider: prepared.hotel?.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "住宿数据源", capability: "住宿候选（非指定日期实时价格）", ok: prepared.providerBundle.hotels.status === "ready", count: prepared.hotel?.candidates?.length || 0, detail: `${prepared.hotel?.note || prepared.providerBundle.hotels.error || "候选已返回"}；指定日期房态、税费、房型、取消政策保持未知` },
         ];
@@ -3775,13 +3775,17 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       await expireStaleTravelJobs(session.hash);
       const existingActive = await findActiveTravelJob(session.hash, true);
       if (existingActive) return json({ error: { message: "您已有一个规划任务正在执行，可重新连接或先取消", code: "CONCURRENT_JOB_LIMIT", jobId: existingActive.id } }, 409, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+      const input = await request.json().catch(() => ({}));
+      const requestedDays = Number(deterministicProfileHints(input?.freeText).days ?? input?.days);
+      if (Number.isFinite(requestedDays) && (requestedDays < 1 || requestedDays > 7)) {
+        return json({ error: { message: "当前单次规划支持 1—7 天，请调整行程天数后重试", code: "UNSUPPORTED_TRIP_DURATION" } }, 400, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+      }
+      const idempotencyKey = cleanText(request.headers.get("x-idempotency-key"));
+      if (idempotencyKey.length < 16) return json({ error: { message: "缺少幂等请求标识，请刷新页面后重试", code: "IDEMPOTENCY_KEY_REQUIRED" } }, 400, { "set-cookie": session.setCookie });
       const globalJobs = await activeJobCount();
       if (globalJobs >= 4) return json({ error: { message: "当前规划队列繁忙，请稍后再试", code: "GLOBAL_CONCURRENCY_LIMIT" } }, 503, { "retry-after": "20" });
       const dailyQuota = await consumeRateLimit("global", "plan-daily", clamp(env?.DAILY_PLAN_QUOTA || 100, 20, 1000), 24 * 60 * 60 * 1000);
       if (!dailyQuota.allowed) return json({ error: { message: "今日公开规划额度已用完，请明日再试", code: "DAILY_QUOTA_EXCEEDED" } }, 429, { "retry-after": String(dailyQuota.retryAfterSeconds) });
-      const input = await request.json();
-      const idempotencyKey = cleanText(request.headers.get("x-idempotency-key"));
-      if (idempotencyKey.length < 16) return json({ error: { message: "缺少幂等请求标识，请刷新页面后重试", code: "IDEMPOTENCY_KEY_REQUIRED" } }, 400, { "set-cookie": session.setCookie });
       const jobId = crypto.randomUUID();
       const progress = { phase: "queued", title: "规划任务已建立断点", items: ["● 正在启动第一阶段", "● 刷新或断网不会丢失进度；重新打开后自动续跑", "● 完全关闭页面时任务暂停，不会继续消耗模型额度"], generatedAt: new Date().toISOString() };
       const now = Date.now();

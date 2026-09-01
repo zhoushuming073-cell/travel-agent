@@ -75,3 +75,13 @@ test("Harbin winter request extracts date, duration and must-go place", () => {
   assert.equal(hints.partySize, 2);
   assert.deepEqual(hints.requiredAttractions, ["冰雪大世界"]);
 });
+
+test("trip duration is capped at the supported seven-day planning window", () => {
+  const merged = mergeTravelProfile(
+    { city: "云南", startDate: "2026-09-10", days: 12, freeText: "去云南玩十二天" },
+    { city: "云南", startDate: "2026-09-10", days: 12 },
+    now,
+  );
+  assert.equal(merged.days, 7);
+  assert.equal(merged.nights, 6);
+});

@@ -36,7 +36,7 @@ interface Options {
 interface PlanningLifecycle {
   startPlanning: () => Promise<void>;
   retryPlanning: () => Promise<void>;
-  cancelPlanning: () => Promise<void>;
+  cancelPlanning: () => Promise<boolean>;
   abandonPlanning: () => void;
 }
 
@@ -147,13 +147,14 @@ export function usePlanningLifecycle(options: Options): PlanningLifecycle {
   }, [applyPlanningResult, beginProfileStage, busy, draft, handleProgress, planningControllerRef, planningInput, setActivePlanId, setBusy, setError, setEvents, setParametersOpen, setPlans, setProgress, setReviewStep, setStage, setVersions]);
 
   const cancelPlanning = useCallback(async () => {
-    try { await cancelPlanningJob(); } catch (caught) { setError(caught instanceof Error ? caught.message : "服务端取消失败"); return; }
     planningControllerRef.current?.abort();
+    try { await cancelPlanningJob(); } catch (caught) { setError(caught instanceof Error ? caught.message : "服务端取消失败"); return false; }
     clearStageTimers();
     setBusy(false);
     setProgress(null);
     setStage("EMPTY");
     setParametersOpen(true);
+    return true;
   }, [clearStageTimers, planningControllerRef, setBusy, setError, setParametersOpen, setProgress, setStage]);
 
   const abandonPlanning = useCallback(() => {

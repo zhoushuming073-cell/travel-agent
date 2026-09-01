@@ -128,7 +128,7 @@ export function TravelWorkspaceApp() {
         ...current,
         city: typeof hints.city === "string" ? hints.city : current.city,
         startDate: typeof hints.startDate === "string" ? hints.startDate : current.startDate,
-        days: typeof hints.days === "number" ? hints.days : current.days,
+        days: typeof hints.days === "number" ? Math.min(7, Math.max(1, hints.days)) : current.days,
         partySize: typeof hints.partySize === "number" ? hints.partySize : current.partySize,
         preferences: Array.isArray(hints.preferences) ? hints.preferences as string[] : current.preferences,
       }));
@@ -191,6 +191,11 @@ export function TravelWorkspaceApp() {
     setDraft, setForm, setProfile, setProgress, setPlans, setActivePlanId, setEvents, setVersions,
     setStage, setParametersOpen, setReviewStep,
   });
+
+  const openWorkspace = async (nextId: string) => {
+    if (!await cancelPlanning()) return;
+    await loadWorkspace(nextId);
+  };
 
   const enterReady = async (planId: string) => {
     const selected = plans.find((plan) => plan.id === planId);
@@ -290,8 +295,8 @@ export function TravelWorkspaceApp() {
     await persist({ alternatives: nextPlans, activePlanId: restored.plan.id });
   };
 
-  const newTrip = () => {
-    planningControllerRef.current?.abort();
+  const newTrip = async () => {
+    if (!await cancelPlanning()) return;
     const nextId = createWorkspaceId();
     setId(nextId);
     setStage("EMPTY");
@@ -313,9 +318,8 @@ export function TravelWorkspaceApp() {
     history.pushState({}, "", "/travel/");
   };
 
-  const editRequirements = () => {
-    planningControllerRef.current?.abort();
-    setBusy(false);
+  const editRequirements = async () => {
+    if (!await cancelPlanning()) return;
     setError(null);
     setStage("EMPTY");
     setParametersOpen(true);
@@ -324,7 +328,7 @@ export function TravelWorkspaceApp() {
 
   const deleteWorkspace = async (workspaceIdToDelete: string) => {
     await workspaceRepository.remove(workspaceIdToDelete);
-    if (workspaceIdToDelete === id && stage !== "EMPTY") newTrip();
+    if (workspaceIdToDelete === id && stage !== "EMPTY") await newTrip();
     await refreshWorkspaces();
   };
 
@@ -340,13 +344,13 @@ export function TravelWorkspaceApp() {
   const headerState = readyForReview && reviewStep < 3 ? "阶段回看" : stageConfig.label;
 
   return <div className={`app-shell v2-shell react-workspace-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${profileWorkspaceVisible ? " profile-workspace-view" : ""}`}>
-    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={newTrip} onOpen={(nextId) => void loadWorkspace(nextId)} onDelete={(nextId) => void deleteWorkspace(nextId)}/>
+    <Sidebar workspaces={workspaces} activeId={stage === "EMPTY" ? null : id} collapsed={sidebarCollapsed} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} onToggle={() => setSidebarCollapsed((value) => !value)} onNew={() => void newTrip()} onOpen={(nextId) => void openWorkspace(nextId)} onDelete={(nextId) => void deleteWorkspace(nextId)}/>
     <main className="workspace-canvas react-workspace-canvas">
-      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{headerEyebrow}</span><strong>{headerTitle}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{headerState}</span><button type="button" onClick={() => stage === "EMPTY" ? setParametersOpen((value) => !value) : editRequirements()}>{stage === "EMPTY" && parametersOpen ? "收起参数" : "旅行参数"}</button></div></header>
+      <header className="workspace-header"><div className="workspace-title"><button className="mobile-menu-button" type="button" aria-label="打开行程侧栏" onClick={() => setMobileSidebarOpen(true)}><Icon name="menu"/></button><span>{headerEyebrow}</span><strong>{headerTitle}</strong></div><div className="workspace-actions"><span className={`workspace-state${stage === "ERROR" ? " warning" : stage === "EMPTY" ? "" : " live"}`}>{headerState}</span><button type="button" onClick={() => stage === "EMPTY" ? setParametersOpen((value) => !value) : void editRequirements()}>{stage === "EMPTY" && parametersOpen ? "收起参数" : "旅行参数"}</button></div></header>
       {stage !== "EMPTY" && <StageProgress state={stage} selectedStep={readyForReview ? reviewStep : undefined} onSelect={readyForReview ? openReviewStep : undefined}/>}
       {stage === "EMPTY" && <EmptyTripHero value={draft} form={form} busy={busy} onChange={setDraft} onFormChange={setForm} onSubmit={() => void startPlanning()} parametersOpen={parametersOpen} onToggleParameters={() => setParametersOpen((value) => !value)}/>}
       {stage === "BUILDING_PROFILE" && (
-        <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>
+        <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => void editRequirements()}/>
       )}
       {["FETCHING_DATA","ASSESSING_EVIDENCE"].includes(stage) && (
         <DataAcquisition request={draft} profile={profile} progress={progress} onCancel={() => void cancelPlanning()}/>
@@ -356,7 +360,7 @@ export function TravelWorkspaceApp() {
         <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
       )}
       {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => void retryPlanning()}>从检查点继续</button><button className="secondary-button" type="button" onClick={abandonPlanning}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并新建</span><Icon name="arrow"/></button></div></section>}
-      {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={editRequirements}/>}
+      {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => void editRequirements()}/>}
       {readyForReview && reviewStep === 1 && <DataAcquisition request={draft} profile={profile} progress={progress}/>}
       {readyForReview && reviewStep === 2 && <PlanningVisualization profile={profile} progress={progress} plans={plans}/>}
       {(["EXECUTING","REPLANNING"].includes(stage) || readyForReview && reviewStep === 3) && activePlan && <ReadyDashboard key={activePlan.id} plan={activePlan} plans={plans} events={events} versions={versions} progress={progress} onSelectPlan={(planId) => { setActivePlanId(planId); void persist({ activePlanId: planId }); }} onRestoreVersion={(versionId) => void restoreVersion(versionId)} onOpenReplan={() => document.querySelector<HTMLTextAreaElement>(".react-composer textarea")?.focus()}/>}

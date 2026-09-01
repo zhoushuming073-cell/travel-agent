@@ -107,3 +107,8 @@ test("API contract rejects stress results that are not explicitly simulations", 
   assert.match(validatePlanContract(value).map((item) => item.message).join(" "), /Simulation/);
 });
 
+test("API contract requires the stable hot, niche and relax variant IDs", () => {
+  const value = envelope();
+  value.alternatives[1].id = "custom";
+  assert.match(validatePlanContract(value).map((item) => item.message).join(" "), /hot、niche、relax/);
+});

@@ -9,6 +9,9 @@ const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
 const persistenceSource = readFileSync(join(root, "worker", "persistence.ts"), "utf8");
 const frontendSource = readFileSync(join(root, "travel", "services", "planningApi.ts"), "utf8");
+const workspaceSource = readFileSync(join(root, "travel", "TravelWorkspaceApp.tsx"), "utf8");
+const parameterPanelSource = readFileSync(join(root, "travel", "components", "TripParameterPanel.tsx"), "utf8");
+const emptyHeroSource = readFileSync(join(root, "travel", "components", "EmptyTripHero.tsx"), "utf8");
 const cssRoot = join(root, "app", "travel", "[[...tripId]]");
 const cssSource = [
   readFileSync(join(cssRoot, "workspace-react.css"), "utf8"),
@@ -127,6 +130,22 @@ test("browser task recovery uses HttpOnly cookie, active lookup and real server 
   assert.match(apiSource, /\/api\/plan\/retry/);
   assert.match(frontendSource, /retryPlanningJob/);
   assert.match(persistenceSource, /resetTravelJobForRetry/);
+  assert.match(workspaceSource, /if \(!await cancelPlanning\(\)\) return/);
+  assert.match(workspaceSource, /openWorkspace/);
+});
+
+test("UI and server share the supported seven-day planning limit", () => {
+  assert.match(parameterPanelSource, /Math\.min\(7, form\.days \+ 1\)/);
+  assert.doesNotMatch(parameterPanelSource, /Math\.min\(14, form\.days \+ 1\)/);
+  assert.match(workspaceSource, /Math\.min\(7, Math\.max\(1, hints\.days\)\)/);
+  assert.match(emptyHeroSource, /当前单次规划最多支持 7 天/);
+  assert.match(emptyHeroSource, /disabled=\{busy \|\| !value\.trim\(\) \|\| unsupportedDuration\}/);
+  assert.match(apiSource, /UNSUPPORTED_TRIP_DURATION/);
+});
+
+test("weather provider telemetry names the provider that was actually called", () => {
+  assert.match(apiSource, /provider: "Open-Meteo", capability: "天气"/);
+  assert.doesNotMatch(apiSource, /天气 MCP 成功/);
 });
 
 test("deterministic final validation errors do not repeat the same unchanged stage three times", () => {

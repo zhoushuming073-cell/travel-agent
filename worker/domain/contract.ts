@@ -1,5 +1,7 @@
 import type { ItineraryPlan, TravelProfile } from "./types.ts";
 
+const REQUIRED_VARIANT_IDS = new Set(["hot", "niche", "relax"]);
+
 export interface PlanningEnvelope {
   request: TravelProfile;
   alternatives: ItineraryPlan[];
@@ -57,6 +59,12 @@ export function validatePlanContract(value: PlanningEnvelope): ContractIssue[] {
     if (!("changeScope" in plan)) issues.push({ path: `${base}.changeScope`, message: "必须保留 Change Preview 兼容字段" });
   });
 
+  const unexpectedIds = [...ids].filter((id) => !REQUIRED_VARIANT_IDS.has(id));
+  const missingIds = [...REQUIRED_VARIANT_IDS].filter((id) => !ids.has(id));
+  if (unexpectedIds.length || missingIds.length) {
+    issues.push({ path: "alternatives", message: "方案 ID 必须正好是 hot、niche、relax" });
+  }
+
   if (!ids.has(value.activeId)) issues.push({ path: "activeId", message: "activeId 必须指向候选方案" });
   return issues;
 }
@@ -67,4 +75,3 @@ export function assertPlanContract(value: PlanningEnvelope): void {
     throw new Error(issues.map((issue) => `${issue.path}: ${issue.message}`).join("\n"));
   }
 }
-
