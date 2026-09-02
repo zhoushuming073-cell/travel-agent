@@ -4,7 +4,7 @@ import test from "node:test";
 import { AI_RATE_LIMIT_COOLDOWN_MS, classifyAiFailure, closeModelCircuit, modelCircuitState, openModelCircuit } from "../worker/domain/model-routing.ts";
 import { createAdaptiveResearchBudget, prioritizeResearchGaps, researchUtility, shouldContinueResearch } from "../worker/domain/research-budget.ts";
 import { deduplicateEvidence, scoreResearchEvidence, synthesizeFact } from "../worker/domain/research-evidence.ts";
-import { buildResearchGapMap, deterministicResearchRequests } from "../worker/domain/research-planner.ts";
+import { buildResearchGapMap, deterministicResearchRequests, normalizeAiResearchRequests } from "../worker/domain/research-planner.ts";
 import { FACT_FRESHNESS_POLICIES, preferredSourceTiers } from "../worker/domain/research-policy.ts";
 import { detectPageAccessStatus, sanitizeUntrustedPage } from "../worker/domain/search-orchestrator.ts";
 import type { ResearchEvidence, ResearchGap } from "../worker/domain/research-types.ts";
@@ -77,6 +77,20 @@ test("Hangzhou required spots create date-aware, multi-angle research requests",
   assert.ok(requests.some((request) => request.targetId === "lingyin" && request.questionType === "opening_hours" && request.query.includes("2026-09-05")));
   assert.ok(requests.some((request) => request.generatedBy === "deterministic"));
   assert.ok(requests.length <= budget.targetQueryBudget);
+});
+
+test("a user budget reserves early research capacity for ticket policies", () => {
+  const profile = { city: "成都", startDate: "2026-10-01", days: 3, budget: 5000, requiredAttractions: [], preferences: ["人文"], crowdSensitivity: "一般" };
+  const spots = Array.from({ length: 12 }, (_, index) => ({ id: `spot-${index + 1}`, name: `景点${index + 1}`, plannerScore: 100 - index, crowd: { evidenceCoverage: 20 } }));
+  const gaps = buildResearchGapMap(profile, spots);
+  const budget = createAdaptiveResearchBudget({ tripDays: 3, cityCount: 1, requiredSpotCount: 0, blockingUnknownCount: 0, highRiskFactCount: 12, candidateCount: 12 });
+  const requests = deterministicResearchRequests(profile, gaps, budget);
+  assert.ok(requests.some((request) => request.questionType === "ticket_policy"));
+  assert.ok(requests.filter((request) => request.questionType === "opening_hours").length <= Math.ceil(budget.targetQueryBudget / 3));
+  const aiOnlyOpening = { requests: gaps.filter((gap) => gap.factType === "opening_hours").slice(0, budget.targetQueryBudget).map((gap, index) => ({
+    targetId: gap.targetId, questionType: gap.factType, query: `${gap.targetName} 官方开放时间`, queryId: `ai-${index}`,
+  })) };
+  assert.ok(normalizeAiResearchRequests(aiOnlyOpening, profile, gaps, budget).filter((request) => request.questionType === "ticket_policy").length >= 3);
 });
 
 function evidence(overrides: Partial<ResearchEvidence>): ResearchEvidence {

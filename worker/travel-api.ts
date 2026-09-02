@@ -566,7 +566,7 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
         const planned = await aiJson(env, {
           purpose: "research", thinking: false, maxTokens: 2600, requestTimeoutMs: 90000,
           messages: [
-            { role: "system", content: "你是旅游Research Planner。只决定缺少哪些会改变路线的事实以及应搜索什么，不回答事实本身。只输出JSON：{requests:[{targetId,questionType,query,reason,expectedDecisionImpact,expectedInformationGain,estimatedCost}]}。只能使用给定gap中的targetId和questionType；query必须包含目标景点并结合日期/星期/官方名称或合适来源角度。优先可执行性、开放、预约、临时限制、人流、交通和最佳时段；不要搜索低决策影响的文化背景。" },
+            { role: "system", content: "你是旅游Research Planner。只决定缺少哪些会改变路线的事实以及应搜索什么，不回答事实本身。只输出JSON：{requests:[{targetId,questionType,query,reason,expectedDecisionImpact,expectedInformationGain,estimatedCost}]}。只能使用给定gap中的targetId和questionType；query必须包含目标景点并结合日期/星期/官方名称或合适来源角度。优先可执行性、开放、预约、临时限制、人流、交通和最佳时段；用户设置预算且存在 ticket_policy 缺口时，至少包含一条门票或免费政策查询；不要搜索低决策影响的文化背景。" },
             { role: "user", content: JSON.stringify({ city: profile.city, startDate: profile.startDate, days: profile.days, preferences: profile.preferences, requiredAttractions: profile.requiredAttractions, round, remainingBudget: budget, gaps: gaps.slice(0, 35).map((gap) => ({ ...gap, utility: researchUtility(gap) })), existingFacts: facts }) },
           ],
         });
@@ -653,7 +653,7 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
   const report = {
     version: "research-intelligence-v1", status: searchExecutions.length ? (facts.some((fact) => fact.status === "verified" || fact.status === "supported") ? "ready" : "degraded") : "unavailable",
     model, modelStatus, budget: { ...budget, stopReason }, rounds: recentInformationGains.length, requests: allRequests,
-    skipped: skippedResearchItems(gaps, allRequests, budget.remainingCostUnits <= 0), searchExecutions,
+    skipped: skippedResearchItems(gaps, allRequests, budget.remainingCostUnits <= 0 || allRequests.length >= budget.targetQueryBudget), searchExecutions,
     pageSummary: [...pages.values()].map((page) => ({ url: page.url, status: page.status, title: page.title, publisher: page.publisher, publishedAt: page.publishedAt, fetchedAt: page.fetchedAt, error: page.error })),
     evidence: deduped.independent, rejectedEvidence: allEvidence.filter((row) => row.disposition === "reject").map((row) => ({ id: row.id, url: row.url, reasons: row.rejectionReasons })),
     facts, gaps, metrics, fetchedAt: new Date().toISOString(), elapsedMs: Date.now() - startedAt,
@@ -1621,10 +1621,13 @@ function firstTransit(value: any) {
   return data?.route?.transits?.[0] || data?.transits?.[0] || data?.route?.paths?.[0] || data?.paths?.[0] || null;
 }
 
-function transitFare(value: any): number | null {
+export function transitFare(value: any): number | null {
   const raw = value?.fare ?? value?.price ?? value?.transit_fee ?? value?.cost?.transit_fee ?? value?.cost?.fare ?? value?.cost?.price;
   const number = Number(raw);
-  return Number.isFinite(number) && number >= 0 ? number : null;
+  // Amap commonly uses 0 when the transit response has no fare data. Public
+  // transport is not therefore verified as free; let the cost model estimate
+  // from the routed distance unless a positive fare was actually returned.
+  return Number.isFinite(number) && number > 0 ? number : null;
 }
 
 async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
@@ -2367,6 +2370,12 @@ const WORKFLOW_OBJECTIVES = [
   { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功；优先公共交通和少跨区路线以控制费用。" },
 ];
 
+export function shouldRecoverPlannerImmediately(error: unknown) {
+  const message = cleanText(error instanceof Error ? error.message : error);
+  return /联通元景模型均不可用/.test(message)
+    && /\[(?:MODEL_NOT_FOUND|UNAUTHORIZED|RATE_LIMITED|PROVIDER_UNAVAILABLE|NETWORK_ERROR|TIMEOUT)\]/.test(message);
+}
+
 function newWorkflowPlannerState(profile: any, env: any) {
   return {
     verifiedWebContext: [], research: null, decisionMemo: "", draft: { variants: [] }, audit: null,
@@ -2451,7 +2460,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       if (!completePlannerVariant(variant, profile)) throw new Error(`${objective.name}返回 ${variant?.days?.length || 0}/${profile.days} 个完整日期`);
     } catch (error: any) {
       failure = cleanText(error?.message, `${objective.name}模型调用失败`);
-      if (!retryContext?.attempts) throw new Error(failure);
+      if (!retryContext?.attempts && !shouldRecoverPlannerImmediately(error)) throw new Error(failure);
       const previousVariantSpotIds = state.draft.variants.flatMap((item: any) => item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)));
       variant = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, variant, failure, previousVariantSpotIds);
       state.modelAudit.degraded = true;
@@ -2547,7 +2556,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
         state.modelAudit.repairModel = repaired.model;
         if (repaired.formatRepaired) state.modelAudit.formatRepairs += 1;
       } catch (error: any) {
-        if (!retryContext?.attempts) throw error;
+        if (!retryContext?.attempts && !shouldRecoverPlannerImmediately(error)) throw error;
         state.modelAudit.degraded = true;
         state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${variantId} 的 AI 冲突修复暂不可用，后续继续由硬约束编译器校验`].filter(Boolean).join("；");
         state.modelAudit.compilerIssues.push({ code: "AI_REPAIR_UNAVAILABLE", severity: "warning", variantId, message: cleanText(error?.message) });
@@ -2849,7 +2858,7 @@ async function advancePlanningJob(jobId: string, env: any) {
     const attemptKey = `attempt:${stage}`;
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
     const attempts = Number(previous?.attempts || 0) + 1;
-    const deterministicFailure = /时间轴不可执行|最终审计检查点未通过|确定性编译器拒绝|所有阶段已结束|检查点缺失/.test(message);
+    const deterministicFailure = /时间轴不可执行|最终审计检查点未通过|规划模型经两轮修复后仍有|确定性编译器拒绝|所有阶段已结束|检查点缺失/.test(message);
     const limit = deterministicFailure ? 1 : stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
     if (stage === "parse_profile" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("repair_")) {
       await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景需求理解模型" : "联通元景规划模型（自动兼容路由）", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });

@@ -3,7 +3,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { summarizeTrafficCoverage } from "../worker/domain/traffic-coverage.ts";
-import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit, taskSessionCookie } from "../worker/travel-api.ts";
+import { auditPlannerDraft } from "../worker/domain/planner-v4.ts";
+import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit, shouldRecoverPlannerImmediately, taskSessionCookie, transitFare } from "../worker/travel-api.ts";
 
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
@@ -61,6 +62,40 @@ test("final compiler adds lunch, preserves required places and removes only flex
   assert.ok(activities.some((item) => item.spotId === "bund"));
   assert.ok(activities.some((item) => item.type === "meal" && item.label?.includes("午餐")));
   assert.ok(activities.every((item) => Number(item.endTime.slice(0, 2)) * 60 + Number(item.endTime.slice(3)) <= 21 * 60));
+});
+
+test("final compiler keeps repaired lunch and dinner inside their audit windows", () => {
+  const draft = { variants: ["hot", "niche", "relax"].map((id) => ({
+    id, title: id, style: id, strategy: id,
+    days: [{ day: 1, returnHotelTime: "21:00", totalActivityMin: 300, totalTransportMin: 0, activities: [
+      { type: "attraction", spotId: `${id}-morning`, startTime: "09:00", endTime: "12:15", durationMin: 195 },
+      { type: "meal", label: "午餐与休息", startTime: "12:15", endTime: "13:30", durationMin: 75 },
+      { type: "attraction", spotId: `${id}-afternoon`, startTime: "14:30", endTime: "16:00", durationMin: 90 },
+      { type: "attraction", spotId: `${id}-night`, startTime: "23:31", endTime: "01:01", durationMin: 90 },
+      { type: "rest", label: "弹性缓冲 / 返回住宿地", startTime: "01:01", endTime: "01:31", durationMin: 30 },
+    ] }],
+  })) };
+  const spots = draft.variants.flatMap((variant) => [
+    { id: `${variant.id}-morning`, name: "上午景点", requiredByUser: false, timeRole: "flexible" },
+    { id: `${variant.id}-afternoon`, name: "下午景点", requiredByUser: false, timeRole: "flexible" },
+    { id: `${variant.id}-night`, name: "夜景", requiredByUser: false, timeRole: "nightscape" },
+  ]);
+  const knowledge = {
+    profile: { city: "成都", days: 1, dayStart: "09:00", dayEnd: "21:00", requiredAttractions: [] },
+    spots, weather: [{ sunset: "18:00" }], hotel: {}, unknowns: [],
+    trafficMatrix: { source: "test", fetchedAt: "2026-09-02T00:00:00Z", quality: "estimated", nodes: [], legs: [] },
+  };
+
+  const repaired = applyFinalTimelineSafetyRepair(draft, knowledge);
+  const audit = auditPlannerDraft(draft as never, knowledge as never);
+
+  assert.equal(repaired.insertedDinners, 3);
+  assert.equal(audit.hardIssues.some((issue) => issue.code === "LUNCH_MISSING" || issue.code === "DINNER_MISSING"), false);
+  for (const variant of draft.variants) {
+    const dinner = variant.days[0].activities.find((activity) => activity.type === "meal" && activity.label?.includes("晚餐"));
+    assert.ok(dinner);
+    assert.ok(dinner.startTime >= "17:00" && dinner.startTime <= "20:00");
+  }
 });
 
 test("final transit requires dinner only for an actual evening itinerary and inserts it before validation", () => {
@@ -172,7 +207,16 @@ test("weather provider telemetry names the provider that was actually called", (
 test("deterministic final validation errors do not repeat the same unchanged stage three times", () => {
   assert.match(apiSource, /const deterministicFailure =/);
   assert.match(apiSource, /deterministicFailure \? 1/);
+  assert.match(apiSource, /规划模型经两轮修复后仍有/);
   assert.match(apiSource, /STAGE_VALIDATION_FAILED/);
+});
+
+test("provider sentinels and unavailable planner models degrade without false prices or minute-long stage retries", () => {
+  assert.equal(transitFare({ cost: { transit_fee: 0 } }), null);
+  assert.equal(transitFare({ cost: { transit_fee: 3 } }), 3);
+  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]；flash [RATE_LIMITED]"), true);
+  assert.equal(shouldRecoverPlannerImmediately("经典覆盖返回 0/3 个完整日期"), false);
+  assert.match(apiSource, /!retryContext\?\.attempts && !shouldRecoverPlannerImmediately/);
 });
 
 test("model failures degrade safely instead of multiplying calls or killing the whole trip", () => {

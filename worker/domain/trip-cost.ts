@@ -277,7 +277,8 @@ function transportLines(profile: TravelProfile, days: ItineraryDay[]) {
     if (seen.has(key)) continue;
     seen.add(key);
     const mode = String(block.mcpTransport?.source ? block.mcpTransport.source : block.mode || "公共交通 / 打车");
-    const fare = finite(block.fare ?? block.mcpTransport?.fare);
+    const returnedFare = finite(block.fare ?? block.mcpTransport?.fare);
+    const fare = returnedFare !== null && returnedFare > 0 ? returnedFare : null;
     if (isIntercity(block)) {
       intercity.push(line({
         id: `intercity:${key}`, label: `${block.from || "出发地"} → ${block.to || "目的地"}`, category: "intercityTransport",
@@ -345,7 +346,7 @@ function budgetState(userBudget: number | null, total: CostRange | null, partial
   const remaining = roundSignedMoney(userBudget - total.expected);
   if (total.min > userBudget) return { status: "over_budget", label: "预计超出预算", remaining };
   if (total.expected > userBudget || total.max > userBudget) return { status: "tight", label: partial ? "偏紧（仍有未知项）" : "偏紧", remaining };
-  if (partial) return { status: "unknown", label: "部分费用未知", remaining };
+  if (partial) return { status: "unknown", label: "部分费用未知", remaining: null };
   if (total.max <= userBudget * 0.82) return { status: "comfortable", label: "较充足", remaining };
   return { status: "reasonable", label: "基本合理", remaining };
 }
@@ -375,14 +376,17 @@ export function estimateTripCost(input: TripCostInput): TripCostEstimate {
   const baseCategories = [
     category("lodging", lodging.lines), category("tickets", tickets), category("meals", meals),
     category("localTransport", transport.local), category("intercityTransport", transport.intercity),
-    category("other", [line({ id: "other:none", label: "暂无已识别的其他可预见费用", category: "other", nature: "estimated", amount: range(0, 0, 0), basis: "不含购物、个人消费、纪念品和无法预测的娱乐消费", sourceName: "费用范围规则" })]),
+    category("other", [line({ id: "other:unidentified", label: "尚未识别可单独计价的其他费用", category: "other", nature: "unknown", amount: null, basis: "当前行程没有停车、接驳、寄存或服务费的可靠价格证据；不以 0 元冒充已完成估算，也不含购物、个人消费和纪念品", sourceName: "费用范围规则" })]),
   ];
   const subtotal = sumRanges(baseCategories.map((item) => item.amount));
   const buffer = bufferFor(baseCategories);
   const bufferCategory = category("buffer", [line({ id: "buffer:risk", label: "不确定性风险缓冲", category: "buffer", nature: "estimated", amount: buffer.amount, basis: buffer.reason, sourceName: "费用不确定性模型 V1" })]);
   const categories = [...baseCategories, bufferCategory];
   const total = sumRanges([subtotal, buffer.amount]);
-  const totalIsPartial = baseCategories.some((item) => item.unknownCount > 0);
+  // An unidentified optional “other” item lowers evidence coverage but does
+  // not by itself make every otherwise-complete trip partial. Known material
+  // categories still control whether the displayed total is explicitly partial.
+  const totalIsPartial = baseCategories.some((item) => item.id !== "other" && item.unknownCount > 0);
   const userBudget = finite(input.profile.budget);
   const state = budgetState(userBudget && userBudget > 0 ? userBudget : null, total, totalIsPartial);
   const confidence = confidenceFor(baseCategories);

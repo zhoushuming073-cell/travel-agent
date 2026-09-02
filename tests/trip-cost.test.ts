@@ -128,6 +128,24 @@ test("provider fare overrides distance estimate with the correct sharing rule", 
   assert.equal(taxi?.nature, "referenced");
 });
 
+test("a zero public-transit fare is treated as missing provider data, not verified free travel", () => {
+  const busDay = day({ blocks: [{ type: "leg", from: "A", to: "B", distanceM: 30000, mode: "公交 / 地铁", fare: 0, source: "高德地图官方公交/地铁" }], items: [] });
+  const result = estimate({ ...baseProfile, partySize: 2, adults: 2 }, [busDay], {}, null);
+  const transport = result.categories.find((item) => item.id === "localTransport");
+  assert.ok(Number(transport?.amount?.expected) > 0);
+  assert.equal(transport?.nature, "estimated");
+  assert.match(transport?.lines[0].basis || "", /未返回真实票价/);
+});
+
+test("unidentified other costs stay unknown and material unknowns suppress a misleading remaining budget", () => {
+  const result = estimate(baseProfile, [day()], {}, null);
+  const other = result.categories.find((item) => item.id === "other");
+  assert.equal(other?.nature, "unknown");
+  assert.equal(other?.amount, null);
+  assert.equal(result.totalIsPartial, true);
+  assert.equal(result.expectedRemaining, null);
+});
+
 test("intercity legs are separate and stay unknown without a fare provider", () => {
   const intercityDay = day({ blocks: [{ type: "leg", from: "北京", to: "天津", distanceM: 120000, mode: "城际高铁", source: "行程路段" }], items: [] });
   const result = estimate(baseProfile, [intercityDay], {}, null);

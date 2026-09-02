@@ -36,7 +36,7 @@ const FACT_DEFAULTS: Record<ResearchQuestionType, { impact: number; uncertainty:
   special_opening_hours: { impact: 0.96, uncertainty: 0.92, gain: 0.78, cost: 0.7, freshness: 1, blocking: true },
   temporary_closure: { impact: 1, uncertainty: 0.8, gain: 0.72, cost: 0.65, freshness: 1, blocking: true },
   reservation: { impact: 0.9, uncertainty: 0.9, gain: 0.76, cost: 0.6, freshness: 0.95, blocking: true },
-  ticket_policy: { impact: 0.55, uncertainty: 0.75, gain: 0.68, cost: 0.6, freshness: 0.8 },
+  ticket_policy: { impact: 0.82, uncertainty: 0.82, gain: 0.76, cost: 0.55, freshness: 0.8 },
   entrance: { impact: 0.68, uncertainty: 0.72, gain: 0.58, cost: 0.7, freshness: 0.5 },
   internal_route: { impact: 0.58, uncertainty: 0.72, gain: 0.6, cost: 0.75, freshness: 0.45 },
   visit_duration: { impact: 0.78, uncertainty: 0.7, gain: 0.67, cost: 0.6, freshness: 0.55 },
@@ -102,7 +102,7 @@ export function buildResearchGapMap(profile: GapProfile, spots: GapSpot[], maxCa
     if (important || Number(profile.budget || 0) > 0) {
       gaps.push(gap(profile, spot, "ticket_policy", {
         blocking: false,
-        decisionImpact: important ? 0.68 : 0.5,
+        decisionImpact: important ? 0.82 : 0.78,
         reason: `${spot.name}的门票或免费政策会影响用户总预算，必须优先查找官方或可信公开价格`,
         affectedDecisions: ["spot_selected", "alternative_selected"],
       }));
@@ -140,8 +140,11 @@ export function deterministicResearchRequests(profile: GapProfile, gaps: Researc
   const date = clean(profile.startDate);
   const weekday = date ? new Intl.DateTimeFormat("zh-CN", { weekday: "long", timeZone: "Asia/Shanghai" }).format(new Date(`${date}T12:00:00+08:00`)) : "";
   const requests: ResearchRequest[] = [];
+  const nonBlockingTypeCounts = new Map<ResearchQuestionType, number>();
+  const nonBlockingTypeLimit = Math.max(2, Math.ceil(budget.targetQueryBudget / 3));
   for (const current of prioritizeResearchGaps(gaps)) {
     if (requests.length >= budget.targetQueryBudget) break;
+    if (!current.blocking && Number(nonBlockingTypeCounts.get(current.factType) || 0) >= nonBlockingTypeLimit) continue;
     const dateScope = [date, weekday].filter(Boolean).join(" ");
     const variants = [
       `${current.targetName} ${dateScope} ${querySuffix(current.factType)}`,
@@ -162,6 +165,7 @@ export function deterministicResearchRequests(profile: GapProfile, gaps: Researc
         preferredSourceTiers: preferredSourceTiers(current.factType),
         generatedBy: "deterministic",
       });
+      if (!current.blocking) nonBlockingTypeCounts.set(current.factType, Number(nonBlockingTypeCounts.get(current.factType) || 0) + 1);
       if (!current.blocking) break;
     }
   }
@@ -195,7 +199,18 @@ export function normalizeAiResearchRequests(value: unknown, profile: GapProfile,
     });
     if (normalized.length >= budget.targetQueryBudget) break;
   }
-  return dedupeRequests(normalized.length ? normalized : deterministicResearchRequests(profile, gaps, budget));
+  const deterministic = deterministicResearchRequests(profile, gaps, budget);
+  if (!normalized.length) return deterministic;
+  const ticketReservation = Number(profile.budget || 0) > 0
+    ? dedupeRequests([
+        ...normalized.filter((request) => request.questionType === "ticket_policy"),
+        ...deterministic.filter((request) => request.questionType === "ticket_policy"),
+      ]).slice(0, Math.max(1, Math.ceil(budget.targetQueryBudget / 3)))
+    : [];
+  const aiWithReservation = ticketReservation.length
+    ? [...normalized.filter((request) => request.questionType !== "ticket_policy").slice(0, Math.max(0, budget.targetQueryBudget - ticketReservation.length)), ...ticketReservation]
+    : normalized;
+  return dedupeRequests([...aiWithReservation, ...deterministic]).slice(0, budget.targetQueryBudget);
 }
 
 function dedupeRequests(requests: ResearchRequest[]) {

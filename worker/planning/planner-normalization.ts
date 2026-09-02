@@ -312,7 +312,26 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
   let reflowedActivities = 0;
 
   const reflow = (day: any, activities: any[]) => {
-    const ordered = [...activities].sort((left: any, right: any) => timeToMinutes(left.startTime, startLimit) - timeToMinutes(right.startTime, startLimit));
+    const mealRole = (activity: any) => {
+      if (activity.type !== "meal") return "";
+      const label = cleanText(activity.label);
+      const start = timeToMinutes(activity.startTime, -1);
+      if (/晚餐/.test(label) || start >= 17 * 60) return "dinner";
+      if (/午餐/.test(label) || (start >= 11 * 60 && start <= 13 * 60 + 30)) return "lunch";
+      return "";
+    };
+    const sortTime = (activity: any) => {
+      const role = mealRole(activity);
+      if (role === "lunch") return 12 * 60;
+      if (role === "dinner") return 17 * 60 + 30;
+      const start = timeToMinutes(activity.startTime, startLimit);
+      const end = timeToMinutes(activity.endTime, start);
+      // A model can serialize an after-midnight end as 01:00. Keep that block at
+      // the end of this travel day so it cannot jump ahead of lunch on reflow.
+      if (end < start || start < 5 * 60) return start + 24 * 60;
+      return start;
+    };
+    const ordered = [...activities].sort((left: any, right: any) => sortTime(left) - sortTime(right));
     let cursor = startLimit;
     let previousSpot: any = null;
     for (const activity of ordered) {
@@ -326,7 +345,9 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
       let minimumStart = cursor;
       const open = openingRange(semanticSpot?.openingHours);
       if (open) minimumStart = Math.max(minimumStart, open[0]);
-      if (activity.type === "meal" && !activity.spotId && /午餐/.test(cleanText(activity.label))) minimumStart = Math.max(minimumStart, 11 * 60 + 30);
+      const role = mealRole(activity);
+      if (role === "lunch") minimumStart = Math.max(minimumStart, 11 * 60 + 30);
+      if (role === "dinner") minimumStart = Math.max(minimumStart, 17 * 60 + 30);
       if (semanticSpot?.timeRole === "meal-landmark") {
         activity.type = "meal";
         minimumStart = Math.max(minimumStart, originalStart <= 14 * 60 ? 11 * 60 + 30 : 17 * 60 + 30);
@@ -361,7 +382,12 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
         activities.push({ type: "meal", label: "午餐与休息", startTime: "12:00", endTime: "13:00", durationMin: 60, reason: "最终编译器补齐正常午餐，不跨区追店", evidenceRefs: [] });
         insertedLunches += 1;
       }
-      const plannedEnd = activities.reduce((latest: number, activity: any) => Math.max(latest, timeToMinutes(activity.endTime, 0)), 0);
+      const plannedEnd = activities.reduce((latest: number, activity: any) => {
+        const start = timeToMinutes(activity.startTime, 0);
+        const rawEnd = timeToMinutes(activity.endTime, start);
+        const end = rawEnd < start ? rawEnd + 24 * 60 : rawEnd;
+        return Math.max(latest, start, end);
+      }, 0);
       const hasDinner = activities.some((activity: any) => activity.type === "meal" && (() => { const start = timeToMinutes(activity.startTime, -1); return start >= 17 * 60 && start <= 20 * 60; })());
       if (plannedEnd > 18 * 60 && !hasDinner) {
         activities.push({ type: "meal", label: "晚餐与休息", startTime: "17:30", endTime: "18:30", durationMin: 60, reason: "最终编译器为延续到晚间的行程补齐顺路晚餐", evidenceRefs: [] });
