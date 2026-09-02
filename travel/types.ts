@@ -4,6 +4,7 @@ import type {
   ChangeSet,
   ItineraryDay,
   ItineraryPlan,
+  TripCostEstimate,
   TravelProfile,
   TravelWorkspace,
 } from "../worker/domain/types.ts";
@@ -38,12 +39,7 @@ export type UiPlan = Omit<ItineraryPlan, "hotelPlan" | "daysPlan"> & {
     pricedCount?: number;
     candidates?: UiHotelCandidate[];
   };
-  budgetBreakdown?: {
-    knownEstimate?: number;
-    limit?: number;
-    note?: string;
-    items?: Array<{ name: string; amount: number | null }>;
-  };
+  budgetBreakdown?: TripCostEstimate;
   daysPlan: Array<Omit<ItineraryDay, "route"> & {
     route?: ItineraryDay["route"] & { geometry?: UiRouteGeometry };
   }>;

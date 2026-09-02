@@ -15,25 +15,41 @@ export function WeatherPanel({ plan, selectedDay }: { plan: UiPlan; selectedDay:
 
 export function CrowdPanel({ plan }: { plan: UiPlan }) {
   const facts = plan.travelFacts?.filter((fact) => fact.field === "拥挤风险") ?? [];
+  const record = (value: unknown) => typeof value === "object" && value ? value as Record<string, unknown> : {};
+  const minute = (value: unknown) => { const [hour = 0, min = 0] = String(value ?? "").split(":").map(Number); return hour * 60 + min; };
+  const basisGroups = [
+    { id: "external", label: "官方/外部数据", natures: new Set(["forecast", "map-signal"]) },
+    { id: "trend", label: "公开趋势", natures: new Set(["public-trend"]) },
+    { id: "model", label: "规则/模型预测", natures: new Set(["calendar", "place-prior"]) },
+  ];
   return <section className="ready-crowd-card">
-    <header><b>到访时段拥挤风险</b><span>Crowd Risk v2 预测区间；不是实时人数</span></header>
-    {facts.length ? facts.slice(0, 8).map((fact) => {
-      const value = typeof fact.value === "object" && fact.value ? fact.value as Record<string, unknown> : {};
+    <header><b>景点人流预测</b><span>0–100 风险指数 · 预测不等于实时人流</span></header>
+    {facts.length ? facts.map((fact) => {
+      const value = record(fact.value);
       const risk = Math.round(Number(value.score ?? value.probability ?? 0));
-      const label = String(value.label ?? "待核验");
-      const band = typeof value.forecastBand === "object" && value.forecastBand ? value.forecastBand as Record<string, unknown> : {};
-      const range = Number.isFinite(Number(band.low)) && Number.isFinite(Number(band.high)) ? `${Math.round(Number(band.low))}–${Math.round(Number(band.high))}%` : `${risk}%`;
+      const label = String(value.label ?? "预测待生成");
+      const band = record(value.forecastBand);
+      const range = Number.isFinite(Number(band.low)) && Number.isFinite(Number(band.high)) ? `${Math.round(Number(band.low))}–${Math.round(Number(band.high))}` : `${risk}`;
       const confidence = String(value.confidenceLabel ?? (fact.confidence >= 0.72 ? "较高" : fact.confidence >= 0.55 ? "中等" : "较低"));
       const coverage = Math.round(Number(value.evidenceCoverage ?? 0));
       const contributions = Array.isArray(value.factorContributions) ? value.factorContributions as Array<Record<string, unknown>> : [];
-      const topFactors = contributions.filter((item) => Number(item.impact) !== 0).sort((a, b) => Math.abs(Number(b.impact)) - Math.abs(Number(a.impact))).slice(0, 2).map((item) => `${String(item.label)} ${Number(item.impact) > 0 ? "+" : ""}${Math.round(Number(item.impact))}`).join(" · ");
-      return <div key={fact.id}>
-        <span><b>{fact.subject}</b><small>{String(value.visitDate ?? "")} {String(value.visitTime ?? "")} · {topFactors || "日期与场所类型基线"}</small></span>
-        <i aria-label={`预测拥挤风险区间 ${range}`}><b style={{ width: `${risk}%` }}></b></i>
-        <em>{fact.status === "predicted" ? `${label} · ${range}` : "暂未核验"}<small>置信度{confidence} · 证据覆盖 {coverage}%</small><small>{value.recommendedWindow ? `建议 ${String(value.recommendedWindow)}` : ""}</small></em>
-      </div>;
+      const windows = Array.isArray(value.timeWindows) ? value.timeWindows.map(record) : [];
+      const visitTime = String(value.visitTime ?? "");
+      const currentWindow = windows.length ? [...windows].sort((left, right) => Math.abs(minute(left.time) - minute(visitTime)) - Math.abs(minute(right.time) - minute(visitTime)))[0] : null;
+      const advice = record(value.visitAdvice);
+      const tone = risk >= 85 ? "extreme" : risk >= 70 ? "crowded" : risk >= 55 ? "busy" : risk >= 35 ? "normal" : "calm";
+      return <article className={`crowd-prediction-card tone-${tone}`} key={fact.id}>
+        <div className="crowd-card-heading"><span><b>{fact.subject}</b><small>{String(value.visitDate ?? "日期待定")} · 计划 {visitTime || "时间待定"} 到访</small></span><span className="crowd-state"><strong>{label}</strong><b>{risk}<small>/100</small></b></span></div>
+        <div className="crowd-meter" role="img" aria-label={`预计人流风险指数 ${risk}，预测区间 ${range}`}><i style={{ width: `${risk}%` }}></i></div>
+        <div className="crowd-meta"><span>计划时段：<b>{String(currentWindow?.label ?? label)}</b></span><span>预测区间：<b>{range}</b></span><span>置信度：<b>{confidence}</b></span><span>证据覆盖：<b>{coverage}%</b></span></div>
+        {windows.length ? <div className="crowd-day-trend" aria-label={`${fact.subject} 当天分时人流预测`}>{windows.map((window) => { const active = currentWindow?.time === window.time; const score = Math.round(Number(window.score ?? 0)); return <span className={active ? "active" : ""} key={String(window.time)}><i style={{ height: `${Math.max(8, score)}%` }}></i><b>{String(window.time)}</b><small>{String(window.label)}</small></span>; })}</div> : null}
+        <div className="crowd-window-grid"><span><small>推荐</small><b>{String(value.recommendedWindow ?? "暂无明显低谷")}</b></span><span><small>次推荐</small><b>{String(value.secondaryRecommendedWindow ?? "暂无次优时段")}</b></span><span><small>尽量避开</small><b>{String(value.avoidWindow ?? "暂无明显高峰")}</b></span></div>
+        {advice.message ? <p className="crowd-shift-tip"><Icon name="alert"/>{String(advice.message)}</p> : null}
+        {confidence === "较低" || value.dataQualityNote ? <p className="crowd-quality-note">{String(value.dataQualityNote ?? "参考数据有限，预测置信度较低")}</p> : null}
+        <details className="crowd-basis"><summary>查看预测依据</summary><div>{basisGroups.map((group) => { const rows = contributions.filter((item) => group.natures.has(String(item.nature))); return <section key={group.id}><b>{group.label}</b>{rows.length ? rows.map((item) => <p key={`${group.id}-${String(item.id)}`}><span>{String(item.label)}</span><small>{String(item.evidence)}</small><em>{Number(item.impact) > 0 ? "+" : ""}{Math.round(Number(item.impact ?? 0))}</em></p>) : <p className="basis-unavailable"><span>本次无可用信号</span><small>{group.id === "external" ? "未接入官方实时客流；天气/地图信号缺失时不补造" : group.id === "trend" ? "未取得可归因公开趋势，不以模型内容冒充观测" : "仍保留基础日期与景点类型规则"}</small></p>}</section>; })}</div><footer>所有分值均为预测风险，不是当前游客人数、园内人数或精确排队人数。</footer></details>
+      </article>;
     }) : <p className="empty-evidence">基础预测也未生成，请重新规划；系统不会用“Unknown”掩盖模型故障。</p>}
-    <footer>节假日、到访时段、景点承载特征、天气与近期公开趋势分别计分；官方预约余量未接入时会降低置信度。</footer>
+    <footer>节假日、到访时段、景点类型、天气、公开趋势与可比日期信号分别计分；缺少外部数据时自动降为低置信度预测。</footer>
   </section>;
 }
 

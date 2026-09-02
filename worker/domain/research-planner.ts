@@ -13,6 +13,7 @@ interface GapProfile {
   preferences?: string[];
   crowdSensitivity?: string;
   seasonalNeeds?: string[];
+  budget?: number;
 }
 
 interface GapSpot {
@@ -97,6 +98,14 @@ export function buildResearchGapMap(profile: GapProfile, spots: GapSpot[], maxCa
       gaps.push(gap(profile, spot, "internal_route"));
       gaps.push(gap(profile, spot, "local_access", { decisionImpact: 0.78, affectedDecisions: ["transit_choice", "visit_time"] }));
       if (/景区|山|湿地|古镇|乐园/.test(`${spot.name}${spot.category || ""}`)) gaps.push(gap(profile, spot, "shuttle", { affectedDecisions: ["transit_choice", "visit_time"] }));
+    }
+    if (important || Number(profile.budget || 0) > 0) {
+      gaps.push(gap(profile, spot, "ticket_policy", {
+        blocking: false,
+        decisionImpact: important ? 0.68 : 0.5,
+        reason: `${spot.name}的门票或免费政策会影响用户总预算，必须优先查找官方或可信公开价格`,
+        affectedDecisions: ["spot_selected", "alternative_selected"],
+      }));
     }
     const crowdCoverage = Number(spot.crowdRisk?.evidenceCoverage ?? spot.crowd?.evidenceCoverage ?? 0) / 100;
     if (important || /高|敏感/.test(clean(profile.crowdSensitivity)) || crowdCoverage < 0.6) {

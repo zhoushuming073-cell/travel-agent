@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { summarizeTrafficCoverage } from "../worker/domain/traffic-coverage.ts";
-import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit } from "../worker/travel-api.ts";
+import { applyFinalTimelineSafetyRepair, poiImageScore, reflowDayAfterTransit, taskSessionCookie } from "../worker/travel-api.ts";
 
 const root = join(import.meta.dirname, "..");
 const apiSource = readFileSync(join(root, "worker", "travel-api.ts"), "utf8");
@@ -133,6 +133,26 @@ test("browser task recovery uses HttpOnly cookie, active lookup and real server 
   assert.match(persistenceSource, /resetTravelJobForRetry/);
   assert.match(workspaceSource, /if \(!await cancelPlanning\(\)\) return/);
   assert.match(workspaceSource, /openWorkspace/);
+  assert.match(workspaceSource, /progress\?\.title === "需要补充信息"/);
+  assert.match(workspaceSource, /补充旅行信息/);
+  assert.doesNotMatch(workspaceSource, /onClick=\{abandonPlanning\}/);
+});
+
+test("task session cookie stays secure in production and works on loopback development", () => {
+  const production = taskSessionCookie("session-token", "https://travel.example.com/api/plan/start");
+  assert.match(production, /; Secure; HttpOnly; SameSite=Strict$/);
+
+  const localhost = taskSessionCookie("session-token", "http://localhost:3000/api/plan/start");
+  assert.doesNotMatch(localhost, /; Secure/);
+  assert.match(localhost, /; HttpOnly; SameSite=Strict$/);
+
+  const loopback = taskSessionCookie("session-token", "http://127.0.0.1:3000/api/plan/start");
+  assert.match(loopback, /; HttpOnly; SameSite=Strict$/);
+
+  assert.throws(
+    () => taskSessionCookie("session-token", "http://travel.example.com/api/plan/start"),
+    /仅支持 HTTPS/,
+  );
 });
 
 test("UI and server share the supported seven-day planning limit", () => {

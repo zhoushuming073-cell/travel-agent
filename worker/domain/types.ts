@@ -9,6 +9,68 @@ export type TravelFactStatus =
 export type EvidenceQuality = TravelFactStatus | "simulation";
 export type ImportanceLevel = "high" | "medium" | "low";
 export type RiskLevel = "low" | "medium" | "high" | "unknown";
+export type CostNature = "verified" | "referenced" | "estimated" | "unknown";
+export type BudgetStatus = "comfortable" | "reasonable" | "tight" | "over_budget" | "unknown";
+
+export interface CostRange {
+  min: number;
+  expected: number;
+  max: number;
+}
+
+export interface TripCostLine {
+  id: string;
+  label: string;
+  category: "lodging" | "tickets" | "meals" | "localTransport" | "intercityTransport" | "other" | "buffer";
+  nature: CostNature;
+  amount: CostRange | null;
+  basis: string;
+  sourceName: string;
+  sourceUrl?: string | null;
+  day?: number;
+}
+
+export interface TripCostCategory {
+  id: TripCostLine["category"];
+  label: string;
+  nature: CostNature;
+  amount: CostRange | null;
+  lines: TripCostLine[];
+  unknownCount: number;
+}
+
+export interface DailyTripCost {
+  day: number;
+  date?: string;
+  amount: CostRange | null;
+  note: string;
+}
+
+export interface TripCostEstimate {
+  version: "1.0";
+  currency: "CNY";
+  total: CostRange | null;
+  subtotal: CostRange | null;
+  totalIsPartial: boolean;
+  bufferAmount: CostRange | null;
+  bufferReason: string;
+  categories: TripCostCategory[];
+  daily: DailyTripCost[];
+  userBudget: number | null;
+  budgetStatus: BudgetStatus;
+  budgetStatusLabel: string;
+  expectedRemaining: number | null;
+  confidence: number;
+  confidenceLabel: "较高" | "中等" | "较低";
+  evidenceCoverage: number;
+  scopeNote: string;
+  exclusions: string[];
+  assumptions: string[];
+  knownEstimate: number | null;
+  limit: number | null;
+  items: Array<{ name: string; amount: number | null }>;
+  note: string;
+}
 
 export interface TravelProfile {
   city: string;
@@ -198,15 +260,28 @@ export interface ItinerarySpot {
     officialRealtime?: false;
     crowdRole?: "nightscape" | "meal-landmark" | "timed-indoor" | "religious" | "theme-park" | "broad-outdoor" | "heritage-core" | "flexible";
     baseWeatherRainProbability?: number | null;
+    openingHours?: string | null;
     recommendedWindow?: string;
+    secondaryRecommendedWindow?: string;
     recommendedWindows?: string[];
     avoidWindow?: string;
     peakWindow?: string;
     action?: string;
+    dataQualityNote?: string;
     visitTime?: string;
     visitDate?: string;
+    visitAdvice?: {
+      currentTime: string;
+      currentScore: number;
+      currentLabel: "较少" | "一般" | "较多" | "拥挤" | "非常拥挤";
+      suggestedTime: string;
+      suggestedWindow: string;
+      suggestedScore: number;
+      pressureDrop: number;
+      message: string;
+    };
     baseDate?: string;
-    timeWindows?: Array<{ time: string; score: number; label: string; delta?: number }>;
+    timeWindows?: Array<{ time: string; endTime?: string; score: number; label: string; delta?: number }>;
   } | null;
   openingStatus?: {
     status?: "verified" | "estimated" | "unknown" | "conflicting";
@@ -239,6 +314,7 @@ export interface ItinerarySpot {
 
 export interface TransitEvidence {
   durationMin?: number;
+  fare?: number | null;
   source?: string;
   fetchedAt?: string;
 }
@@ -259,6 +335,7 @@ export interface ItineraryBlock {
   mcpTransport?: TransitEvidence;
   mcpStatus?: { note?: string };
   mode?: string;
+  fare?: number | null;
   fetchedAt?: string;
   reason?: string;
 }
@@ -331,11 +408,14 @@ export interface ItineraryPlan {
     candidates?: Array<{
       name?: string;
       price?: number | null;
+      priceType?: string;
       source?: string;
       sourceUrl?: string | null;
       fetchedAt?: string;
+      priceVerifiedForDates?: boolean;
     }>;
   };
+  budgetBreakdown?: TripCostEstimate;
   changeScope?: {
     mode?: string;
     affectedDays?: number[];

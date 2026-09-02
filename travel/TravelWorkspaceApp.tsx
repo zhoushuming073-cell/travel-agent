@@ -193,7 +193,7 @@ export function TravelWorkspaceApp() {
     await refreshWorkspaces();
   }, [id, refreshWorkspaces, snapshot]);
 
-  const { startPlanning, retryPlanning, cancelPlanning, abandonPlanning, reconnectPlanning } = usePlanningLifecycle({
+  const { startPlanning, retryPlanning, cancelPlanning, reconnectPlanning } = usePlanningLifecycle({
     busy, workspaceId: id, isWorkspaceActive, setBusy, setError, planningControllerRef, draft, form, planningInput, handleProgress, beginProfileStage, clearStageTimers, saveResult: savePlanningResult,
     setDraft, setForm, setProfile, setProgress, setPlans, setActivePlanId, setEvents, setVersions,
     setStage, setParametersOpen, setReviewStep,
@@ -376,6 +376,7 @@ export function TravelWorkspaceApp() {
   };
 
   const readyForReview = stage === "READY" && Boolean(activePlan);
+  const needsPlanningInput = stage === "ERROR" && progress?.title === "需要补充信息";
   const profileWorkspaceVisible = stage === "BUILDING_PROFILE" || (readyForReview && reviewStep === 0);
   const headerTitle = readyForReview && reviewStep < 3 ? `回看：${REVIEW_LABELS[reviewStep]}` : activePlan && ["READY","EXECUTING"].includes(stage) ? `${activePlan.city} · ${activePlan.days} 天旅行` : stageConfig.title;
   const headerEyebrow = readyForReview && reviewStep < 3 ? `STAGE ${reviewStep + 1} / REVIEW` : stageConfig.eyebrow;
@@ -397,7 +398,7 @@ export function TravelWorkspaceApp() {
       {stage === "VALIDATING_ITINERARY" && (
         <ItineraryValidation plans={plans} profile={profile} activeId={activePlanId ?? plans[0]?.id ?? ""} onSelect={(planId) => void enterReady(planId)}/>
       )}
-      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions"><button className="secondary-button" type="button" onClick={() => void retryPlanning()}>从检查点继续</button><button className="secondary-button" type="button" onClick={abandonPlanning}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void startPlanning()}><span>保留输入并新建</span><Icon name="arrow"/></button></div></section>}
+      {stage === "ERROR" && <section className="error-workspace panel"><Icon name="alert"/><h2>规划任务需要处理</h2><p>{error}</p><div className="error-actions">{needsPlanningInput ? <button className="primary-button compact" type="button" onClick={() => void editRequirements()}><span>补充旅行信息</span><Icon name="arrow"/></button> : <><button className="secondary-button" type="button" onClick={() => void retryPlanning()}>从检查点继续</button><button className="secondary-button" type="button" onClick={() => void cancelPlanning()}>放弃任务</button><button className="primary-button compact" type="button" onClick={() => void editRequirements()}><span>修改后重新生成</span><Icon name="arrow"/></button></>}</div></section>}
       {readyForReview && reviewStep === 0 && <RequirementProfile request={draft} profile={profile} progress={progress} onEdit={() => void editRequirements()}/>}
       {readyForReview && reviewStep === 1 && <DataAcquisition request={draft} profile={profile} progress={progress}/>}
       {readyForReview && reviewStep === 2 && <PlanningVisualization profile={profile} progress={progress} plans={plans}/>}

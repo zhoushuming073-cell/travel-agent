@@ -68,6 +68,7 @@ import { optimizeRouteBuckets } from "./domain/route-optimizer.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "./domain/decision-trace.ts";
 import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
 import { calibrateCrowdWithResearch, crowdRiskForVisit, predictCrowdRisk } from "./domain/crowd-risk.ts";
+import { estimateTripCost } from "./domain/trip-cost.ts";
 import { clamp, cleanText, list, minutesToTime, normalizeName, timeToMinutes } from "./lib/value-utils.ts";
 import {
   applyFinalTimelineSafetyRepair,
@@ -431,6 +432,15 @@ function deterministicExtractedValue(type: ResearchQuestionType, passage: string
   }
   if (type === "temporary_closure") return /暂停开放|临时关闭|闭园|停止开放/.test(passage) ? { alert: true, note: passage.slice(0, 220) } : null;
   if (type === "reservation") return /无需预约|免预约/.test(passage) ? { required: false } : /预约|实名购票|提前购票/.test(passage) ? { required: true, note: passage.slice(0, 220) } : null;
+  if (type === "ticket_policy") {
+    if (/免费开放|免费参观|免门票|门票免费|无需门票/.test(passage) && !/部分|不含/.test(passage)) return { free: true, adultPrice: 0, note: passage.slice(0, 260) };
+    const price = (regex: RegExp) => Number(passage.match(regex)?.[1] || NaN);
+    const adultPrice = price(/(?:成人(?:票|价)?|全价票)[^\d]{0,12}(\d+(?:\.\d+)?)\s*元?/) || price(/(?:门票|票价|价格)[^\d]{0,12}(\d+(?:\.\d+)?)\s*元/);
+    const childPrice = price(/(?:儿童|学生)(?:票|价)?[^\d]{0,12}(\d+(?:\.\d+)?)\s*元?/);
+    const seniorPrice = price(/(?:老人|老年|长者)(?:票|价)?[^\d]{0,12}(\d+(?:\.\d+)?)\s*元?/);
+    if ([adultPrice, childPrice, seniorPrice].some(Number.isFinite)) return { free: false, adultPrice: Number.isFinite(adultPrice) ? adultPrice : null, childPrice: Number.isFinite(childPrice) ? childPrice : null, seniorPrice: Number.isFinite(seniorPrice) ? seniorPrice : null, note: passage.slice(0, 260) };
+    return null;
+  }
   if (type === "visit_duration") {
     const hours = passage.match(/(\d(?:\.\d)?)\s*(?:个)?小时/);
     const minutes = passage.match(/(\d{2,3})\s*分钟/);
@@ -1417,7 +1427,7 @@ async function enrichTravelIntelligence(spots: any[], profile: any, city: any, w
     } : { score: null, state: "UNKNOWN", label: seasonalArticle && daysToTrip > 30 ? "出行日期距当前较远，近期报道不能代表到访日物候" : "未取得可用于到访日期的近期时令报道信号", status: "unknown", confidence: 0, updatedAt: news.fetchedAt || fetchedAt, source: news.provider, sourceUrl: seasonalArticle?.url || null };
     const crowd = predictCrowdRisk({
       date: profile.startDate,
-      spot,
+      spot: { ...spot, openingHours },
       weather: weather?.tripForecast?.[0],
       hotness,
       rating,
@@ -1428,7 +1438,7 @@ async function enrichTravelIntelligence(spots: any[], profile: any, city: any, w
     const openingAlert = signal.openingAlerts?.[0];
     const factObservations = { ...(spot.factObservations || {}) };
     if (openingHours) factObservations.openingHours = [{ value: openingHours, confidence: amapOpening ? 0.78 : 0.68, source: { id: `source-${spot.id}-opening-amap`, name: amapOpening ? "高德地图 POI 营业时间" : cleanText(spot.sourceName, "公开 POI 页面"), type: "map-service", url: amap?.id ? `https://www.amap.com/place/${encodeURIComponent(amap.id)}` : spot.sourceUrl || null, fetchedAt, quality: "estimated" } }];
-    factObservations.crowd = [{ value: { score: crowd.score, label: crowd.label, probability: crowd.riskProbability, factors: crowd.factors, factorContributions: crowd.factorContributions, forecastBand: crowd.forecastBand, confidenceLabel: crowd.confidenceLabel, evidenceCoverage: crowd.evidenceCoverage, recommendedWindow: crowd.recommendedWindow, recommendedWindows: crowd.recommendedWindows, avoidWindow: crowd.avoidWindow, peakWindow: crowd.peakWindow, modelVersion: crowd.modelVersion, officialRealtime: false }, confidence: crowd.confidence, source: { id: `source-${spot.id}-crowd-model`, name: "Crowd Risk v2 多源风险模型", type: "prediction", url: crowdSourceUrl, fetchedAt, quality: "predicted" } }];
+    factObservations.crowd = [{ value: { score: crowd.score, label: crowd.label, probability: crowd.riskProbability, factors: crowd.factors, factorContributions: crowd.factorContributions, forecastBand: crowd.forecastBand, confidenceLabel: crowd.confidenceLabel, evidenceCoverage: crowd.evidenceCoverage, timeWindows: crowd.timeWindows, recommendedWindow: crowd.recommendedWindow, secondaryRecommendedWindow: crowd.secondaryRecommendedWindow, recommendedWindows: crowd.recommendedWindows, avoidWindow: crowd.avoidWindow, peakWindow: crowd.peakWindow, dataQualityNote: crowd.dataQualityNote, modelVersion: crowd.modelVersion, officialRealtime: false }, confidence: crowd.confidence, source: { id: `source-${spot.id}-crowd-model`, name: "Crowd Risk v2 多源风险模型", type: "prediction", url: crowdSourceUrl, fetchedAt, quality: "predicted" } }];
     if (hotness.score != null) factObservations.hotness = [{ value: { score: hotness.score, label: hotness.label }, confidence: hotness.confidence, source: { id: `source-${spot.id}-hotness`, name: hotness.source, type: "public-trend", url: hotness.sourceUrl, fetchedAt: hotness.updatedAt, quality: "predicted" } }];
     if (seasonality.score != null) factObservations.seasonality = [{ value: { score: seasonality.score, state: seasonality.state, label: seasonality.label }, confidence: seasonality.confidence, source: { id: `source-${spot.id}-seasonality`, name: seasonality.source, type: "public-season-signal", url: seasonality.sourceUrl, fetchedAt: seasonality.updatedAt, quality: "predicted" } }];
     return {
@@ -1611,6 +1621,12 @@ function firstTransit(value: any) {
   return data?.route?.transits?.[0] || data?.transits?.[0] || data?.route?.paths?.[0] || data?.paths?.[0] || null;
 }
 
+function transitFare(value: any): number | null {
+  const raw = value?.fare ?? value?.price ?? value?.transit_fee ?? value?.cost?.transit_fee ?? value?.cost?.fare ?? value?.cost?.price;
+  const number = Number(raw);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
   const startedAt = Date.now();
   const officialKey = cleanText(env?.AMAP_WEB_KEY);
@@ -1631,6 +1647,7 @@ async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
       if (String(raw?.status) === "1" && durationSeconds > 0) return {
         status: "ready", mode: "公交 / 地铁", durationMin: Math.max(1, Math.round(durationSeconds / 60)),
         distanceM: Number(transit?.distance || raw?.route?.distance || 0) || null,
+        fare: transitFare(transit),
         source: "高德地图官方公交/地铁", fetchedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt,
       };
     } catch { /* 继续使用 MCP 兜底 */ }
@@ -1644,7 +1661,7 @@ async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
     const durationSeconds = Number(transit.duration || transit.cost?.duration || 0);
     return {
       status: "ready", mode: "公交 / 地铁", durationMin: durationSeconds ? Math.max(1, Math.round(durationSeconds / 60)) : null,
-      distanceM: Number(transit.distance || 0) || null, source: "高德地图 MCP",
+      distanceM: Number(transit.distance || 0) || null, fare: transitFare(transit), source: "高德地图 MCP",
       fetchedAt: new Date().toISOString(), latencyMs: Date.now() - startedAt,
     };
   } catch (error: any) {
@@ -1668,6 +1685,7 @@ async function enrichDayTransit(day: any, city: any, env: any, exactCache = new 
         block.quality = "verified";
         block.fetchedAt = result.fetchedAt;
       }
+      if (result.fare != null) block.fare = result.fare;
     } else block.mcpStatus = result;
   }));
 }
@@ -2032,7 +2050,7 @@ function amapHotelRecord(row: any, fetchedAt: string) {
     id: cleanText(row.id), name, address: cleanText(row.address), location: cleanText(row.location),
     distanceM: hotelMoney(row.distance), rating: cleanText(row?.biz_ext?.rating || row.rating),
     star: cleanText(row?.biz_ext?.star), price,
-    priceType: price ? "高德 POI 最低参考价（非指定入住日期）" : "高德 POI 暂未返回参考价",
+    priceType: price ? "高德 POI 每晚每间最低参考价（非指定入住日期）" : "高德 POI 暂未返回参考价",
     priceVerifiedForDates: false, availability: "unknown", fetchedAt,
     source: "高德地图官方 Web 服务",
     sourceUrl: row.id ? `https://www.amap.com/place/${encodeURIComponent(row.id)}` : "https://www.amap.com/",
@@ -2223,16 +2241,17 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 9. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
 10. 必须服从每个候选点的 timeRole、preferredWindows、avoidWindows 与 timeRationale：meal-landmark 必须用 type=meal 且保留 spotId，安排在 11:30—13:30 或 17:30—20:00；nightscape 必须在当日 sunset 后；展馆服从开放与预约；户外摄影优先早晚光线。
 11. 每日必须包含正常午餐；若当天延续到 18:00 后还必须包含晚餐。活动之间不得重叠，交通时间不能被吞掉，午晚餐不是可删除的装饰块。
-12. 每套天数严格等于 profile.days。若调用方要求三套，则输出 hot、niche、relax 且顺序不变；若明确要求“本次只生成某一套”，variants 必须只含该套，不能擅自输出另外两套。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
+12. 每套天数严格等于 profile.days。若调用方要求三套，则输出 hot、niche、relax 且顺序不变；若明确要求“本次只生成某一套”，variants 必须只含该套，不能擅自输出另外两套。
+13. profile.budget 是真实用户约束。存在门票、酒店参考价或交通成本证据时，优先减少不必要收费点、选择公共交通并聚类路线以降低跨区成本；不得删除 requiredByUser 景点。若预算与必去、人数、住宿等硬要求冲突，必须在 strategy 或 adjustmentCondition 中明确说明，不得编造低价来假装满足预算。最终金额由后端确定性计算，模型不得自行加总或创造价格。结构示例：${JSON.stringify(PLANNER_JSON_EXAMPLE)}`;
 
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
   assertPlannerContext(knowledge);
   const modelAudit = { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] as any[] };
   let draft: any;
   const objectives = [
-    { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；不要把购物 POI 当景点。" },
-    { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；恶劣天气给候选池内室内替代。" },
-    { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功。" },
+    { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；在预算内优先有证据的经典点。" },
+    { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；同等体验优先免费或低费用地点。" },
+    { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；优先公共交通和少跨区路线以控制费用。" },
   ];
   const verificationQueries = [...new Set([
     ...list(profile.requiredAttractions).slice(0, 3),
@@ -2343,9 +2362,9 @@ async function generatePlannerDraft(profile: any, knowledge: any, env: any, repl
 }
 
 const WORKFLOW_OBJECTIVES = [
-  { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；不要把购物 POI 当景点。" },
-  { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；恶劣天气给候选池内室内替代。" },
-  { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功。" },
+  { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；不要把购物 POI 当景点；在预算内优先有证据的经典点。" },
+  { id: "niche", name: "自然摄影", goal: "优先自然、摄影、季节证据和合理光线；恶劣天气给候选池内室内替代；同等体验优先免费或低费用地点。" },
+  { id: "relax", name: "轻松避峰", goal: "降低每日景点数、增加缓冲；客流未知时不得宣称实时避峰成功；优先公共交通和少跨区路线以控制费用。" },
 ];
 
 function newWorkflowPlannerState(profile: any, env: any) {
@@ -2557,7 +2576,7 @@ function planDayFromDraft(dayDraft: any, dayIndex: number, spotsById: Map<string
       }
       const item = { ...base, activityType: activity.type, crowd: crowdRiskForVisit(base.crowd, activity.startTime, weather.date, weather), startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, recommendationReason: activity.reason, evidenceRefs: activity.evidenceRefs, alternativeSpotIds: activity.alternativeSpotIds, adjustmentCondition: activity.adjustmentCondition };
       if (item.factObservations?.crowd?.length && item.crowd?.score != null) {
-        item.factObservations = { ...item.factObservations, crowd: item.factObservations.crowd.map((observation: any, index: number) => index ? observation : { ...observation, value: { ...observation.value, score: item.crowd.score, probability: item.crowd.riskProbability, label: item.crowd.label, factors: item.crowd.factors, factorContributions: item.crowd.factorContributions, forecastBand: item.crowd.forecastBand, confidenceLabel: item.crowd.confidenceLabel, evidenceCoverage: item.crowd.evidenceCoverage, recommendedWindow: item.crowd.recommendedWindow, recommendedWindows: item.crowd.recommendedWindows, avoidWindow: item.crowd.avoidWindow, peakWindow: item.crowd.peakWindow, action: item.crowd.action, visitTime: item.crowd.visitTime, visitDate: item.crowd.visitDate, modelVersion: item.crowd.modelVersion, officialRealtime: false } }) };
+        item.factObservations = { ...item.factObservations, crowd: item.factObservations.crowd.map((observation: any, index: number) => index ? observation : { ...observation, value: { ...observation.value, score: item.crowd.score, probability: item.crowd.riskProbability, label: item.crowd.label, factors: item.crowd.factors, factorContributions: item.crowd.factorContributions, forecastBand: item.crowd.forecastBand, confidenceLabel: item.crowd.confidenceLabel, evidenceCoverage: item.crowd.evidenceCoverage, timeWindows: item.crowd.timeWindows, recommendedWindow: item.crowd.recommendedWindow, secondaryRecommendedWindow: item.crowd.secondaryRecommendedWindow, recommendedWindows: item.crowd.recommendedWindows, avoidWindow: item.crowd.avoidWindow, peakWindow: item.crowd.peakWindow, action: item.crowd.action, dataQualityNote: item.crowd.dataQualityNote, visitAdvice: item.crowd.visitAdvice, visitTime: item.crowd.visitTime, visitDate: item.crowd.visitDate, modelVersion: item.crowd.modelVersion, officialRealtime: false } }) };
       }
       items.push(item);
       if (activity.type === "meal") {
@@ -2632,12 +2651,21 @@ function cookieValue(request: Request, name: string): string {
   return "";
 }
 
+export function taskSessionCookie(value: string, requestUrl: string): string {
+  const url = new URL(requestUrl);
+  const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  const base = `${SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=86400; Path=/`;
+  if (url.protocol === "https:") return `${base}; Secure; HttpOnly; SameSite=Strict`;
+  if (url.protocol === "http:" && isLoopback) return `${base}; HttpOnly; SameSite=Strict`;
+  throw new Error("规划任务会话仅支持 HTTPS；本机开发可使用 localhost 或 127.0.0.1");
+}
+
 async function taskSession(request: Request, env: any, create = false) {
   let value = cookieValue(request, SESSION_COOKIE);
   let setCookie = "";
   if (!value && create) {
     value = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
-    setCookie = `${SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=86400; Path=/; Secure; HttpOnly; SameSite=Strict`;
+    setCookie = taskSessionCookie(value, request.url);
   }
   const hash = value ? await sha256(`${cleanText(env?.RATE_LIMIT_SALT, "smart-travel-public")}|session|${value}`) : "";
   return { hash, setCookie };
@@ -3350,14 +3378,19 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       reflowDayAfterTransit(day, profile);
       day.dining = await Promise.all(day.blocks.filter((block: any) => block.type === "rest" && block.mealType && block.anchor).map((block: any) => diningFor(city.name, block.anchor.lat, block.anchor.lng, block.mealType)));
     }
-    const transportEstimate = Math.round(daysPlan.reduce((sum: number, day: any) => sum + Number(day.route?.distance || 0), 0) / 1000 * 2.2);
+    const budgetBreakdown = estimateTripCost({
+      profile,
+      plan: { id: variantId, city: city.name, daysPlan, hotelPlan: hotel },
+      research: research ? { facts: research.facts, evidence: research.evidence } : null,
+    });
     alternatives.push({
       id: variantId, city: city.name, cityRef: city, startDate: profile.startDate, days: profile.days, budget: profile.budget,
       style: draftVariant?.style || profile.style, preferences: profile.preferences, pace: profile.pace, variant: variantId, transport: profile.transport,
       title: draftVariant?.title || ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex], strategy: draftVariant?.strategy || "依据候选景点知识包与交通矩阵", weather,
       daysPlan, hotelPlan: hotel,
-      budgetBreakdown: { knownEstimate: transportEstimate, limit: profile.budget, items: [{ name: "市内交通透明估算", amount: transportEstimate }, { name: "住宿（参考价不计入）", amount: null }, { name: "门票", amount: null }, { name: "餐饮", amount: null }], note: "仅汇总可用于决策的金额；酒店非指定日期参考价不纳入预算，缺失价格保持 Unknown" },
-      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", images: "高德官方 / Wikimedia / Unsplash", crowd: "Crowd Risk v2：日期/时段、景点承载特征、天气、公开趋势（非实时人数）", hotness: intelligence.news.status === "ready" ? intelligence.news.provider : "Unknown", seasonality: "近期公开报道中的时令实况信号；无证据则 Unknown", social: intelligence.social.status === "ready" ? intelligence.social.provider : "可选社交 MCP 未连接", reservations: "Unknown" },
+      budgetBreakdown,
+      budgetWarning: ["tight", "over_budget", "unknown"].includes(budgetBreakdown.budgetStatus) ? `${budgetBreakdown.budgetStatusLabel}：${budgetBreakdown.note}` : null,
+      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", costs: "Trip Cost V1：酒店 Provider、门票研究证据、实际 itinerary legs、实际饭点与确定性估算规则", images: "高德官方 / Wikimedia / Unsplash", crowd: "Crowd Risk v2：日期/时段、景点承载特征、天气、公开趋势（非实时人数）", hotness: intelligence.news.status === "ready" ? intelligence.news.provider : "Unknown", seasonality: "近期公开报道中的时令实况信号；无证据则 Unknown", social: intelligence.social.status === "ready" ? intelligence.social.provider : "可选社交 MCP 未连接", reservations: "Unknown" },
       generatedAt: fetchedAt,
       planningDecision: { mode: generated.modelAudit.planningMode, researchModel: generated.modelAudit.researchModel, model: generated.modelAudit.plannerModel, criticModel: generated.modelAudit.criticModel, criticStatus: generated.modelAudit.criticStatus, criticIssues: generated.modelAudit.criticIssues, repairModel: generated.modelAudit.repairModel, repairRounds: generated.modelAudit.repairRounds, formatRepairs: generated.modelAudit.formatRepairs, networkToolCalls: generated.modelAudit.toolCalls, degraded: generated.modelAudit.degraded, degradationReason: generated.modelAudit.degradationReason || null, draftCompilerIssues: generated.modelAudit.compilerIssues },
       changeScope: replanContext && variantId === replanContext.activeVariant ? { mode: affectedDayIndexes.length ? "minimum-disruption" : "global-with-preservation-guidance", affectedDays: affectedDayIndexes.map((index: number) => index + 1), preservedDays: Array.from({ length: profile.days }, (_, index) => index + 1).filter((day) => !affectedDayIndexes.includes(day - 1)), note: "未受影响日期的稳定景点 ID 与原时间由后端锁定，不交给模型重写。" } : null,
@@ -3369,6 +3402,13 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     plan.optimization = { algorithm: `${modelFamily(generated.modelAudit.plannerModel)} ${generated.modelAudit.deepReasoningUsed ? "深度决策" : "快速决策"} + Research Agent + 多目标路线优化 + Travel Compiler`, candidateCount: spots.length, selectedCount: plan.evaluation.evidence.selectedCount, requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`, note: generated.modelAudit.planningMode === "deterministic_recovery" ? "规划模型未返回可编译结构；系统已明确降级为确定性多目标路线优化，并继续执行开放时间、交通、用餐和必去约束校验。" : `Research Agent 先按信息增益取证；交通矩阵在模型调用前生成；实际模型 ${cleanText(generated.modelAudit.plannerModel, "unknown")} ${generated.modelAudit.deepReasoningUsed ? "形成决策备忘录后" : "在用户关闭深度思考时直接"}生成三套草案，独立 Critic 与确定性编译器再检查硬冲突。` };
     plan.candidatePool = spots.slice(0, 16).map((spot: any) => ({ id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore, scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis, requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences, selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)) }));
     Object.assign(plan, analyzePlanTrustV2(plan, profile));
+    if (profile.budget && ["tight", "over_budget"].includes(plan.budgetBreakdown?.budgetStatus)) {
+      plan.compiler?.issues?.push({
+        code: plan.budgetBreakdown.budgetStatus === "over_budget" ? "BUDGET_OVER" : "BUDGET_TIGHT",
+        severity: plan.budgetBreakdown.budgetStatus === "over_budget" ? "warning" : "info",
+        message: `${plan.budgetBreakdown.budgetStatusLabel}；必去景点未删除，请优先复核住宿、收费景点和交通方式`,
+      });
+    }
     plan.decisionTrace = buildResearchDecisionTrace(plan, research);
     plan.decisionTraceCoverage = traceCoverage(plan.decisionTrace);
     plan.changeSet = null;

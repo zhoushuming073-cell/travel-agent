@@ -28,6 +28,7 @@ function waitWithSignal(milliseconds: number, signal?: AbortSignal): Promise<voi
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
   const body = await response.json().catch(() => ({ error: { message: "服务返回的内容不是 JSON" } })) as T & ErrorEnvelope;

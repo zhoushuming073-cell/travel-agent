@@ -49,3 +49,20 @@ test("primary stage animations never flash a loading placeholder", async () => {
   assert.match(layout, /preload[^\n]+face-scanning\.json/);
   assert.match(layout, /preload[^\n]+search\.json/);
 });
+
+test("crowd prediction stays explainable, time-aware and mobile friendly", async () => {
+  const [panels, timeline, styles] = await Promise.all([
+    source("travel/components/dashboard/EnvironmentPanels.tsx"),
+    source("travel/components/ItineraryTimeline.tsx"),
+    source("app/travel/[[...tripId]]/styles/dashboard.css"),
+  ]);
+  for (const text of ["0–100 风险指数", "预测不等于实时人流", "推荐", "次推荐", "尽量避开", "查看预测依据", "官方/外部数据", "公开趋势", "规则/模型预测"]) {
+    assert.match(panels, new RegExp(text));
+  }
+  assert.match(panels, /value\.timeWindows/);
+  assert.match(panels, /value\.visitAdvice/);
+  assert.doesNotMatch(panels, /实时游客|当前园内人数|实时拥挤度/);
+  assert.match(timeline, /计划时段人流预测/);
+  assert.match(styles, /\.crowd-day-trend/);
+  assert.match(styles, /@media \(max-width:620px\)[\s\S]+\.crowd-window-grid \{ grid-template-columns:1fr;/);
+});
