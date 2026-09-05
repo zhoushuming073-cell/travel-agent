@@ -329,8 +329,8 @@ export async function resetTravelJobForRetry(jobId: string, sessionHash: string,
     WHERE id = ? AND session_hash = ? AND status = 'error' AND expires_at > ?`)
     .bind(stage, now, now, jobId, sessionHash, now).run();
   if (Number(result.meta?.changes || 0) > 0) {
-    await db.prepare("DELETE FROM travel_job_artifacts WHERE job_id = ? AND artifact_key = ?")
-      .bind(jobId, `attempt:${stage}`).run();
+    await db.prepare("DELETE FROM travel_job_artifacts WHERE job_id = ? AND artifact_key IN (?, ?)")
+      .bind(jobId, `attempt:${stage}`, `rate-limit:${stage}`).run();
     return true;
   }
   return false;
@@ -431,6 +431,39 @@ export async function persistentCacheGet(namespace: string, key: string): Promis
     await db.prepare("UPDATE response_cache SET hit_count = hit_count + 1 WHERE cache_key = ?").bind(cacheKey).run();
     return parseJson(row.value_json);
   } catch { return null; }
+}
+
+const localAiSlots = new Map<string, number>();
+
+/** Atomic quota gate in the existing TTL table; no schema change or plaintext key storage. */
+export async function acquireAiRequestSlot(scope: string, intervalMs: number, now = Date.now()): Promise<number> {
+  const cacheKey = await sha256(`ai-request-gate-v1|${scope}`);
+  const db = await ensureSchema();
+  if (!db) {
+    const until = localAiSlots.get(cacheKey) || 0;
+    if (until > now) return until - now;
+    localAiSlots.set(cacheKey, now + intervalMs);
+    return 0;
+  }
+  const claimed = await db.prepare(`INSERT INTO response_cache(cache_key, namespace, value_json, created_at, expires_at, hit_count)
+    VALUES(?, 'ai-request-gate-v1', '{}', ?, ?, 0)
+    ON CONFLICT(cache_key) DO UPDATE SET created_at = excluded.created_at, expires_at = excluded.expires_at
+    WHERE response_cache.expires_at <= excluded.created_at
+    RETURNING expires_at`).bind(cacheKey, now, now + intervalMs).first<{ expires_at: number }>();
+  if (claimed) return 0;
+  const current = await db.prepare("SELECT expires_at FROM response_cache WHERE cache_key = ?")
+    .bind(cacheKey).first<{ expires_at: number }>();
+  return Math.max(1, Number(current?.expires_at || now + intervalMs) - now);
+}
+
+export async function blockAiRequests(scope: string, milliseconds: number, now = Date.now()): Promise<void> {
+  const cacheKey = await sha256(`ai-request-gate-v1|${scope}`);
+  const db = await ensureSchema();
+  if (!db) { localAiSlots.set(cacheKey, Math.max(localAiSlots.get(cacheKey) || 0, now + milliseconds)); return; }
+  await db.prepare(`INSERT INTO response_cache(cache_key, namespace, value_json, created_at, expires_at, hit_count)
+    VALUES(?, 'ai-request-gate-v1', '{}', ?, ?, 0)
+    ON CONFLICT(cache_key) DO UPDATE SET expires_at = MAX(response_cache.expires_at, excluded.expires_at)`)
+    .bind(cacheKey, now, now + milliseconds).run();
 }
 
 export async function persistentCachePut(namespace: string, key: string, value: unknown, ttlMs: number): Promise<void> {

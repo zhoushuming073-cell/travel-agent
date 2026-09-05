@@ -150,6 +150,7 @@ test("D1 runtime persists leases, artifacts, events and provider attempts", () =
   assert.match(apiSource, /renewTravelJobLease/);
   assert.match(apiSource, /TASK_CANCELLED/);
   assert.match(apiSource, /LEASE_LOST/);
+  assert.match(apiSource, /if \(\/TASK_CANCELLED\/\.test\(message\)\) return \{ status: "cancelled"/);
 });
 
 test("browser task recovery uses HttpOnly cookie, active lookup and real server cancellation", () => {
@@ -211,10 +212,11 @@ test("deterministic final validation errors do not repeat the same unchanged sta
   assert.match(apiSource, /STAGE_VALIDATION_FAILED/);
 });
 
-test("provider sentinels and unavailable planner models degrade without false prices or minute-long stage retries", () => {
+test("permanent model errors recover but rate limits must wait instead of claiming malformed output", () => {
   assert.equal(transitFare({ cost: { transit_fee: 0 } }), null);
   assert.equal(transitFare({ cost: { transit_fee: 3 } }), 3);
-  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]；flash [RATE_LIMITED]"), true);
+  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]；flash [RATE_LIMITED]"), false);
+  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]"), true);
   assert.equal(shouldRecoverPlannerImmediately("经典覆盖返回 0/3 个完整日期"), false);
   assert.match(apiSource, /!retryContext\?\.attempts && !shouldRecoverPlannerImmediately/);
 });

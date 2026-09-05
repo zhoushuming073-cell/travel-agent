@@ -1,6 +1,8 @@
 // @ts-nocheck
 
 import { assertPlanContract } from "./domain/contract.ts";
+import { aiRequestInterval, isAiRateLimited, requestWithAiThrottle } from "./domain/ai-throttle.ts";
+import { acquireAiRequestSlot, blockAiRequests } from "./persistence.ts";
 import { buildPlanningEvents } from "./domain/agent.ts";
 import { computeChangeSet } from "./domain/replan.ts";
 import { analyzePlanTrustV2 } from "./domain/trust.ts";
@@ -574,7 +576,10 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
         model = planned.model;
         modelStatus = "ready";
         requests = normalizeAiResearchRequests(planned.value, profile, gaps, budget);
-      } catch { modelStatus = modelStatus === "ready" ? "degraded" : "unavailable"; }
+      } catch (error) {
+        if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
+        modelStatus = modelStatus === "ready" ? "degraded" : "unavailable";
+      }
     }
     if (!requests.length) requests = deterministicResearchRequests(profile, gaps, budget);
     requests = requests.filter((request) => {
@@ -619,7 +624,8 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
           modelStatus = "ready";
           allEvidence.push(...refined.rows);
         } else allEvidence.push(...roundEvidence);
-      } catch {
+      } catch (error) {
+        if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
         modelStatus = modelStatus === "ready" ? "degraded" : modelStatus;
         allEvidence.push(...roundEvidence);
       }
@@ -732,9 +738,11 @@ async function aiRequest(env: any, options: {
   const candidates = aiModelCandidates(env, options.purpose);
   const failures: string[] = [];
   const endpoint = aiEndpoint(env);
+  // Share a quota across all roles/models using the same account, across Worker isolates.
+  const quotaScope = `${endpoint}|${key}`;
   for (const model of candidates) {
     const circuit = modelCircuitState(endpoint, model);
-    if (circuit) {
+    if (circuit && circuit.code !== "RATE_LIMITED") {
       failures.push(`${model}: [${circuit.code}] 熔断至 ${new Date(circuit.until).toISOString()}：${circuit.reason}`);
       continue;
     }
@@ -760,6 +768,7 @@ async function aiRequest(env: any, options: {
           messages,
           max_tokens: options.maxTokens || 6000,
           stream: false,
+          thinking: { type: options.thinking ? "enabled" : "disabled" },
           chat_template_kwargs: { enable_thinking: Boolean(options.thinking) },
         };
         if (options.jsonMode && !options.thinking) payload.response_format = { type: "json_object" };
@@ -768,11 +777,16 @@ async function aiRequest(env: any, options: {
         // queries in that round, then it must synthesize from the returned evidence.
         if (tools && toolLog.length === 0) { payload.tools = tools; payload.tool_choice = "auto"; }
         const longRunning = options.thinking || options.purpose === "planner" || options.purpose === "repair";
-        const result = await fetchJson(endpoint, {
+        const result = await requestWithAiThrottle(() => fetchJson(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
           body: JSON.stringify(payload),
-        }, options.requestTimeoutMs || (longRunning ? 120000 : 60000), `联通元景 ${model}`);
+        }, options.requestTimeoutMs || (longRunning ? 120000 : 60000), `联通元景 ${model}`), {
+          acquire: () => acquireAiRequestSlot(quotaScope, aiRequestInterval(env)),
+          block: (milliseconds) => blockAiRequests(quotaScope, milliseconds),
+          sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          now: Date.now, assertActive: env.AI_ASSERT_ACTIVE,
+        });
         const message = result?.choices?.[0]?.message;
         if (!message) throw new Error(`联通元景 ${model} 没有返回消息`);
         const content = cleanText(message.content);
@@ -807,10 +821,11 @@ async function aiRequest(env: any, options: {
       }
       throw new Error(`${model} 联网工具调用超过安全上限`);
     } catch (error: any) {
+      if (/TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
       const classified = classifyAiFailure(error);
       openModelCircuit(endpoint, model, error);
       failures.push(`${model}: [${classified}] ${cleanText(error?.message, "请求失败")}`);
-      if (classified === "UNAUTHORIZED") break;
+      if (classified === "UNAUTHORIZED" || isAiRateLimited(error)) break;
     }
   }
   throw new Error(`联通元景模型均不可用：${failures.join("；")}`);
@@ -824,6 +839,7 @@ async function aiJson(env: any, options: Parameters<typeof aiRequest>[1]) {
       purpose: options.purpose,
       thinking: false,
       maxTokens: options.maxTokens,
+      requestTimeoutMs: options.requestTimeoutMs,
       jsonMode: true,
       messages: [
         { role: "system", content: "你是 JSON 格式修复器。只修复语法和字段容器，不添加新事实。只输出一个有效 JSON 对象。" },
@@ -853,6 +869,7 @@ async function extractProfile(input: any, env: any) {
       ],
     });
   } catch (error: any) {
+    if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
     extracted = {
       value: hints,
       model: "deepseek-v4-flash（限流时文本规则兜底）",
@@ -2372,8 +2389,9 @@ const WORKFLOW_OBJECTIVES = [
 
 export function shouldRecoverPlannerImmediately(error: unknown) {
   const message = cleanText(error instanceof Error ? error.message : error);
+  if (isAiRateLimited(error)) return false;
   return /联通元景模型均不可用/.test(message)
-    && /\[(?:MODEL_NOT_FOUND|UNAUTHORIZED|RATE_LIMITED|PROVIDER_UNAVAILABLE|NETWORK_ERROR|TIMEOUT)\]/.test(message);
+    && /\[(?:MODEL_NOT_FOUND|UNAUTHORIZED)\]/.test(message);
 }
 
 function newWorkflowPlannerState(profile: any, env: any) {
@@ -2435,6 +2453,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       });
       state.decisionMemo = cleanText(deliberation.content || deliberation.reasoningContent).slice(0, 6000);
     } catch (error: any) {
+      if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
       state.modelAudit.compilerIssues.push({ code: "DEEP_REASONING_BUDGET", message: `规划模型的深度分析未形成备忘录，继续由可用模型成稿：${cleanText(error?.message)}` });
     }
     return state;
@@ -2459,13 +2478,15 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
       if (!completePlannerVariant(variant, profile)) throw new Error(`${objective.name}返回 ${variant?.days?.length || 0}/${profile.days} 个完整日期`);
     } catch (error: any) {
+      if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
       failure = cleanText(error?.message, `${objective.name}模型调用失败`);
       if (!retryContext?.attempts && !shouldRecoverPlannerImmediately(error)) throw new Error(failure);
       const previousVariantSpotIds = state.draft.variants.flatMap((item: any) => item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)));
       variant = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, variant, failure, previousVariantSpotIds);
       state.modelAudit.degraded = true;
       state.modelAudit.planningMode = "deterministic_recovery";
-      state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${objective.name}模型连续两次未返回可编译结构，已保留候选池事实并由可靠性编译器补全时间轴`].filter(Boolean).join("；");
+      const recoveryReason = shouldRecoverPlannerImmediately(error) ? "模型不存在或鉴权不可用" : `在 ${Number(retryContext?.attempts || 0) + 1} 次阶段尝试后仍未获得可编译方案`;
+      state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${objective.name}${recoveryReason}，已保留候选池事实并由可靠性编译器补全时间轴`].filter(Boolean).join("；");
       state.modelAudit.compilerIssues.push({ code: "MODEL_STRUCTURE_RECOVERED", severity: "warning", variantId, message: `${failure}；未切换到较弱模型，未新增候选池外事实` });
     }
     state.draft.variants.push(variant);
@@ -2497,6 +2518,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
         message: cleanText(issue.message), suggestedRepair: cleanText(issue.suggestedRepair), evidenceIds: list(issue.evidenceIds).slice(0, 8),
       })).filter((issue: any) => issue.message);
     } catch (error: any) {
+      if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
       state.modelAudit.criticStatus = "deterministic-only";
       state.modelAudit.planningMode = state.modelAudit.planningMode === "deterministic_recovery" ? state.modelAudit.planningMode : "ai_assisted";
       state.modelAudit.compilerIssues.push({ code: "AI_CRITIC_UNAVAILABLE", severity: "warning", message: `独立 AI Critic 不可用，确定性审计继续执行：${cleanText(error?.message)}` });
@@ -2556,6 +2578,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
         state.modelAudit.repairModel = repaired.model;
         if (repaired.formatRepaired) state.modelAudit.formatRepairs += 1;
       } catch (error: any) {
+        if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
         if (!retryContext?.attempts && !shouldRecoverPlannerImmediately(error)) throw error;
         state.modelAudit.degraded = true;
         state.modelAudit.degradationReason = [state.modelAudit.degradationReason, `${variantId} 的 AI 冲突修复暂不可用，后续继续由硬约束编译器校验`].filter(Boolean).join("；");
@@ -2728,6 +2751,7 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
     if (!current || current.status === "cancelled" || current.cancelRequestedAt) throw new Error("TASK_CANCELLED");
     if (current.leaseOwner !== owner || current.leaseNonce !== nonce || Number(current.leaseExpiresAt || 0) < Date.now()) throw new Error("LEASE_LOST");
   };
+  env = { ...env, AI_ASSERT_ACTIVE: assertCommitAllowed };
   try {
     let envelope: any = await getTravelJobArtifact(jobId, "envelope");
     if (stage === "parse_profile") {
@@ -2854,7 +2878,21 @@ async function advancePlanningJob(jobId: string, env: any) {
     return { ...result, status: current?.status || "working", progress: current?.progress, currentStep: current?.currentStep };
   } catch (error: any) {
     const message = cleanText(error?.message, "阶段执行失败");
+    if (/TASK_CANCELLED/.test(message)) return { status: "cancelled", currentStep: stage, retryable: false };
     if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, retryAfterMs: 10_000, currentStep: stage };
+    if (isAiRateLimited(error)) {
+      const previous: any = await getTravelJobArtifact(jobId, `rate-limit:${stage}`);
+      const attempts = Number(previous?.attempts || 0) + 1;
+      await putTravelJobArtifact(jobId, `rate-limit:${stage}`, { attempts, lastError: message });
+      if (attempts >= 3) {
+        await updateTravelJob(jobId, { status: "error", errorCode: "AI_RATE_LIMITED", errorMessage: "模型持续限流，多次等待后仍不可用。检查点已保留，请确认服务商配额后重试。", completedAt: Date.now() });
+        return { status: "error", currentStep: stage, retryable: false };
+      }
+      const envelope = await getTravelJobArtifact(jobId, "envelope") || job.payload;
+      const progress = await progressForStage(jobId, stage, envelope, ["! 模型请求限流，正在等待配额恢复；这不是方案结构错误"]);
+      await updateTravelJob(jobId, { progress, heartbeatAt: Date.now() });
+      return { status: "working", currentStep: stage, retryable: true, retryAfterMs: AI_RATE_LIMIT_COOLDOWN_MS + 5000, progress };
+    }
     const attemptKey = `attempt:${stage}`;
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
     const attempts = Number(previous?.attempts || 0) + 1;

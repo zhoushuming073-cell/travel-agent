@@ -12,6 +12,9 @@ AI_EXPLAIN_MODEL=deepseek-v4-flash
 # 逗号分隔的兼容模型回退；AI_SKIP_MODELS 中的模型不会被调用。
 AI_COMPATIBLE_MODEL_FALLBACKS=deepseek-v4-flash
 AI_SKIP_MODELS=
+# 同账号所有 Agent 共用的最小调用间隔；保守默认值，不代表已知账号 QPM。
+# 确认服务商配额后可调整；429 仍会触发持久化冷却与有界重试。
+AI_REQUEST_MIN_INTERVAL_MS=65000
 
 # 旧环境变量仍被兼容，新部署建议使用上述 AI_* 变量
 DEEPSEEK_API_KEY=

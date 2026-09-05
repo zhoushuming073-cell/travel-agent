@@ -42,6 +42,7 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 ### Agent 与模型编排
 
 - `worker/domain/model-routing.ts`：V4 Flash/V4 Pro 的任务路由、回退和熔断。
+- `worker/domain/ai-throttle.ts`：同账号跨 Agent 的调用节流与有界 429 重试；D1 原子配额闸门位于 `worker/persistence.ts`。`AI_REQUEST_MIN_INTERVAL_MS` 默认 65000 毫秒，是保守设置，不是服务商公布的账号配额。
 - `worker/domain/profile-extraction.ts`：确定性解析、AI 提取结果合并和字段来源。
 - `worker/travel-api.ts` 中的阶段执行逻辑：需求解析、数据采集、研究、三方案生成、critic、修复、最终交通复核和编译。
 - `worker/planning/planner-normalization.ts`：规划模型输出的归一化、确定性恢复、约束覆盖和时间线修复。
@@ -172,6 +173,7 @@ git pull --ff-only github main
 - 首次打开页面不能自动开始规划。
 - 访问凭证只保存在 Secure、HttpOnly、SameSite=Strict Cookie 中，不得放进浏览器 JavaScript、URL 或 localStorage。
 - 保持浏览器驱动的 `/api/plan/advance`、D1 检查点、租约、幂等、取消和恢复语义。长模型调用不得放进完整任务级 `waitUntil()`。
+- 模型 429/QPM 是调用限流，不是输出结构错误；必须等待、有界重试并保留检查点，不能直接宣称“两次结构失败”后降级。永久 404/鉴权失败与结构错误分别处理，持续限流应明确报错。单次连通性测试通过不代表完整规划链路通过。
 - D1 结构变更必须通过 `drizzle/` 新迁移完成，并兼容已有任务；不要只改 `db/schema.ts`。
 - 本地工作区存储保留现有 schema 兼容，不要随意清空用户历史。
 - 除非需求明确涉及视觉设计，否则保持现有四阶段工作流、十套主题、动画加载策略和移动端布局。
