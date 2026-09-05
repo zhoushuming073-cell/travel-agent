@@ -13,7 +13,7 @@ html[data-travel-theme] :is(.primary-button,.sidebar-new-trip,.react-validation-
   box-shadow: 0 3px 6px color-mix(in srgb,var(--travel-brand) 14%,transparent),0 10px 24px color-mix(in srgb,var(--travel-brand) 12%,transparent);
 }
 html[data-travel-theme] :is(.primary-button,.sidebar-new-trip,.react-validation-layout .compiler-card > button,.persistent-composer .secondary-button):active:not(:disabled) { transform: translateY(0); }
-html[data-travel-theme] .primary-button:disabled { color: var(--travel-muted); background: var(--travel-surface-soft); box-shadow: none; }
+html[data-travel-theme] .react-workspace-shell .primary-button:disabled { color: var(--travel-muted); background: var(--travel-surface-soft); box-shadow: none; }
 html[data-travel-theme] :is(.workspace-actions > button,.secondary-button,.task-cancel,.parameter-panel-close,.ready-trip-actions button,.variant-compare-button,.map-actions button,.execution-mode footer button) {
   border-color: var(--border-soft); border-radius: var(--radius-md); color: var(--text-secondary); background: color-mix(in srgb,var(--travel-surface) 72%,transparent); font-weight: 500;
 }
