@@ -1,0 +1,100 @@
+/* Presentation only: theme-aware materials, with the existing layout untouched. */
+html[data-travel-theme] {
+  --bg-page: var(--travel-canvas);
+  --bg-panel: color-mix(in srgb,var(--travel-surface) 78%,var(--travel-canvas));
+  --bg-muted: color-mix(in srgb,var(--travel-text) 2.5%,var(--travel-surface));
+  --border-soft: color-mix(in srgb,var(--travel-text) 7%,transparent);
+  --text-primary: var(--travel-text);
+  --text-secondary: var(--travel-text-2);
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius: 14px;
+  --shadow-card: 0 1px 2px rgb(15 23 42 / .025),0 8px 24px rgb(15 23 42 / .035);
+  --shadow-popover: 0 12px 32px rgb(15 23 42 / .10),0 2px 8px rgb(15 23 42 / .05);
+  --shadow-input: 0 1px 2px rgb(15 23 42 / .025),0 8px 24px rgb(15 23 42 / .045),0 24px 50px rgb(15 23 42 / .025);
+  --shadow: var(--shadow-card);
+  --shadow-strong: var(--shadow-popover);
+}
+html[data-travel-theme] .react-workspace-shell {
+  background: radial-gradient(circle at 20% 0%,color-mix(in srgb,var(--travel-brand) 3%,transparent),transparent 32%),var(--bg-page);
+}
+html[data-travel-theme] .react-workspace-shell :is(h1,h2,h3,strong,b) { font-weight: 600; }
+html[data-travel-theme] .react-workspace-shell :is(h2,h3) { font-weight: 500; letter-spacing: -.02em; }
+html[data-travel-theme] .react-empty-stage .empty-copy h1 { font-size: clamp(32px,3.2vw,44px); font-weight: 600; letter-spacing: -.02em; }
+html[data-travel-theme] .empty-copy > p strong { color: var(--text-primary); font-weight: 500; }
+html[data-travel-theme] .react-workspace-shell :is(.section-kicker,.section-code,.workspace-title span,.sidebar-brand .sidebar-label small) {
+  color: var(--travel-muted); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: lowercase;
+}
+html[data-travel-theme] .react-workspace-shell .sidebar-brand .sidebar-label small { color: var(--travel-sidebar-muted); text-transform: none; }
+html[data-travel-theme] .workspace-title strong { font-weight: 500; }
+html[data-travel-theme] .hero-capabilities span { background: transparent; border-color: transparent; box-shadow: none; }
+html[data-travel-theme] .hero-capabilities svg { color: var(--travel-muted); }
+html[data-travel-theme] .react-workspace-shell svg:not(.map-overlay):not(.lottie-canvas svg) { stroke-width: 1.8; }
+
+/* The prompt is the raised surface; supporting groups stay visually open. */
+html[data-travel-theme] .react-empty-stage .query-input-wrap {
+  border-color: var(--border-soft); border-radius: 16px; background: var(--travel-surface); box-shadow: var(--shadow-input);
+}
+html[data-travel-theme] .query-content textarea { background: transparent; border-color: transparent; font-weight: 400; font-size: 16px; }
+html[data-travel-theme] .query-content label { color: var(--text-secondary); font-size: 13px; font-weight: 500; }
+html[data-travel-theme] .query-helper { color: var(--travel-muted); border-color: var(--border-soft); }
+html[data-travel-theme] .quick-param-grid { border-color: var(--border-soft); border-radius: var(--radius-lg); background: var(--bg-panel); box-shadow: none; }
+html[data-travel-theme] .quick-param-grid button { border-color: transparent; box-shadow: none; }
+html[data-travel-theme] .quick-param-grid button + button { border-left-color: var(--border-soft); }
+html[data-travel-theme] .quick-param-grid button :is(strong,small) { font-weight: 400; }
+html[data-travel-theme] .quick-param-grid button strong { font-size: 14px; }
+html[data-travel-theme] .quick-param-grid button small { font-size: 11px; }
+html[data-travel-theme] .quick-param-grid button > i { border-radius: var(--radius-sm); color: #5470d8; background: #eaf1ff; }
+html[data-travel-theme] .quick-param-grid button:nth-child(2) > i { color: #7964c8; background: #f0ebff; }
+html[data-travel-theme] .quick-param-grid button:nth-child(3) > i { color: #57926b; background: #e9f6ee; }
+html[data-travel-theme] .quick-param-grid button:nth-child(4) > i { color: #b47a3b; background: #fff2df; }
+html[data-travel-theme] .quick-param-grid button:last-child > i { color: var(--travel-muted); background: var(--bg-muted); }
+html[data-travel-theme] .quick-param-grid button:is(:hover,.text-detected,.active) { background: var(--bg-muted); border-color: var(--border-soft); box-shadow: none; }
+html[data-travel-theme] .quick-param-grid button.text-detected strong { color: var(--travel-brand-strong); animation: none; }
+html[data-travel-theme] .quick-param-grid button.text-detected > i { color: #5470d8; background: #eaf1ff; }
+html[data-travel-theme] .quick-param-grid button.text-detected:nth-child(2) > i { color: #7964c8; background: #f0ebff; }
+html[data-travel-theme] .quick-param-grid button.text-detected:nth-child(3) > i { color: #57926b; background: #e9f6ee; }
+html[data-travel-theme] .quick-param-grid button.text-detected:nth-child(4) > i { color: #b47a3b; background: #fff2df; }
+html[data-travel-theme] .quick-param-grid .more-params.active { border-color: var(--border-soft); background: var(--bg-muted); box-shadow: none; }
+html[data-travel-theme] .quick-param-grid .more-params.active > i { color: var(--travel-brand-strong); background: var(--travel-brand-soft); }
+html[data-travel-theme] .concept-examples { border-color: transparent; border-radius: 0; background: transparent; }
+html[data-travel-theme] .concept-examples button { border-color: var(--border-soft); border-radius: 0; background: transparent; box-shadow: none; }
+html[data-travel-theme] .concept-examples button:hover { border-color: var(--border-soft); background: var(--bg-muted); transform: none; }
+html[data-travel-theme] .concept-examples button b { grid-column: 2; grid-row: 1; font-weight: 500; }
+html[data-travel-theme] .concept-examples button small { grid-column: 2; grid-row: 2; }
+html[data-travel-theme] .concept-examples .example-art { border-radius: var(--radius-sm); }
+html[data-travel-theme] .concept-examples button > i { border-radius: var(--radius-sm); color: var(--travel-muted); background: transparent; }
+html[data-travel-theme] .generation-disclaimer { font-size: 12px; }
+
+/* Preserve navigation dimensions and collapse behavior, soften its materials. */
+html[data-travel-theme] .travel-sidebar.react-sidebar { background: color-mix(in srgb,var(--travel-sidebar-bg) 72%,var(--travel-canvas)); border-color: var(--border-soft); }
+html[data-travel-theme] .sidebar-search { background: color-mix(in srgb,var(--travel-sidebar-surface) 72%,transparent); border-color: var(--border-soft); border-radius: var(--radius-md); }
+html[data-travel-theme] .history-item { border-radius: var(--radius-sm); }
+html[data-travel-theme] .history-item:hover { background: var(--travel-sidebar-surface); }
+html[data-travel-theme] .history-item.active { background: var(--travel-sidebar-active); box-shadow: none; }
+html[data-travel-theme] .history-item.active b { color: var(--travel-brand-strong); }
+html[data-travel-theme] .history-item.active > i { box-shadow: none; }
+html[data-travel-theme] .sidebar-empty { border-color: transparent; }
+html[data-travel-theme] .sidebar-empty b { color: var(--travel-sidebar-text); font-weight: 500; }
+html[data-travel-theme] .sidebar-empty span { font-size: 12px; }
+html[data-travel-theme] .sidebar-brand .travel-logo-mark { background: var(--travel-brand-soft); color: var(--travel-brand); box-shadow: none; }
+
+/* Workflow panels have one raised parent, not a stack of nested white cards. */
+html[data-travel-theme] :is(.agent-stage-panel,.validation-stage-react.panel,.ready-grid > .panel,.trip-budget-panel) {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-lg); background: var(--bg-panel); box-shadow: var(--shadow-card);
+}
+html[data-travel-theme] :is(.requirement-summary-grid article,.ai-understanding,.timeline-day,.weather-forecast-row article,.ready-quality-strip,.validation-crowd,.candidate-metrics span,.execution-grid article) {
+  background: var(--bg-muted); border-color: var(--border-soft); box-shadow: none; border-radius: var(--radius-md);
+}
+html[data-travel-theme] :is(.requirement-summary-grid,.trip-health,.budget-summary-grid,.plan-comparison,.execution-mode) { background: transparent; border-color: var(--border-soft); box-shadow: none; }
+html[data-travel-theme] :is(.plan-comparison > div,.budget-category-list article,.daily-cost-list > span,.planning-record,.node-change-list section) { background: transparent; border-color: var(--border-soft); box-shadow: none; }
+html[data-travel-theme] .requirement-review::before { background: none; }
+html[data-travel-theme] .react-validation-layout .validation-candidate-grid > button { border-radius: var(--radius-lg); background: var(--bg-panel); box-shadow: none; }
+html[data-travel-theme] .react-validation-layout .validation-candidate-grid > button.active { border-color: color-mix(in srgb,var(--travel-brand) 28%,transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--travel-brand) 10%,transparent); }
+html[data-travel-theme] .react-workspace-shell :is(.ready-trip-header h1,.agent-stage-head h2,.validation-hero h2) { font-weight: 600; letter-spacing: -.02em; }
+html[data-travel-theme] :is(.budget-summary-grid strong,.budget-category-list strong,.health-metric strong,.trip-budget-panel h2) { color: var(--text-primary); }
+html[data-travel-theme] .spot-card { border-radius: 12px; border-color: var(--border-soft); background: var(--bg-panel); box-shadow: none; }
+html[data-travel-theme] .spot-card:hover { transform: translateY(-1px); box-shadow: var(--shadow-card); }
+html[data-travel-theme] .persistent-composer.react-composer { border-color: var(--border-soft); border-radius: 16px; background: var(--travel-surface); box-shadow: var(--shadow-input); }
+html[data-travel-theme] .react-stage-progress li.active i { box-shadow: 0 0 0 3px color-mix(in srgb,var(--travel-brand) 7%,transparent); }

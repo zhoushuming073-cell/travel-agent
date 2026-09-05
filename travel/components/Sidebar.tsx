@@ -85,7 +85,7 @@ export function Sidebar({ workspaces, activeId, collapsed, mobileOpen, onToggle,
     <aside className={`travel-sidebar react-sidebar${collapsed && !mobileOpen ? " is-collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`} aria-label="旅行工作区导航">
       <a className="brand sidebar-brand" href="/travel/" aria-label="智能旅游助手首页">
         <span className="brand-mark travel-logo-mark"><LottieMotion src={MOTION.paperPlane} className="sidebar-plane-motion" label="智能旅游助手" loop={false} fallback={<Icon name="send"/>}/></span>
-        <span className="sidebar-label"><b>智能旅游助手</b><small>AI TRAVEL ASSISTANT</small></span>
+        <span className="sidebar-label"><b>智能旅游助手</b><small>Smart Travel</small></span>
       </a>
       <button className="sidebar-collapse" onClick={onToggle} type="button" aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"} title={collapsed ? "展开侧边栏" : "收起侧边栏"}><Icon name={collapsed ? "chevronRight" : "chevronLeft"}/></button>
       <button className="sidebar-new-trip" onClick={createTrip} type="button" title={collapsed ? "新建旅行" : undefined}><Icon name="plus"/><span className="sidebar-label">新建旅行</span></button>

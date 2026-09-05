@@ -25,3 +25,5 @@
 @import "./styles/themes/travel-theme-palettes.css";
 @import "./styles/themes/travel-theme-adapter.css";
 @import "./styles/themes/theme-picker.css";
+@import "./styles/themes/travel-surfaces.css";
+@import "./styles/themes/travel-controls.css";

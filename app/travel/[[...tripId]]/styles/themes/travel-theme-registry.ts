@@ -14,7 +14,7 @@ export const TRAVEL_THEME_IDS = [
 export type TravelThemeId = (typeof TRAVEL_THEME_IDS)[number];
 
 export const TRAVEL_THEMES = [
-  { id: "arctic-blue", name: "Arctic Blue", nameZh: "极地雾蓝", description: "清透的雾蓝科技感，适合作为默认主题。", preview: { canvas: "#F6F8FC", sidebar: "#EAF1F8", surface: "#FFFFFF", brand: "#4E7DFF", accent: "#4E7DFF", text: "#182235" } },
+  { id: "arctic-blue", name: "Arctic Blue", nameZh: "极地雾蓝", description: "中性雾白与克制的旅行蓝，清晰、轻盈的默认主题。", preview: { canvas: "#F7F7F8", sidebar: "#F1F2F5", surface: "#FFFFFF", brand: "#5768EB", accent: "#5768EB", text: "#242630" } },
   { id: "ivory-coral", name: "Ivory Coral", nameZh: "象牙白 × 珊瑚橙", description: "温暖、有生活方式感，适合旅行内容与灵感场景。", preview: { canvas: "#FBF8F3", sidebar: "#F4ECE4", surface: "#FFFDF9", brand: "#EF7D64", accent: "#EF7D64", text: "#302A27" } },
   { id: "lavender-indigo", name: "Lavender Indigo", nameZh: "薰衣草紫 × 靛青", description: "柔和 AI 感，适合突出智能体与规划能力。", preview: { canvas: "#F7F5FB", sidebar: "#EEEAF7", surface: "#FFFFFF", brand: "#6C5CE7", accent: "#6C5CE7", text: "#262038" } },
   { id: "aqua-sand", name: "Aqua Sand", nameZh: "湖水青 × 沙砾白", description: "轻旅行感最强，像精品旅行网站而不是后台系统。", preview: { canvas: "#F8F7F2", sidebar: "#EDF4F4", surface: "#FFFFFF", brand: "#3C9FAF", accent: "#3C9FAF", text: "#24363A" } },

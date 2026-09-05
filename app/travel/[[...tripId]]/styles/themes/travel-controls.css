@@ -1,0 +1,80 @@
+/* Shared interaction materials. No changes to actions, routing or data. */
+html[data-travel-theme] .react-workspace-shell :is(button,a,input,textarea,select) {
+  transition: background-color 180ms ease,border-color 180ms ease,box-shadow 180ms ease,color 180ms ease,transform 180ms ease;
+}
+html[data-travel-theme] :is(.primary-button,.sidebar-new-trip,.react-validation-layout .compiler-card > button,.persistent-composer .secondary-button) {
+  border: 1px solid transparent; border-radius: var(--radius-md); color: #fff; background: var(--travel-brand);
+  box-shadow: 0 2px 4px color-mix(in srgb,var(--travel-brand) 12%,transparent),0 7px 18px color-mix(in srgb,var(--travel-brand) 10%,transparent);
+  font-weight: 500;
+}
+html[data-travel-theme] .react-empty-stage .primary-button { border-radius: var(--radius-md); }
+html[data-travel-theme] :is(.primary-button,.sidebar-new-trip,.react-validation-layout .compiler-card > button,.persistent-composer .secondary-button):hover:not(:disabled) {
+  background: var(--travel-brand-strong); transform: translateY(-1px);
+  box-shadow: 0 3px 6px color-mix(in srgb,var(--travel-brand) 14%,transparent),0 10px 24px color-mix(in srgb,var(--travel-brand) 12%,transparent);
+}
+html[data-travel-theme] :is(.primary-button,.sidebar-new-trip,.react-validation-layout .compiler-card > button,.persistent-composer .secondary-button):active:not(:disabled) { transform: translateY(0); }
+html[data-travel-theme] .primary-button:disabled { color: var(--travel-muted); background: var(--travel-surface-soft); box-shadow: none; }
+html[data-travel-theme] :is(.workspace-actions > button,.secondary-button,.task-cancel,.parameter-panel-close,.ready-trip-actions button,.variant-compare-button,.map-actions button,.execution-mode footer button) {
+  border-color: var(--border-soft); border-radius: var(--radius-md); color: var(--text-secondary); background: color-mix(in srgb,var(--travel-surface) 72%,transparent); font-weight: 500;
+}
+html[data-travel-theme] :is(.workspace-actions > button,.secondary-button,.parameter-panel-close,.variant-compare-button,.map-actions button,.execution-mode footer button):hover:not(:disabled) {
+  border-color: color-mix(in srgb,var(--travel-brand) 15%,transparent); background: var(--travel-surface);
+}
+html[data-travel-theme] .task-cancel { color: var(--travel-danger); }
+html[data-travel-theme] .persistent-composer .secondary-button { color: #fff; background: var(--travel-brand); }
+html[data-travel-theme] .persistent-composer .secondary-button:hover:not(:disabled) { color: #fff; background: var(--travel-brand-strong); }
+html[data-travel-theme] :is(.sidebar-collapse,.dialog-close,.theme-picker-close,.mobile-menu-button,.map-zoom button,.history-delete,.counter-control button) { border-radius: var(--radius-sm); box-shadow: none; }
+html[data-travel-theme] .counter-control button { color: var(--text-secondary); background: var(--travel-surface); }
+html[data-travel-theme] .counter-control button:hover { color: var(--travel-brand-strong); background: var(--travel-brand-soft); }
+html[data-travel-theme] .parameter-field :is(.select-wrap,.counter-control,input,select,.segmented),
+html[data-travel-theme] .reasoning-toggle > button,
+html[data-travel-theme] .agent-input-row input {
+  border-color: var(--border-soft); border-radius: var(--radius-md); color: var(--text-primary); background: var(--bg-muted); box-shadow: none;
+}
+html[data-travel-theme] .reasoning-toggle > button.active { border-color: color-mix(in srgb,var(--travel-brand) 25%,transparent); background: var(--travel-brand-soft); }
+html[data-travel-theme] .parameter-field .select-wrap :is(input,select) { background: transparent; }
+html[data-travel-theme] .parameter-field :is(.chip,.segmented button) { border-radius: var(--radius-sm); font-weight: 400; }
+html[data-travel-theme] .parameter-field > span { color: var(--text-secondary); font-weight: 500; }
+html[data-travel-theme] .parameter-field .chip.active,
+html[data-travel-theme] .parameter-field .segmented button.active { border-color: color-mix(in srgb,var(--travel-brand) 20%,transparent); }
+html[data-travel-theme] .react-workspace-shell :is(input,textarea,select)::placeholder { color: var(--travel-muted); opacity: 1; }
+html[data-travel-theme] .react-workspace-shell :is(input,textarea,select):hover { background-color: color-mix(in srgb,var(--travel-surface) 70%,transparent); }
+html[data-travel-theme] .react-workspace-shell :is(input,textarea,select):focus-visible {
+  outline: 0; border-color: color-mix(in srgb,var(--travel-brand) 35%,transparent); background-color: var(--travel-surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb,var(--travel-brand) 8%,transparent);
+}
+html[data-travel-theme] .query-input-wrap:focus-within { border-color: color-mix(in srgb,var(--travel-brand) 35%,transparent); }
+html[data-travel-theme] .query-content textarea:focus-visible { box-shadow: none; border-color: transparent; }
+html[data-travel-theme] .react-workspace-shell :is(button,a):focus-visible { outline: 2px solid color-mix(in srgb,var(--travel-focus) 55%,transparent); outline-offset: 3px; }
+html[data-travel-theme] .inline-parameter-panel.panel { padding: 20px; border: 1px solid var(--border-soft); border-radius: var(--radius-lg); background: var(--bg-panel); box-shadow: var(--shadow-card); }
+html[data-travel-theme] .inline-parameter-panel > header { padding-bottom: 16px; }
+html[data-travel-theme] .parameter-fields-grid { gap: 16px; margin-top: 16px; }
+
+html[data-travel-theme] :is(.theme-picker-popover,.change-preview-card,.composer-history,.history-delete-confirm) {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-lg); background: color-mix(in srgb,var(--travel-surface) 96%,var(--travel-canvas)); box-shadow: var(--shadow-popover);
+}
+html[data-travel-theme] .theme-picker-popover { max-height: calc(100dvh - 32px); overflow-y: auto; }
+html[data-travel-theme] .theme-picker-popover :is(small,.settings-extension-note) { font-size: 12px; }
+html[data-travel-theme] .theme-option { background: transparent; border-color: transparent; }
+html[data-travel-theme] .theme-option b { font-weight: 500; font-size: 12px; }
+html[data-travel-theme] .theme-option.active { border-color: color-mix(in srgb,var(--travel-brand) 20%,transparent); background: var(--travel-brand-soft); box-shadow: none; }
+html[data-travel-theme] .theme-option:hover { border-color: var(--border-soft); background: var(--bg-muted); }
+html[data-travel-theme] :is(.change-preview-overlay,.mobile-sidebar-backdrop) { background: rgb(15 23 42 / .16); backdrop-filter: blur(2px); }
+html[data-travel-theme] .change-preview-card { padding: 20px; max-height: calc(100dvh - 40px); }
+html[data-travel-theme] .change-preview-card :is(.dialog-head p,.change-preview-summary span,.node-change-list h3,.node-change-list p small,.change-scope-note span) { color: var(--text-secondary); font-size: 12px; }
+html[data-travel-theme] .change-preview-summary div { background: var(--bg-muted); border-radius: var(--radius-md); }
+html[data-travel-theme] .change-preview-summary b { color: var(--text-primary); font-size: 14px; }
+html[data-travel-theme] .node-change-list section { border-width: 0 0 1px; border-color: var(--border-soft); border-radius: 0; }
+html[data-travel-theme] .node-change-list p { border-color: transparent; }
+html[data-travel-theme] .node-change-list p span { font-size: 14px; }
+html[data-travel-theme] .change-scope-note { color: var(--text-secondary); background: var(--bg-muted); }
+html[data-travel-theme] :is(.state-label,.workspace-state,.budget-status,.cost-nature) { border-radius: var(--radius-sm); font-weight: 500; }
+html[data-travel-theme] :is(.requirement-summary-grid article,.spot-image-loading::after,.skeleton-card) { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-travel-theme] .react-workspace-shell :is(button,a,input,textarea,select) { transition: none; }
+}
+@media (max-width: 620px) {
+  html[data-travel-theme] .inline-parameter-panel.panel { padding: 16px; }
+  html[data-travel-theme] .react-empty-stage .query-helper { max-width: calc(100% - 132px); font-size: 11px; }
+  html[data-travel-theme] .react-empty-stage .query-content textarea { font-size: 16px; }
+}
