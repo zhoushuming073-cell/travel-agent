@@ -49,7 +49,7 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 - `worker/providers/provider-client.ts`：模型与数据 provider 的传输、超时、有限重试、缓存和健康遥测。
 - `travel/hooks/usePlanningLifecycle.ts` 与 `travel/services/planningApi.ts`：浏览器驱动 `/api/plan/advance`，并负责恢复、重试和真实服务端取消。
 
-V4 Flash 用于需求提取和解释；V4 Pro 优先用于研究、增强、规划、critic 和修复。不要重新引入已经停用的 GLM 路由。
+DeepSeek V4 Flash 只用于需求提取和用户画像；V4 Pro 用于研究、增强、规划、critic、修复和解释。生产环境启用严格模型路由，不允许不同职责静默串用模型。不要重新引入已经停用的 GLM 路由。
 
 ### 算法与可靠性规则
 

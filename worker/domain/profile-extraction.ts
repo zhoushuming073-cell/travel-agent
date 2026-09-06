@@ -126,6 +126,7 @@ export function deterministicProfileHints(textValue: unknown, now = new Date()):
 
   const required: string[] = [];
   for (const match of text.matchAll(/(?:一定|必须|必选|务必|明确|想|希望)(?:能|要)?去\s*([^，,。；;\n]+)/g)) required.push(...splitAttractions(match[1]));
+  for (const match of text.matchAll(/(?:必去|必选|务必安排|必须安排|一定安排)(?:地点|景点|项目)?\s*[：:]\s*([^，,。；;\n]+)/g)) required.push(...splitAttractions(match[1]));
   if (required.length) source("requiredAttractions", [...new Set(required)].filter((name) => name !== result.city));
 
   const start = text.match(/(?:上午|每天)?\s*(\d{1,2})\s*点(?:左右)?开始/);
@@ -139,7 +140,7 @@ export function deterministicProfileHints(textValue: unknown, now = new Date()):
   if (lodging) source("lodgingArea", lodging[1].trim());
   const excluded = text.match(/(?:不想去|不要去|明确排除|排除)\s*([^，,。；;\n]+)/);
   if (excluded) source("excludedAttractions", splitAttractions(excluded[1]));
-  const preferenceTerms = ["自然", "摄影", "拍照", "人文", "历史", "文化", "美食", "夜景", "亲子", "建筑", "博物馆", "徒步"];
+  const preferenceTerms = ["现代城市", "高楼密集区", "特色交通", "科技感", "商业娱乐", "城市体验", "自然", "摄影", "拍照", "人文", "历史", "文化", "美食", "夜景", "亲子", "建筑", "博物馆", "徒步"];
   const preferences = preferenceTerms.filter((term) => text.includes(term));
   if (preferences.length) source("preferences", [...new Set(preferences.map((term) => term === "拍照" ? "摄影" : term))]);
   if (/拥挤|人流|避峰|错峰/.test(text)) source("crowdSensitivity", "高");
@@ -164,11 +165,18 @@ export function mergeTravelProfile(input: Record<string, unknown>, extracted: Re
   const nightsRaw = pickTextFirst("nights", days - 1);
   const partySize = clamp(pickTextFirst("partySize", 2), 1, 20, 2);
   const budgetRaw = Number(pickTextFirst("budget", 0));
-  const textPreferences = [...new Set([...list(extracted.preferences), ...list(hints.preferences)])];
-  const preferences = textPreferences.length ? textPreferences : list(input.preferences);
+  const avoid = [...new Set(list(extracted.avoid))].slice(0, 8);
+  const textPreferences = [...new Set([...list(extracted.preferences), ...list(hints.preferences)])]
+    .filter((preference) => !avoid.some((avoided) => avoided.includes(preference) || preference.includes(avoided)));
+  const preferences = textPreferences.length ? textPreferences : list(input.preferences)
+    .filter((preference) => !avoid.some((avoided) => avoided.includes(preference) || preference.includes(avoided)));
   sources.preferences = textPreferences.length ? (hints.preferences ? "text-rule" : "ai-text") : input.preferences ? "parameter" : "default";
-  const requiredAttractions = [...new Set([...list(extracted.requiredAttractions), ...list(hints.requiredAttractions)])].slice(0, 12);
-  sources.requiredAttractions = hints.requiredAttractions ? "text-rule" : requiredAttractions.length ? "ai-text" : "default";
+  // A model may promote examples introduced by “重点考虑/例如” into hard
+  // requirements. Only deterministic explicit-intent phrases and structured
+  // parameters may create required attractions; AI output cannot harden a
+  // preference by itself.
+  const requiredAttractions = [...new Set([...list(input.requiredAttractions), ...list(hints.requiredAttractions)])].slice(0, 12);
+  sources.requiredAttractions = hints.requiredAttractions ? "text-rule" : input.requiredAttractions ? "parameter" : "default";
   const unknownFields = [...new Set(list(extracted.unknownFields))].filter((field) => !(field in hints));
   if (!city && !unknownFields.includes("city")) unknownFields.push("city");
   if (!startDate && !unknownFields.includes("startDate")) unknownFields.push("startDate");
@@ -176,7 +184,7 @@ export function mergeTravelProfile(input: Record<string, unknown>, extracted: Re
     city: city.replace(/市$/, ""), startDate, days, nights: clamp(nightsRaw, 0, 7, Math.max(0, days - 1)), partySize,
     budget: Number.isFinite(budgetRaw) && budgetRaw > 0 ? clamp(budgetRaw, 100, 200000, 0) : 0,
     style: explicit(pickTextFirst("style")), preferences,
-    avoid: [...new Set(list(extracted.avoid))].slice(0, 8), requiredAttractions,
+    avoid, requiredAttractions,
     pace: clean(pickTextFirst("pace", "medium")) || "medium",
     transport: clean(pickTextFirst("transport", "公共交通优先")) || "公共交通优先",
     deepReasoning: input.deepReasoning !== false,

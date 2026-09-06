@@ -11,26 +11,27 @@ export type AiFailureCode =
   | "CONTENT_INVALID"
   | "UNKNOWN";
 
-export const YUANJING_CHAT_COMPLETIONS =
-  "https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions";
+export const DEEPSEEK_CHAT_COMPLETIONS = "https://api.deepseek.com/chat/completions";
+// Kept as a compatibility export for existing imports. New deployments use the
+// official DeepSeek endpoint above.
+export const YUANJING_CHAT_COMPLETIONS = DEEPSEEK_CHAT_COMPLETIONS;
 
-// Yuanjing currently reports QPM throttling when planning calls are made in a
-// short burst. Keep the circuit slightly longer than one minute so the durable
-// stage retry performs a real second model call instead of immediately falling
-// into deterministic recovery while the local circuit is still open.
+// Keep provider rate-limit circuits slightly longer than one minute so the
+// durable stage retry performs a real second model call instead of immediately
+// falling into deterministic recovery while the local circuit is still open.
 export const AI_RATE_LIMIT_COOLDOWN_MS = 65_000;
 
 const DEFAULT_MODELS: Record<AiPurpose, string[]> = {
   extract: ["deepseek-v4-flash"],
-  // The competition document fixes the Pro model id below. Flash remains an
+  // The official API documents the Pro model id below. Flash remains an
   // explicit compatibility fallback because model access is granted per key:
   // a syntactically valid Pro id can still return 404 for an unentitled key.
-  research: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
-  enrich: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
-  planner: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
-  critic: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
-  repair: ["deepseek-v4-pro-0813", "deepseek-v4-flash"],
-  explain: ["deepseek-v4-flash", "deepseek-v4-pro-0813"],
+  research: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  enrich: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  planner: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  critic: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  repair: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  explain: ["deepseek-v4-pro", "deepseek-v4-flash"],
 };
 
 const modelCircuit = new Map<string, { code: AiFailureCode; reason: string; until: number }>();
@@ -44,7 +45,15 @@ export function aiApiKey(env: Record<string, unknown>) {
 }
 
 export function aiEndpoint(env: Record<string, unknown>) {
-  return clean(env.AI_API_BASE_URL) || YUANJING_CHAT_COMPLETIONS;
+  return clean(env.AI_API_BASE_URL) || DEEPSEEK_CHAT_COMPLETIONS;
+}
+
+export function aiProviderLabel(endpoint: string) {
+  let hostname = "";
+  try { hostname = new URL(endpoint).hostname; } catch { hostname = ""; }
+  if (hostname === "api.deepseek.com") return "DeepSeek 官方 API";
+  if (/ai-yuanjing\.com$/i.test(hostname)) return "联通元景";
+  return hostname || "兼容模型服务";
 }
 
 export function aiModelCandidates(env: Record<string, unknown>, purpose: AiPurpose) {
@@ -59,7 +68,10 @@ export function aiModelCandidates(env: Record<string, unknown>, purpose: AiPurpo
   };
   const sharedFallbacks = clean(env.AI_COMPATIBLE_MODEL_FALLBACKS).split(/[,，;\s]+/).filter(Boolean);
   const skipped = new Set(clean(env.AI_SKIP_MODELS).split(/[,，;\s]+/).filter(Boolean));
-  return [...new Set([...configured[purpose].map(clean).filter(Boolean), ...sharedFallbacks, ...DEFAULT_MODELS[purpose]])]
+  const explicit = configured[purpose].map(clean).filter(Boolean);
+  const strict = /^(?:1|true|yes)$/i.test(clean(env.AI_STRICT_MODEL_ROUTING));
+  const candidates = strict && explicit.length ? explicit : [...explicit, ...sharedFallbacks, ...DEFAULT_MODELS[purpose]];
+  return [...new Set(candidates)]
     .filter((model) => !/^glm(?:-|$)/i.test(model) && !skipped.has(model));
 }
 

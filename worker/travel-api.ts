@@ -20,6 +20,7 @@ import {
   aiEndpoint,
   aiModelCandidates,
   aiPrimaryModel,
+  aiProviderLabel,
   AI_RATE_LIMIT_COOLDOWN_MS,
   classifyAiFailure,
   closeModelCircuit,
@@ -148,6 +149,7 @@ const COMMON_CHINA_CITIES = [
   ["深圳", 22.5431, 114.0579], ["杭州", 30.2741, 120.1551], ["成都", 30.5728, 104.0668],
   ["重庆", 29.563, 106.5516], ["西安", 34.3416, 108.9398], ["南京", 32.0603, 118.7969],
   ["苏州", 31.2989, 120.5853], ["厦门", 24.4798, 118.0894], ["昆明", 25.0389, 102.7183],
+  ["香港", 22.3193, 114.1694], ["澳门", 22.1987, 113.5439],
 ] as const;
 const unsplashMemory = new Map<string, { expiresAt: number; value: any }>();
 const intelligenceMemory = new Map<string, { expiresAt: number; value: any }>();
@@ -595,7 +597,8 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
       const cached = await persistentCacheGet("research-search-v1", cacheKey) as any;
       if (cached?.results) return cached;
       const execution = await orchestrator.execute(request, 2);
-      await persistentCachePut("research-search-v1", cacheKey, execution, FACT_FRESHNESS_POLICIES[request.questionType].searchCacheTtlMs);
+      const searchPolicy = FACT_FRESHNESS_POLICIES[request.questionType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
+      await persistentCachePut("research-search-v1", cacheKey, execution, searchPolicy.searchCacheTtlMs);
       return execution;
     });
     for (const settled of executions) if (settled.status === "fulfilled") searchExecutions.push(settled.value);
@@ -606,7 +609,8 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
       if (cached?.status) return cached;
       const page = await orchestrator.fetchPage(url);
       const related = roundResults.find((result: any) => result.url === url);
-      const ttl = related ? FACT_FRESHNESS_POLICIES[related.questionType].pageCacheTtlMs : 6 * 60 * 60 * 1000;
+      const pagePolicy = related ? FACT_FRESHNESS_POLICIES[related.questionType] : null;
+      const ttl = pagePolicy?.pageCacheTtlMs || 6 * 60 * 60 * 1000;
       await persistentCachePut("research-page-v1", url, page, ttl);
       return page;
     });
@@ -640,9 +644,10 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
       values.push(row);
       grouped.set(key, values);
     }
-    facts = [...grouped.entries()].map(([key, rows]) => {
-      const [targetId, factType] = key.split(":");
-      return synthesizeFact(targetId, rows[0]?.targetName || targetId, factType as ResearchQuestionType, rows);
+    facts = [...grouped.values()].map((rows) => {
+      const targetId = cleanText(rows[0]?.targetId);
+      const factType = rows[0]?.questionType as ResearchQuestionType;
+      return synthesizeFact(targetId, rows[0]?.targetName || targetId, factType, rows);
     });
     gaps = applyFactsToGaps(gaps, facts);
     const afterResolved = gaps.filter((gap) => gap.currentStatus !== "unknown" && gap.currentStatus !== "conflicting").reduce((sum, gap) => sum + gap.decisionImpact, 0);
@@ -665,7 +670,10 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
     facts, gaps, metrics, fetchedAt: new Date().toISOString(), elapsedMs: Date.now() - startedAt,
     dataPolicy: "网页均作为不可信外部证据处理；snippet不能验证关键事实；冲突保持conflicting；无官方实时客流时只生成预测信号。",
   };
-  for (const fact of facts) await persistentCachePut("research-fact-v1", `${profile.city}|${profile.startDate}|${fact.targetId}|${fact.factType}`, fact, FACT_FRESHNESS_POLICIES[fact.factType].factCacheTtlMs);
+  for (const fact of facts) {
+    const policy = FACT_FRESHNESS_POLICIES[fact.factType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
+    await persistentCachePut("research-fact-v1", `${profile.city}|${profile.startDate}|${fact.targetId}|${fact.factType}`, fact, policy.factCacheTtlMs);
+  }
   return report;
 }
 
@@ -734,10 +742,11 @@ async function aiRequest(env: any, options: {
   webTools?: { city: string } | null;
 }) {
   const key = aiApiKey(env);
-  if (!key) throw new Error("部署环境尚未配置联通元景 API Key");
+  if (!key) throw new Error("部署环境尚未配置模型 API Key");
   const candidates = aiModelCandidates(env, options.purpose);
   const failures: string[] = [];
   const endpoint = aiEndpoint(env);
+  const provider = aiProviderLabel(endpoint);
   // Share a quota across all roles/models using the same account, across Worker isolates.
   const quotaScope = `${endpoint}|${key}`;
   for (const model of candidates) {
@@ -781,14 +790,14 @@ async function aiRequest(env: any, options: {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
           body: JSON.stringify(payload),
-        }, options.requestTimeoutMs || (longRunning ? 120000 : 60000), `联通元景 ${model}`), {
+        }, options.requestTimeoutMs || (longRunning ? 120000 : 60000), `${provider} ${model}`), {
           acquire: () => acquireAiRequestSlot(quotaScope, aiRequestInterval(env)),
           block: (milliseconds) => blockAiRequests(quotaScope, milliseconds),
           sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
           now: Date.now, assertActive: env.AI_ASSERT_ACTIVE,
         });
         const message = result?.choices?.[0]?.message;
-        if (!message) throw new Error(`联通元景 ${model} 没有返回消息`);
+        if (!message) throw new Error(`${provider} ${model} 没有返回消息`);
         const content = cleanText(message.content);
         const reasoningContent = cleanText(message.reasoning_content);
         const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
@@ -800,7 +809,7 @@ async function aiRequest(env: any, options: {
           closeModelCircuit(endpoint, model);
           return { content: "", reasoningContent, model: cleanText(result?.model, model), toolLog, attemptedModels: [...failures, model] };
         }
-        if (!calls.length) throw new Error(`联通元景 ${model} 没有返回内容`);
+        if (!calls.length) throw new Error(`${provider} ${model} 没有返回内容`);
         messages.push({ role: "assistant", content: message.content ?? "", reasoning_content: message.reasoning_content ?? "", tool_calls: message.tool_calls });
         for (const call of calls.slice(0, 3)) {
           let args: any = {};
@@ -828,7 +837,7 @@ async function aiRequest(env: any, options: {
       if (classified === "UNAUTHORIZED" || isAiRateLimited(error)) break;
     }
   }
-  throw new Error(`联通元景模型均不可用：${failures.join("；")}`);
+  throw new Error(`${provider} 模型均不可用：${failures.join("；")}`);
 }
 
 async function aiJson(env: any, options: Parameters<typeof aiRequest>[1]) {
@@ -2390,7 +2399,7 @@ const WORKFLOW_OBJECTIVES = [
 export function shouldRecoverPlannerImmediately(error: unknown) {
   const message = cleanText(error instanceof Error ? error.message : error);
   if (isAiRateLimited(error)) return false;
-  return /联通元景模型均不可用/.test(message)
+  return /模型均不可用/.test(message)
     && /\[(?:MODEL_NOT_FOUND|UNAUTHORIZED)\]/.test(message);
 }
 
@@ -2541,6 +2550,37 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       state.modelAudit.compilerIssues.push(...state.modelAudit.criticIssues.map((issue: any) => ({ ...issue, source: "ai-critic", severity: issue.severity === "hard" ? "warning" : issue.severity })));
     }
     if (stage === "audit_final") {
+      const structuralCodes = new Set(state.audit.hardIssues.map((issue: any) => cleanText(issue.code)));
+      if (structuralCodes.has("DUPLICATE_SPOT") || structuralCodes.has("VARIANTS_TOO_SIMILAR")) {
+        let removedDuplicates = 0;
+        for (const variant of state.draft.variants) {
+          const seen = new Set<string>();
+          for (const day of variant.days || []) {
+            day.activities = (day.activities || []).filter((activity: any) => {
+              const spotId = cleanText(activity.spotId);
+              if (!spotId) return true;
+              if (seen.has(spotId)) { removedDuplicates += 1; return false; }
+              seen.add(spotId);
+              return true;
+            });
+          }
+        }
+        state.audit = auditPlannerDraft(state.draft, effectiveKnowledge);
+        const rebuiltVariants: string[] = [];
+        if (state.audit.hardIssues.some((issue: any) => cleanText(issue.code) === "VARIANTS_TOO_SIMILAR")) {
+          for (let variantIndex = 1; variantIndex < state.draft.variants.length; variantIndex += 1) {
+            const previousVariantSpotIds = state.draft.variants.slice(0, variantIndex).flatMap((variant: any) => variant.days.flatMap((day: any) => day.activities.map((activity: any) => cleanText(activity.spotId)).filter(Boolean)));
+            const current = state.draft.variants[variantIndex];
+            state.draft.variants[variantIndex] = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, current, "两轮 AI 修复后方案差异仍不足，由多目标路线优化器执行确定性差异化", previousVariantSpotIds);
+            rebuiltVariants.push(cleanText(current.id));
+          }
+        }
+        enforceRequiredCoverage(state.draft, effectiveKnowledge);
+        bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
+        legalizePlannerTimelines(state.draft, effectiveKnowledge);
+        state.audit = auditPlannerDraft(state.draft, effectiveKnowledge);
+        state.modelAudit.compilerIssues.push({ code: "FINAL_STRUCTURAL_REPAIR", severity: "warning", message: `最终编译器移除 ${removedDuplicates} 个重复景点节点${rebuiltVariants.length ? `，并对 ${rebuiltVariants.join("、")} 执行确定性差异化` : ""}；未放宽重复与方案差异硬约束` });
+      }
       if (state.audit.hardIssues.some((issue: any) => ["MEAL_MISSING", "LUNCH_MISSING", "DINNER_MISSING", "TIME_RANGE", "ACTIVITY_OVERLAP", "TRANSIT_GAP", "RETURN_TOO_LATE"].includes(cleanText(issue.code)))) {
         const safetyRepair = applyFinalTimelineSafetyRepair(state.draft, effectiveKnowledge);
         bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
@@ -2757,8 +2797,9 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
     if (stage === "parse_profile") {
       const input = job.payload;
       const profile = await extractProfile(input, env);
-      if (profile.extractionFallbackReason) await recordJobProviderAttempt(jobId, stage, { provider: "联通元景 V4 Flash", capability: "需求理解", status: /429|频繁|额度/.test(profile.extractionFallbackReason) ? "rate_limited" : "degraded", detail: `${profile.extractionFallbackReason}；已使用文本规则与明确参数继续`, resultCount: 1 });
-      else await recordJobProviderAttempt(jobId, stage, { provider: profile.extractionModel || "联通元景 V4 Flash", capability: "需求理解", status: "success", detail: profile.extractionReuseReason || "正式用户画像已生成", resultCount: 1 });
+      const modelProvider = aiProviderLabel(aiEndpoint(env));
+      if (profile.extractionFallbackReason) await recordJobProviderAttempt(jobId, stage, { provider: `${modelProvider} V4 Flash`, capability: "需求理解", status: /429|频繁|额度/.test(profile.extractionFallbackReason) ? "rate_limited" : "degraded", detail: `${profile.extractionFallbackReason}；已使用文本规则与明确参数继续`, resultCount: 1 });
+      else await recordJobProviderAttempt(jobId, stage, { provider: profile.extractionModel ? `${modelProvider}：${profile.extractionModel}` : `${modelProvider} V4 Flash`, capability: "需求理解", status: "success", detail: profile.extractionReuseReason || "正式用户画像已生成", resultCount: 1 });
       if (profile.clarificationNeeded) {
         await updateTravelJob(jobId, { status: "needs_input", currentStep: stage, progress: { phase: "analysis", title: "需要补充信息", items: [profile.clarificationQuestion || "请明确主要目的地"], formSync: profile } });
         return { done: true, status: "needs_input" };
@@ -2899,7 +2940,8 @@ async function advancePlanningJob(jobId: string, env: any) {
     const deterministicFailure = /时间轴不可执行|最终审计检查点未通过|规划模型经两轮修复后仍有|确定性编译器拒绝|所有阶段已结束|检查点缺失/.test(message);
     const limit = deterministicFailure ? 1 : stage.startsWith("variant_") || stage.startsWith("repair_") || stage === "planner_memo" ? 2 : 3;
     if (stage === "parse_profile" || stage === "planner_memo" || stage.startsWith("variant_") || stage.startsWith("repair_")) {
-      await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? "联通元景需求理解模型" : "联通元景规划模型（自动兼容路由）", capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
+      const modelProvider = aiProviderLabel(aiEndpoint(env));
+      await recordJobProviderAttempt(jobId, stage, { provider: stage === "parse_profile" ? `${modelProvider}需求理解模型` : `${modelProvider}规划模型`, capability: stage === "parse_profile" ? "需求理解" : stage.startsWith("repair_") ? "约束修复" : "行程决策", status: /429|频繁|额度/.test(message) ? "rate_limited" : "failed", detail: message, resultCount: 0 });
     }
     await putTravelJobArtifact(jobId, attemptKey, { attempts, lastError: message, updatedAt: new Date().toISOString() });
     if (attempts >= limit) {
@@ -2946,7 +2988,9 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
         repairModel: aiPrimaryModel(env, "repair"),
       };
       const plannerCandidates = aiModelCandidates(env, "planner");
-      const serviceForModel = (model: string) => services.find((service: any) => service.provider === `联通元景 AI：${model}`);
+      const providerName = aiProviderLabel(aiEndpoint(env));
+      const servicePrefix = providerName === "联通元景" ? "联通元景 AI" : providerName;
+      const serviceForModel = (model: string) => services.find((service: any) => service.provider === `${servicePrefix}：${model}`);
       const primaryService: any = serviceForModel(purposeModels.plannerModel);
       const validatedModel = plannerCandidates.find((model) => Number(serviceForModel(model)?.successCount || 0) > 0) || null;
       const aiStatus = !aiApiKey(env)
@@ -2965,7 +3009,7 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       ai: {
         status: aiStatus,
         configured: Boolean(aiApiKey(env)),
-        provider: "联通元景",
+        provider: providerName,
         model: purposeModels.plannerModel,
         ...purposeModels,
         plannerCandidates,
@@ -3533,8 +3577,8 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
     research: research ? { status: research.status, model: research.model, modelStatus: research.modelStatus, budget: research.budget, metrics: research.metrics, facts: research.facts, skipped: research.skipped, sourceTierDistribution: research.metrics?.sourceTierDistribution, dataPolicy: research.dataPolicy, fetchedAt: research.fetchedAt } : { status: "not-run" },
     agentEvents: buildPlanningEvents(workspaceId, profile, activePlan),
     planner: {
-      type: "yuanjing-dual-model-constraint-solver",
-      provider: "联通元景",
+      type: "deepseek-dual-model-constraint-solver",
+      provider: aiProviderLabel(aiEndpoint(env)),
       extractionModel: profile.extractionModel || aiPrimaryModel(env, "extract"),
       researchModel: generated.modelAudit.researchModel,
       plannerModel: generated.modelAudit.plannerModel,

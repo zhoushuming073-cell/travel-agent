@@ -25,6 +25,10 @@ function providerNameFor(url: string, source: string): string {
   if (/bing\.com/.test(hostname)) return "Bing 新闻 RSS";
   if (/gdeltproject\.org/.test(hostname)) return "GDELT";
   if (/mcpmarket\.cn/.test(hostname)) return `MCPMarket：${source}`;
+  if (/api\.deepseek\.com/.test(hostname) || /DeepSeek 官方 API/i.test(source)) {
+    const model = source.match(/deepseek-[a-z0-9._-]+/i)?.[0];
+    return model ? `DeepSeek 官方 API：${model}` : "DeepSeek 官方 API";
+  }
   if (/元景|DeepSeek|联通/i.test(source)) {
     const model = source.match(/deepseek-[a-z0-9._-]+/i)?.[0];
     return model ? `联通元景 AI：${model}` : "联通元景 AI";
@@ -49,7 +53,7 @@ export async function fetchJson(url: string, init: RequestInit = {}, timeoutMs =
       // Model quota errors usually need a wider cooldown than an in-request
       // retry can provide. Let the durable stage runner handle those so one
       // user action cannot multiply into nine near-identical AI calls.
-      if (response.status === 429 && attempt < 2 && !/联通元景/.test(source)) {
+      if (response.status === 429 && attempt < 2 && !/(?:联通元景|DeepSeek 官方 API)/.test(source)) {
         const retryAfter = Number(response.headers.get("retry-after") || 0);
         await new Promise(resolve => setTimeout(resolve, retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : 900 * (attempt + 1)));
         continue;

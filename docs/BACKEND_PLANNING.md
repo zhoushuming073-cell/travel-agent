@@ -135,9 +135,9 @@ S = 0.25×实体匹配 + 0.20×相关性 + 0.15×来源适配
 
 模型输入包含画像、紧凑知识包、研究事实及未知项、当前目标、已有方案摘要和要求的 JSON 结构。每套必须返回全部日期。后端兼容 days/daysPlan/itinerary、activities/items 等容器，但不能把缺失日期认定为已生成。
 
-`aiJson` 先严格解析 JSON；语法失败最多再做一次只修语法/容器的模型调用，不允许新增事实。用途路由的模型名是候选配置，是否可调用仍取决于账号授权；不能把 UI 标题当实际返回模型。
+`aiJson` 先严格解析 JSON；语法失败最多再做一次只修语法/容器的模型调用，不允许新增事实。当前生产路由使用 DeepSeek 官方 API：需求提取与用户画像固定走 `deepseek-v4-flash`，研究、增强、规划、critic、修复和解释固定走 `deepseek-v4-pro`。`AI_STRICT_MODEL_ROUTING=true` 时不会跨职责静默回退；模型是否可调用仍取决于账号授权，不能把 UI 标题当实际返回模型。
 
-请求现在显式发送 `thinking: {type: "enabled" | "disabled"}`，同时保留原有 `chat_template_kwargs.enable_thinking` 兼容字段。前者来自 [DeepSeek 官方接口说明](https://api-docs.deepseek.com/guides/thinking_mode/)，元景是第三方兼容服务，参数被接受不等于已证明其执行效果完全相同。必须根据真实输出、错误码与结构校验验收，不能仅因配置字段存在就宣称模型正常。
+请求显式发送 `thinking: {type: "enabled" | "disabled"}`，同时保留 `chat_template_kwargs.enable_thinking` 兼容字段。参数依据 [DeepSeek 官方接口说明](https://api-docs.deepseek.com/guides/thinking_mode/)；必须根据真实输出、错误码与结构校验验收，不能仅因配置字段存在就宣称模型正常。
 
 独立 Critic 阅读三套草案、研究事实和确定性问题，输出审查意见。AI 的 hard 意见在汇入编译记录时降为 warning，真正阻止输出的是确定性审计的硬错误，不是模型未经验证的自评。
 

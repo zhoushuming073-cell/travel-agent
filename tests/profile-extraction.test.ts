@@ -29,6 +29,21 @@ test("Beijing family and Chinese-number expressions are extracted", () => {
   assert.deepEqual(hints.requiredAttractions, ["颐和园", "故宫"]);
 });
 
+test("representative examples are preferences rather than hard required POIs", () => {
+  const text = "请重点考虑香港代表性体验，例如叮叮车、天星小轮、双层巴士，但不要机械地全部塞进去。";
+  const hints = deterministicProfileHints(text, new Date("2026-09-05T00:00:00Z"));
+  const merged = mergeTravelProfile({ city: "香港", startDate: "2026-09-10", freeText: text }, { requiredAttractions: ["叮叮车", "天星小轮", "双层巴士"] });
+  assert.deepEqual(hints.requiredAttractions, undefined);
+  assert.deepEqual(merged.requiredAttractions, []);
+});
+
+test("explicit dislikes are not echoed back as positive preferences", () => {
+  const text = "喜欢现代城市、高楼密集区、特色交通、夜景和科技感，不太喜欢自然风景、爬山、徒步。";
+  const merged = mergeTravelProfile({ city: "香港", startDate: "2026-09-10", freeText: text }, { preferences: ["自然", "徒步", "夜景"], avoid: ["自然风景", "爬山", "徒步"] });
+  assert.deepEqual(merged.preferences, ["夜景", "现代城市", "高楼密集区", "特色交通", "科技感"]);
+  assert.deepEqual(merged.avoid, ["自然风景", "爬山", "徒步"]);
+});
+
 test("Chengdu relative date and adult-child composition are extracted", () => {
   const hints = deterministicProfileHints("2大1小，明天去成都玩三天，喜欢熊猫和美食", now);
   assert.equal(hints.city, "成都");

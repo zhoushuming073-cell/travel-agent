@@ -200,6 +200,11 @@ test("UI and server share the supported seven-day planning limit", () => {
   assert.match(apiSource, /UNSUPPORTED_TRIP_DURATION/);
 });
 
+test("special administrative regions remain valid China destinations", () => {
+  assert.match(apiSource, /\["香港", 22\.3193, 114\.1694\]/);
+  assert.match(apiSource, /\["澳门", 22\.1987, 113\.5439\]/);
+});
+
 test("weather provider telemetry names the provider that was actually called", () => {
   assert.match(apiSource, /provider: "Open-Meteo", capability: "天气"/);
   assert.doesNotMatch(apiSource, /天气 MCP 成功/);
@@ -210,24 +215,28 @@ test("deterministic final validation errors do not repeat the same unchanged sta
   assert.match(apiSource, /deterministicFailure \? 1/);
   assert.match(apiSource, /规划模型经两轮修复后仍有/);
   assert.match(apiSource, /STAGE_VALIDATION_FAILED/);
+  assert.match(apiSource, /FINAL_STRUCTURAL_REPAIR/);
+  assert.match(apiSource, /未放宽重复与方案差异硬约束/);
 });
 
 test("permanent model errors recover but rate limits must wait instead of claiming malformed output", () => {
   assert.equal(transitFare({ cost: { transit_fee: 0 } }), null);
   assert.equal(transitFare({ cost: { transit_fee: 3 } }), 3);
-  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]；flash [RATE_LIMITED]"), false);
-  assert.equal(shouldRecoverPlannerImmediately("联通元景模型均不可用：pro [MODEL_NOT_FOUND]"), true);
+  assert.equal(shouldRecoverPlannerImmediately("DeepSeek 官方 API 模型均不可用：pro [MODEL_NOT_FOUND]；flash [RATE_LIMITED]"), false);
+  assert.equal(shouldRecoverPlannerImmediately("DeepSeek 官方 API 模型均不可用：pro [MODEL_NOT_FOUND]"), true);
   assert.equal(shouldRecoverPlannerImmediately("经典覆盖返回 0/3 个完整日期"), false);
   assert.match(apiSource, /!retryContext\?\.attempts && !shouldRecoverPlannerImmediately/);
 });
 
 test("model failures degrade safely instead of multiplying calls or killing the whole trip", () => {
-  assert.match(providerClientSource, /!\/联通元景\/\.test\(source\)/);
+  assert.match(providerClientSource, /DeepSeek 官方 API/);
   assert.match(apiSource, /结构化重规划复用（未重复调用模型）/);
   assert.match(apiSource, /MODEL_STRUCTURE_RECOVERED/);
   assert.match(apiSource, /recoverPlannerVariant/);
   assert.match(apiSource, /compactPlannerKnowledge/);
   assert.match(persistenceSource, /STALE_TASK_REPLACED/);
+  assert.match(apiSource, /const targetId = cleanText\(rows\[0\]\?\.targetId\)/);
+  assert.doesNotMatch(apiSource, /const \[targetId, factType\] = key\.split\(":"\)/);
 });
 
 test("traffic coverage transparently distinguishes verified and estimated legs", () => {

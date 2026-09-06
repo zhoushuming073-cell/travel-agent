@@ -17,7 +17,7 @@ test("chat HTTP boundary invokes the configured model through the throttle and r
   try {
     const url = new URL("http://localhost/api/agent");
     const response = await handleTravelApi(new Request(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "测试" }) }), {
-      AI_API_KEY: "non-secret-test-placeholder", AI_API_BASE_URL: "https://example.test/v1/chat/completions", AI_SKIP_MODELS: "deepseek-v4-pro-0813",
+      AI_API_KEY: "non-secret-test-placeholder", AI_API_BASE_URL: "https://example.test/v1/chat/completions", AI_EXPLAIN_MODEL: "deepseek-v4-flash", AI_STRICT_MODEL_ROUTING: "true",
     }, url);
     assert.equal(response?.status, 200);
     assert.deepEqual(await response?.json(), { message: "模型返回的测试内容", model: "deepseek-v4-flash", networkToolCalls: [] });

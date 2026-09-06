@@ -1,20 +1,21 @@
-# 联通元景 OpenAI 兼容接口（服务端使用，切勿把密钥放入前端代码）
+# DeepSeek 官方 OpenAI 兼容接口（服务端使用，切勿把密钥放入前端代码）
 AI_API_KEY=
-AI_API_BASE_URL=https://maas-api.ai-yuanjing.com/openapi/compatible-mode/v1/chat/completions
+AI_API_BASE_URL=https://api.deepseek.com/chat/completions
 AI_EXTRACT_MODEL=deepseek-v4-flash
-AI_RESEARCH_MODEL=deepseek-v4-pro-0813
-AI_ENRICH_MODEL=deepseek-v4-pro-0813
-AI_PLANNER_MODEL=deepseek-v4-pro-0813
-AI_CRITIC_MODEL=deepseek-v4-pro-0813
-AI_REPAIR_MODEL=deepseek-v4-pro-0813
+AI_RESEARCH_MODEL=deepseek-v4-pro
+AI_ENRICH_MODEL=deepseek-v4-pro
+AI_PLANNER_MODEL=deepseek-v4-pro
+AI_CRITIC_MODEL=deepseek-v4-pro
+AI_REPAIR_MODEL=deepseek-v4-pro
 AI_REPAIR_FALLBACK_MODEL=
-AI_EXPLAIN_MODEL=deepseek-v4-flash
+AI_EXPLAIN_MODEL=deepseek-v4-pro
 # 逗号分隔的兼容模型回退；AI_SKIP_MODELS 中的模型不会被调用。
-AI_COMPATIBLE_MODEL_FALLBACKS=deepseek-v4-flash
+AI_COMPATIBLE_MODEL_FALLBACKS=
 AI_SKIP_MODELS=
+AI_STRICT_MODEL_ROUTING=true
 # 同账号所有 Agent 共用的最小调用间隔；保守默认值，不代表已知账号 QPM。
 # 确认服务商配额后可调整；429 仍会触发持久化冷却与有界重试。
-AI_REQUEST_MIN_INTERVAL_MS=65000
+AI_REQUEST_MIN_INTERVAL_MS=1000
 
 # 旧环境变量仍被兼容，新部署建议使用上述 AI_* 变量
 DEEPSEEK_API_KEY=
