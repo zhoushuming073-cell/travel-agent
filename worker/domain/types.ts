@@ -240,6 +240,8 @@ export interface ItinerarySpot {
     source?: string;
     confidence?: number;
     updatedAt?: string;
+    crowdRiskScore?: number;
+    /** @deprecated use crowdRiskScore */
     riskProbability?: number;
     uncertainty?: "low" | "medium" | "high";
     factors?: string[];

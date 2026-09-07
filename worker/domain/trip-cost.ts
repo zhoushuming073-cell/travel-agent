@@ -330,14 +330,15 @@ function bufferFor(categories: TripCostCategory[]) {
     estimated: TRIP_COST_RULES.bufferRates.estimated,
     unknown: TRIP_COST_RULES.bufferRates.estimated,
   };
+  const pricedWeight = pricedLines.reduce((sum, item) => sum + Math.max(1, Number(item.amount?.expected || 0)), 0);
   const weightedRate = pricedLines.length
-    ? pricedLines.reduce((sum, item) => sum + bufferRateByNature[item.nature], 0) / pricedLines.length
+    ? pricedLines.reduce((sum, item) => sum + bufferRateByNature[item.nature] * Math.max(1, Number(item.amount?.expected || 0)), 0) / Math.max(1, pricedWeight)
     : TRIP_COST_RULES.bufferRates.estimated;
   const unknownCount = categories.reduce((sum, item) => sum + item.unknownCount, 0);
   const rate = Math.min(TRIP_COST_RULES.bufferRates.maximum, weightedRate + unknownCount * TRIP_COST_RULES.bufferRates.unknownPenalty);
   return {
     amount: range(subtotal.min * Math.max(0.02, rate - 0.03), subtotal.expected * rate, subtotal.max * Math.min(TRIP_COST_RULES.bufferRates.maximum, rate + 0.04)),
-    reason: `${pricedLines.filter((item) => item.nature === "verified").length} 项已核验、${pricedLines.filter((item) => item.nature === "referenced").length} 项参考价、${pricedLines.filter((item) => item.nature === "estimated").length} 项估算、${unknownCount} 项未知，因此采用约 ${Math.round(rate * 100)}% 的动态缓冲`,
+    reason: `${pricedLines.filter((item) => item.nature === "verified").length} 项已核验、${pricedLines.filter((item) => item.nature === "referenced").length} 项参考价、${pricedLines.filter((item) => item.nature === "estimated").length} 项估算、${unknownCount} 项未知；按各项金额加权后采用约 ${Math.round(rate * 100)}% 的动态缓冲`,
   };
 }
 
@@ -354,7 +355,9 @@ function budgetState(userBudget: number | null, total: CostRange | null, partial
 function confidenceFor(categories: TripCostCategory[]) {
   const lines = categories.flatMap((item) => item.lines);
   const weights: Record<CostNature, number> = { verified: 1, referenced: 0.78, estimated: 0.48, unknown: 0 };
-  const evidenceCoverage = lines.length ? Math.round(lines.reduce((sum, item) => sum + weights[item.nature], 0) / lines.length * 100) : 0;
+  const criticality: Record<TripCostCategory["id"], number> = { lodging: 1.5, tickets: 1.25, meals: 0.8, localTransport: 0.9, intercityTransport: 1.4, other: 0.45, buffer: 0.3 };
+  const denominator = lines.reduce((sum, item) => sum + criticality[item.category] * Math.max(1, Number(item.amount?.expected || 0)), 0);
+  const evidenceCoverage = denominator ? Math.round(lines.reduce((sum, item) => sum + weights[item.nature] * criticality[item.category] * Math.max(1, Number(item.amount?.expected || 0)), 0) / denominator * 100) : 0;
   const majorUnknown = categories.some((item) => ["lodging", "tickets", "intercityTransport"].includes(item.id) && item.unknownCount > 0);
   const confidence = Math.min(majorUnknown ? 0.58 : 0.9, evidenceCoverage / 100);
   return { evidenceCoverage, confidence, label: confidence >= 0.75 ? "较高" as const : confidence >= 0.5 ? "中等" as const : "较低" as const };

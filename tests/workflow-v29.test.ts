@@ -219,6 +219,13 @@ test("deterministic final validation errors do not repeat the same unchanged sta
   assert.match(apiSource, /未放宽重复与方案差异硬约束/);
 });
 
+test("planning knowledge preserves ranking evidence and uses a sparse transit graph", () => {
+  assert.match(apiSource, /plannerScore: Number\(spot\.plannerScore/);
+  assert.match(apiSource, /scoreBreakdown: \{ \.\.\.spot\.scoreBreakdown \}/);
+  assert.match(apiSource, /graphPolicy: "hotel-required-knn-lazy"/);
+  assert.doesNotMatch(apiSource, /\)\.slice\(0, 18\);/);
+});
+
 test("permanent model errors recover but rate limits must wait instead of claiming malformed output", () => {
   assert.equal(transitFare({ cost: { transit_fee: 0 } }), null);
   assert.equal(transitFare({ cost: { transit_fee: 3 } }), 3);

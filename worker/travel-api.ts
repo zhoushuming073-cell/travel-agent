@@ -67,7 +67,7 @@ import type {
 } from "./domain/research-types.ts";
 import { deterministicProfileHints, mergeTravelProfile } from "./domain/profile-extraction.ts";
 import { buildPreferenceProfile, scorePreferenceMatch } from "./domain/preference-intelligence.ts";
-import { optimizeRouteBuckets } from "./domain/route-optimizer.ts";
+import { optimizeRouteBuckets, precheckRouteFeasibility } from "./domain/route-optimizer.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "./domain/decision-trace.ts";
 import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
 import { calibrateCrowdWithResearch, crowdRiskForVisit, predictCrowdRisk } from "./domain/crowd-risk.ts";
@@ -1464,7 +1464,7 @@ async function enrichTravelIntelligence(spots: any[], profile: any, city: any, w
     const openingAlert = signal.openingAlerts?.[0];
     const factObservations = { ...(spot.factObservations || {}) };
     if (openingHours) factObservations.openingHours = [{ value: openingHours, confidence: amapOpening ? 0.78 : 0.68, source: { id: `source-${spot.id}-opening-amap`, name: amapOpening ? "高德地图 POI 营业时间" : cleanText(spot.sourceName, "公开 POI 页面"), type: "map-service", url: amap?.id ? `https://www.amap.com/place/${encodeURIComponent(amap.id)}` : spot.sourceUrl || null, fetchedAt, quality: "estimated" } }];
-    factObservations.crowd = [{ value: { score: crowd.score, label: crowd.label, probability: crowd.riskProbability, factors: crowd.factors, factorContributions: crowd.factorContributions, forecastBand: crowd.forecastBand, confidenceLabel: crowd.confidenceLabel, evidenceCoverage: crowd.evidenceCoverage, timeWindows: crowd.timeWindows, recommendedWindow: crowd.recommendedWindow, secondaryRecommendedWindow: crowd.secondaryRecommendedWindow, recommendedWindows: crowd.recommendedWindows, avoidWindow: crowd.avoidWindow, peakWindow: crowd.peakWindow, dataQualityNote: crowd.dataQualityNote, modelVersion: crowd.modelVersion, officialRealtime: false }, confidence: crowd.confidence, source: { id: `source-${spot.id}-crowd-model`, name: "Crowd Risk v2 多源风险模型", type: "prediction", url: crowdSourceUrl, fetchedAt, quality: "predicted" } }];
+factObservations.crowd = [{ value: { score: crowd.score, label: crowd.label, crowdRiskScore: crowd.crowdRiskScore, factors: crowd.factors, factorContributions: crowd.factorContributions, forecastBand: crowd.forecastBand, confidenceLabel: crowd.confidenceLabel, evidenceCoverage: crowd.evidenceCoverage, timeWindows: crowd.timeWindows, recommendedWindow: crowd.recommendedWindow, secondaryRecommendedWindow: crowd.secondaryRecommendedWindow, recommendedWindows: crowd.recommendedWindows, avoidWindow: crowd.avoidWindow, peakWindow: crowd.peakWindow, dataQualityNote: crowd.dataQualityNote, modelVersion: crowd.modelVersion, officialRealtime: false }, confidence: crowd.confidence, source: { id: `source-${spot.id}-crowd-model`, name: "Crowd Risk v2 多源风险模型", type: "prediction", url: crowdSourceUrl, fetchedAt, quality: "predicted" } }];
     if (hotness.score != null) factObservations.hotness = [{ value: { score: hotness.score, label: hotness.label }, confidence: hotness.confidence, source: { id: `source-${spot.id}-hotness`, name: hotness.source, type: "public-trend", url: hotness.sourceUrl, fetchedAt: hotness.updatedAt, quality: "predicted" } }];
     if (seasonality.score != null) factObservations.seasonality = [{ value: { score: seasonality.score, state: seasonality.state, label: seasonality.label }, confidence: seasonality.confidence, source: { id: `source-${spot.id}-seasonality`, name: seasonality.source, type: "public-season-signal", url: seasonality.sourceUrl, fetchedAt: seasonality.updatedAt, quality: "predicted" } }];
     return {
@@ -1893,6 +1893,36 @@ function transitEstimate(distanceM: number) {
   return Math.max(15, Math.round(9 + distanceM * 1.18 / 330));
 }
 
+function withTransitUncertainty(leg: any) {
+  const expected = Math.max(1, Number(leg.durationMin || 1));
+  const verified = leg.quality === "verified";
+  const routed = leg.quality === "routed";
+  const spread = verified ? 0.12 : routed ? 0.22 : 0.35;
+  return {
+    ...leg,
+    expected,
+    p80: Math.ceil(expected * (1 + spread)),
+    p95: Math.ceil(expected * (1 + spread * 1.75)),
+    min: Math.max(1, Math.floor(expected * (1 - spread * 0.45))),
+    confidence: verified ? 0.9 : routed ? 0.76 : 0.55,
+  };
+}
+
+function sparseTrafficLegs(nodes: any[], legs: any[], requiredIds = new Set<string>(), neighbors = 4) {
+  const kept = new Map<string, any>();
+  const add = (leg: any) => kept.set(`${leg.fromId}->${leg.toId}`, withTransitUncertainty(leg));
+  for (const leg of legs) {
+    if (leg.fromId === "hotel" || leg.toId === "hotel" || requiredIds.has(leg.fromId) || requiredIds.has(leg.toId)) add(leg);
+  }
+  for (const node of nodes) {
+    legs.filter((leg: any) => leg.fromId === node.id)
+      .sort((left: any, right: any) => Number(left.distanceM || Number.MAX_SAFE_INTEGER) - Number(right.distanceM || Number.MAX_SAFE_INTEGER))
+      .slice(0, neighbors)
+      .forEach(add);
+  }
+  return [...kept.values()];
+}
+
 function fallbackMatrix(nodes: any[], fetchedAt: string, publicTransit = false) {
   const legs: any[] = [];
   for (let fromIndex = 0; fromIndex < nodes.length; fromIndex += 1) {
@@ -1908,7 +1938,8 @@ function fallbackMatrix(nodes: any[], fetchedAt: string, publicTransit = false) 
       });
     }
   }
-  return { source: publicTransit ? "公共交通距离模型（等待高德精确段）" : "坐标距离×1.25 透明估算", fetchedAt, quality: "estimated", nodes, legs, verifiedLegCount: 0 };
+  const sparse = sparseTrafficLegs(nodes, legs);
+  return { source: publicTransit ? "公共交通稀疏距离图（等待高德精确段）" : "坐标距离稀疏图×1.25 透明估算", fetchedAt, quality: "estimated", graphPolicy: "hotel-required-knn-lazy", totalPossibleLegs: legs.length, nodes, legs: sparse, verifiedLegCount: 0 };
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<Array<PromiseSettledResult<R>>> {
@@ -1929,10 +1960,13 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
   const fetchedAt = new Date().toISOString();
   const publicTransit = /公交|地铁|公共交通/.test(cleanText(profile.transport));
   const anchor = await resolveLodgingAnchor(profile, city);
-  const selected = uniqueSpots([
+  const candidatePool = uniqueSpots([
     ...spots.filter((spot: any) => spot.requiredByUser),
     ...spots.filter((spot: any) => !spot.requiredByUser),
-  ]).filter((spot: any) => Number.isFinite(Number(spot.lat)) && Number.isFinite(Number(spot.lng))).slice(0, 18);
+  ]).filter((spot: any) => Number.isFinite(Number(spot.lat)) && Number.isFinite(Number(spot.lng)));
+  const requiredCandidates = candidatePool.filter((spot: any) => spot.requiredByUser);
+  const optionalCapacity = Math.max(0, 48 - requiredCandidates.length);
+  const selected = uniqueSpots([...requiredCandidates, ...candidatePool.filter((spot: any) => !spot.requiredByUser).slice(0, optionalCapacity)]);
   const nodes = [anchor, ...selected.map((spot: any) => ({ id: spot.id, name: spot.name, lat: Number(spot.lat), lng: Number(spot.lng) }))];
   if (nodes.length < 2) throw new Error("无法为候选景点建立交通矩阵：有效坐标不足");
   const coordinates = nodes.map((node: any) => `${node.lng},${node.lat}`).join(";");
@@ -1955,10 +1989,11 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
       });
     }));
     if (legs.length < nodes.length * (nodes.length - 1) * 0.8) throw new Error("OSRM 矩阵缺失过多");
-    if (!publicTransit) return { source: "OSRM Table 道路路由", fetchedAt, quality: "routed", nodes, legs, verifiedLegCount: legs.length };
-
     const nodeById = new Map(nodes.map((node: any) => [node.id, node]));
     const requiredIds = new Set(selected.filter((spot: any) => spot.requiredByUser).map((spot: any) => spot.id));
+    const sparseLegs = sparseTrafficLegs(nodes, legs, requiredIds);
+    if (!publicTransit) return { source: "OSRM Table 稀疏道路图", fetchedAt, quality: "routed", graphPolicy: "hotel-required-knn-lazy", totalPossibleLegs: legs.length, nodes, legs: sparseLegs, verifiedLegCount: sparseLegs.length };
+
     const directed = legs
       .filter((leg: any) => leg.fromId === "hotel" || leg.toId === "hotel" || requiredIds.has(leg.fromId) || requiredIds.has(leg.toId))
       .sort((left: any, right: any) => left.distanceM - right.distanceM)
@@ -1968,12 +2003,13 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
       .sort((left: any, right: any) => left.distanceM - right.distanceM)
       .slice(0, 2));
     const pairKeys = new Set<string>();
+    const riskDrivenCap = Math.max(3, Math.min(10, 3 + requiredIds.size * 2 + Math.ceil(Number(profile.days || 1) / 2)));
     const queryLegs = [...directed, ...nearest].filter((leg: any) => {
       const key = `${leg.fromId}->${leg.toId}`;
       if (pairKeys.has(key)) return false;
       pairKeys.add(key);
       return true;
-    }).slice(0, 6);
+    }).slice(0, riskDrivenCap);
     const exact = await mapWithConcurrency(queryLegs, 4, async (leg: any) => ({
       leg,
       result: await amapTransitFor(nodeById.get(leg.fromId), nodeById.get(leg.toId), city, env),
@@ -1981,18 +2017,19 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
     let verifiedLegCount = 0;
     for (const settled of exact) {
       if (settled.status !== "fulfilled" || settled.value.result?.status !== "ready" || !settled.value.result.durationMin) continue;
-      const target = legs.find((leg: any) => leg.fromId === settled.value.leg.fromId && leg.toId === settled.value.leg.toId);
+      const target = sparseLegs.find((leg: any) => leg.fromId === settled.value.leg.fromId && leg.toId === settled.value.leg.toId);
       if (!target) continue;
       target.durationMin = settled.value.result.durationMin;
       target.distanceM = settled.value.result.distanceM || target.distanceM;
       target.source = `${settled.value.result.source}（规划前）`;
       target.quality = "verified";
       target.fetchedAt = settled.value.result.fetchedAt || fetchedAt;
+      Object.assign(target, withTransitUncertainty(target));
       verifiedLegCount += 1;
     }
     return {
       source: verifiedLegCount ? `高德公交/地铁规划前核验 ${verifiedLegCount} 段 + 其余公共交通透明估算` : "公共交通距离模型（高德本轮未返回）",
-      fetchedAt, quality: "estimated", nodes, legs, verifiedLegCount,
+      fetchedAt, quality: "estimated", graphPolicy: "hotel-required-knn-lazy", totalPossibleLegs: legs.length, nodes, legs: sparseLegs, verifiedLegCount,
     };
   } catch { return fallbackMatrix(nodes, fetchedAt, publicTransit); }
 }
@@ -2265,7 +2302,7 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 4. 先保证可执行性，再优化覆盖率。你负责完整时间决策，确定性程序只负责验收而不替你排时间。不得安排开放时间冲突、明显折返、超出每日时段或不合理夜景时段。
 5. 三套方案分别优化：hot=经典覆盖；niche=自然摄影和合理光线/季节；relax=少景点、大缓冲、透明避峰风险。三套不能只换名字或交换一两个点。
 6. 客流无官方实时数据时只可说 Unknown 或基于节假日/时段的 Prediction；不得宣称已实时避峰。
-7. crowdRisk.score 是风险概率分值，不是在园人数；relax 优先低风险时段，必去点不可因此删除。hotness 仅表示近期关注度，seasonFit 仅表示时令适配，二者必须分别用于经典/摄影方案排序。
+7. crowdRisk.score / crowdRisk.crowdRiskScore 是 0—100 风险分，不是统计概率，不是在园人数；relax 优先低风险时段，必去点不可因此删除。hotness 仅表示近期关注度，seasonFit 仅表示时令适配，二者必须分别用于经典/摄影方案排序。
 8. openingAlert 不等于已确认闭园，但必须在调整条件中提示用户核对原文；若候选点存在同类替代点，应给出 alternativeSpotIds。
 9. 推荐理由必须简短并引用 evidenceRefs；每个景点要提供交通方式、矩阵耗时、调整条件和候选池内替代点。
 10. 必须服从每个候选点的 timeRole、preferredWindows、avoidWindows 与 timeRationale：meal-landmark 必须用 type=meal 且保留 spotId，安排在 11:30—13:30 或 17:30—20:00；nightscape 必须在当日 sunset 后；展馆服从开放与预约；户外摄影优先早晚光线。
@@ -2275,7 +2312,12 @@ const PLANNER_SYSTEM_PROMPT = `你是旅行约束求解器，不是旅游文案�
 
 async function generatePlannerDraft(profile: any, knowledge: any, env: any, replanContext: any) {
   assertPlannerContext(knowledge);
-  const modelAudit = { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] as any[] };
+  const modelAudit = { plannerModel: aiPrimaryModel(env, "planner"), repairModel: aiPrimaryModel(env, "repair"), toolCalls: [] as any[], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] as any[], feasibilityPrecheck: null as any };
+  const feasibility = precheckRouteFeasibility({ profile, knowledge });
+  modelAudit.feasibilityPrecheck = feasibility;
+  if (!feasibility.feasible) {
+    throw new Error(`用户硬约束当前不可行：${feasibility.violations.map((item) => item.message).join("；")}。请减少必去项、延长每日时段或调整日期后重试。`);
+  }
   let draft: any;
   const objectives = [
     { id: "hot", name: "经典覆盖", goal: "优先代表性与必去覆盖，控制跨区移动；在预算内优先有证据的经典点。" },
@@ -2648,7 +2690,7 @@ function planDayFromDraft(dayDraft: any, dayIndex: number, spotsById: Map<string
       }
       const item = { ...base, activityType: activity.type, crowd: crowdRiskForVisit(base.crowd, activity.startTime, weather.date, weather), startTime: activity.startTime, endTime: activity.endTime, durationMin: activity.durationMin, recommendationReason: activity.reason, evidenceRefs: activity.evidenceRefs, alternativeSpotIds: activity.alternativeSpotIds, adjustmentCondition: activity.adjustmentCondition };
       if (item.factObservations?.crowd?.length && item.crowd?.score != null) {
-        item.factObservations = { ...item.factObservations, crowd: item.factObservations.crowd.map((observation: any, index: number) => index ? observation : { ...observation, value: { ...observation.value, score: item.crowd.score, probability: item.crowd.riskProbability, label: item.crowd.label, factors: item.crowd.factors, factorContributions: item.crowd.factorContributions, forecastBand: item.crowd.forecastBand, confidenceLabel: item.crowd.confidenceLabel, evidenceCoverage: item.crowd.evidenceCoverage, timeWindows: item.crowd.timeWindows, recommendedWindow: item.crowd.recommendedWindow, secondaryRecommendedWindow: item.crowd.secondaryRecommendedWindow, recommendedWindows: item.crowd.recommendedWindows, avoidWindow: item.crowd.avoidWindow, peakWindow: item.crowd.peakWindow, action: item.crowd.action, dataQualityNote: item.crowd.dataQualityNote, visitAdvice: item.crowd.visitAdvice, visitTime: item.crowd.visitTime, visitDate: item.crowd.visitDate, modelVersion: item.crowd.modelVersion, officialRealtime: false } }) };
+        item.factObservations = { ...item.factObservations, crowd: item.factObservations.crowd.map((observation: any, index: number) => index ? observation : { ...observation, value: { ...observation.value, score: item.crowd.score, crowdRiskScore: item.crowd.crowdRiskScore, label: item.crowd.label, factors: item.crowd.factors, factorContributions: item.crowd.factorContributions, forecastBand: item.crowd.forecastBand, confidenceLabel: item.crowd.confidenceLabel, evidenceCoverage: item.crowd.evidenceCoverage, timeWindows: item.crowd.timeWindows, recommendedWindow: item.crowd.recommendedWindow, secondaryRecommendedWindow: item.crowd.secondaryRecommendedWindow, recommendedWindows: item.crowd.recommendedWindows, avoidWindow: item.crowd.avoidWindow, peakWindow: item.crowd.peakWindow, action: item.crowd.action, dataQualityNote: item.crowd.dataQualityNote, visitAdvice: item.crowd.visitAdvice, visitTime: item.crowd.visitTime, visitDate: item.crowd.visitDate, modelVersion: item.crowd.modelVersion, officialRealtime: false } }) };
       }
       items.push(item);
       if (activity.type === "meal") {
@@ -3343,10 +3385,26 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
     const canonicalName = cleanText(requiredNameById.get(spot.id), spot.name);
     const tags = [...new Set([spot.category, ...(spot.matchedPreferences || []), ...(/夜|江|湖|河|桥/.test(canonicalName) ? ["夜景"] : []), ...(/园|湖|山|湿地|溪|谷/.test(canonicalName) ? ["自然", "摄影"] : []), ...(/寺|庙|博物馆|遗址|故居|古镇/.test(canonicalName) ? ["文化"] : [])].map((value) => cleanText(value)).filter(Boolean))];
     const semantics = visitSemantics({ ...spot, name: canonicalName }, weather.tripForecast);
+    const parsedOpening = openingRange(spot.openingHours);
+    const availabilityWindows = parsedOpening ? weather.tripForecast.map((day: any) => ({
+      date: day.date,
+      start: minutesToTime(parsedOpening[0]),
+      end: minutesToTime(parsedOpening[1]),
+      confidence: spot.openingStatus?.status === "verified" ? 0.9 : 0.62,
+      sourceId: `source-${spot.id}-opening`,
+      status: spot.openingStatus?.status === "verified" ? "verified" : "estimated",
+    })) : [];
     return {
       id: spot.id, name: canonicalName, officialName: spot.officialName || spot.name, aliases: imageLookupNames(canonicalName, city.name), lat: Number(spot.lat), lng: Number(spot.lng),
       category: spot.category, poiType: spot.category || "旅游景点", cluster: cleanText(spot.district || spot.address, "Unknown"),
+      plannerScore: Number(spot.plannerScore || 0),
+      scoreBreakdown: { ...spot.scoreBreakdown },
+      scoreBasis: spot.scoreBasis,
+      preferenceContributions: spot.preferenceContributions,
+      matchedPreferences: spot.matchedPreferences,
+      recommendationReasons: spot.recommendationReasons,
       recommendedDurationMin: clamp(spot.durationMin || 120, 60, 240), openingHours: spot.openingHours || null,
+      availabilityWindows,
       openingStatus: spot.openingStatus?.status || (spot.openingHours ? "estimated" : "unknown"), openingAlert: spot.openingStatus?.alert || null,
       reservation: {
         relevant: Boolean(spot.requiredByUser || /博物馆|美术馆|纪念馆|故宫|寺|塔|乐园|动物园|海洋馆|演出|展览/.test(`${canonicalName}${spot.category || ""}`)),
@@ -3364,6 +3422,18 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
       hotness: spot.hotness,
       crowdRisk: spot.crowd,
       tags, requiredByUser: Boolean(spot.requiredByUser), sourceName: spot.sourceName || spot.source || "公开地图 / 中文维基百科",
+      constraints: {
+        mustVisit: Boolean(spot.requiredByUser),
+        excluded: false,
+        earliest: availabilityWindows[0]?.start,
+        latest: availabilityWindows[0]?.end,
+      },
+      uncertainty: {
+        openingHours: spot.openingStatus?.status === "verified" ? 0.1 : spot.openingHours ? 0.38 : 1,
+        price: spot.ticketPrice != null ? 0.35 : 1,
+        crowd: 1 - Math.min(1, Number(spot.crowd?.confidence || 0)),
+        transit: 0.45,
+      },
       sourceUrl: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt,
       sources: [{ name: spot.sourceName || spot.source || "公开地图 / 中文维基百科", url: spot.sourceUrl || null, fetchedAt: spot.fetchedAt || fetchedAt, status: spot.openingHours ? "entity-verified" : "entity-only" }],
       unknown: [!spot.openingHours ? "开放时间" : null, (spot.requiredByUser || /博物馆|美术馆|纪念馆|故宫|寺|塔|乐园|动物园|海洋馆|演出|展览/.test(`${canonicalName}${spot.category || ""}`)) ? "指定日期预约" : null, "官方实时客流"].filter(Boolean),

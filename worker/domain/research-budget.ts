@@ -17,6 +17,7 @@ export interface ResearchComplexity {
 export interface AdaptiveResearchBudget {
   baseBudget: number;
   complexityScore: number;
+  researchUncertaintyScore: number;
   targetQueryBudget: number;
   targetPageBudget: number;
   aiCallBudget: number;
@@ -40,14 +41,21 @@ export function researchComplexityScore(input: ResearchComplexity) {
 
 export function createAdaptiveResearchBudget(input: ResearchComplexity): AdaptiveResearchBudget {
   const complexityScore = researchComplexityScore(input);
+  const researchUncertaintyScore = Math.max(0,
+    0.55 * input.blockingUnknownCount +
+    0.35 * input.highRiskFactCount +
+    0.25 * (input.dynamicEventCount || 0) +
+    0.08 * input.requiredSpotCount +
+    0.02 * input.candidateCount);
   const hardCap = input.deepResearch ? 56 : 32;
-  const rawQueryTarget = Math.ceil((4 + 1.5 * complexityScore) * (input.deepResearch ? 1.5 : 1));
+  const rawQueryTarget = Math.ceil((4 + 1.75 * researchUncertaintyScore) * (input.deepResearch ? 1.5 : 1));
   const targetQueryBudget = Math.max(3, Math.min(hardCap, rawQueryTarget));
   const targetPageBudget = Math.min(hardCap + 8, Math.ceil(targetQueryBudget * 1.25));
   const aiCallBudget = Math.max(3, Math.min(input.deepResearch ? 12 : 8, 3 + Math.ceil(complexityScore / 3)));
   return {
     baseBudget: input.deepResearch ? 15 : 8,
     complexityScore: Number(complexityScore.toFixed(2)),
+    researchUncertaintyScore: Number(researchUncertaintyScore.toFixed(2)),
     targetQueryBudget,
     targetPageBudget,
     aiCallBudget,
@@ -58,8 +66,9 @@ export function createAdaptiveResearchBudget(input: ResearchComplexity): Adaptiv
 }
 
 export function researchUtility(gap: ResearchGap) {
-  const numerator = bounded(gap.decisionImpact) * bounded(gap.uncertainty) * bounded(gap.expectedInformationGain) * bounded(gap.freshnessNeed, 0.25, 1);
-  return Number((numerator / Math.max(0.15, gap.researchCost)).toFixed(4));
+  const decisionChangeProbability = bounded(gap.uncertainty) * bounded(gap.expectedInformationGain);
+  const valueOfInformation = decisionChangeProbability * bounded(gap.decisionImpact) * bounded(gap.freshnessNeed, 0.25, 1);
+  return Number((valueOfInformation / Math.max(0.15, gap.researchCost)).toFixed(4));
 }
 
 export function prioritizeResearchGaps(gaps: ResearchGap[]) {

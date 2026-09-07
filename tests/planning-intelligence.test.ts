@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildPreferenceProfile, scorePreferenceMatch } from "../worker/domain/preference-intelligence.ts";
 import { calibrateCrowdWithResearch, comparableDateRelevance, predictCrowdRisk } from "../worker/domain/crowd-risk.ts";
-import { optimizeRouteBuckets } from "../worker/domain/route-optimizer.ts";
+import { optimizeRouteBuckets, precheckRouteFeasibility } from "../worker/domain/route-optimizer.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "../worker/domain/decision-trace.ts";
 
 test("preference intelligence rewards natural photography and penalizes explicit shopping avoidance", () => {
@@ -39,6 +39,28 @@ test("deterministic route recovery covers must-go spots and clusters by matrix c
   assert.equal(result.dayBuckets.length, 2);
 });
 
+test("route optimizer keeps score breakdown and schedules tight opening windows during insertion", () => {
+  const spots = [
+    { id: "late", name: "晚间街区", plannerScore: 72, scoreBreakdown: { preference: 72, poiQuality: 70, dataCompleteness: 70 }, openingHours: "10:00-22:00", recommendedDurationMin: 90, lat: 22.30, lng: 114.17 },
+    { id: "early", name: "上午展馆", plannerScore: 68, scoreBreakdown: { preference: 68, poiQuality: 92, dataCompleteness: 88 }, openingHours: "09:00-11:00", recommendedDurationMin: 90, lat: 22.301, lng: 114.171 },
+    { id: "a", name: "A", plannerScore: 30, openingHours: "09:00-21:00", lat: 22.31, lng: 114.18 },
+    { id: "b", name: "B", plannerScore: 29, openingHours: "09:00-21:00", lat: 22.32, lng: 114.19 },
+    { id: "c", name: "C", plannerScore: 28, openingHours: "09:00-21:00", lat: 22.33, lng: 114.20 },
+  ];
+  const result = optimizeRouteBuckets({ profile: { days: 1, dayStart: "09:00", dayEnd: "21:00" }, knowledge: { spots, trafficMatrix: { legs: [] } }, objective: "hot" });
+  assert.ok(result.selectedIds.includes("early"), "scoreBreakdown should survive into objective ranking");
+  assert.ok(result.dayBuckets[0].findIndex((spot) => spot.id === "early") < result.dayBuckets[0].findIndex((spot) => spot.id === "late"));
+});
+
+test("feasibility precheck rejects an impossible required opening window before model planning", () => {
+  const result = precheckRouteFeasibility({
+    profile: { days: 1, dayStart: "09:00", dayEnd: "18:00" },
+    knowledge: { spots: [{ id: "fixed", name: "固定预约", requiredByUser: true, openingHours: "10:00-10:30", recommendedDurationMin: 90 }], trafficMatrix: { legs: [] } },
+  });
+  assert.equal(result.feasible, false);
+  assert.equal(result.violations[0]?.code, "WINDOW_TOO_SHORT");
+});
+
 test("research-to-decision trace links user preference, facts, evidence and compiler constraints", () => {
   const plan = { id: "relax", daysPlan: [{ day: 1, items: [{ id: "lingyin", name: "灵隐寺", startTime: "07:30", endTime: "10:00", requiredByUser: true, matchedPreferences: ["文化"], crowd: { score: 58 }, plannerScore: 100 }], blocks: [] }] };
   const research = { facts: [{ id: "fact-opening", targetId: "lingyin", targetName: "灵隐寺", factType: "opening_hours", value: { open: "07:00", close: "18:00" }, status: "verified", confidence: 0.9, supportingEvidenceIds: ["official-1"], conflictingEvidenceIds: [], fetchedAt: new Date().toISOString() }] };
@@ -46,4 +68,3 @@ test("research-to-decision trace links user preference, facts, evidence and comp
   assert.ok(traces.some((trace) => trace.factIds.includes("fact-opening") && trace.evidenceIds.includes("official-1")));
   assert.equal(traceCoverage(traces).coverage, 1);
 });
-
