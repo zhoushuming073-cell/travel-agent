@@ -180,6 +180,9 @@ export function mergeTravelProfile(input: Record<string, unknown>, extracted: Re
   const unknownFields = [...new Set(list(extracted.unknownFields))].filter((field) => !(field in hints));
   if (!city && !unknownFields.includes("city")) unknownFields.push("city");
   if (!startDate && !unknownFields.includes("startDate")) unknownFields.push("startDate");
+  const explicitTripPurpose = clean(pickTextFirst("tripPurpose"));
+  const tripPurpose = explicitTripPurpose || (/第一次|初次/.test(text) ? "first_visit" : /第[二三四五六七八九十\d]+次|再去|重游/.test(text) ? "repeat_visit" : /商务|出差/.test(text) ? "business" : /亲子|一家|带孩子/.test(text) ? "family" : /摄影|拍照/.test(text) ? "photography" : /美食|吃遍/.test(text) ? "food" : "general");
+  sources.tripPurpose ||= explicitTripPurpose ? "ai-text" : /第一次|初次|第[二三四五六七八九十\d]+次|再去|重游|商务|出差|亲子|一家|带孩子|摄影|拍照|美食|吃遍/.test(text) ? "text-rule" : "default";
   return {
     city: city.replace(/市$/, ""), startDate, days, nights: clamp(nightsRaw, 0, 7, Math.max(0, days - 1)), partySize,
     budget: Number.isFinite(budgetRaw) && budgetRaw > 0 ? clamp(budgetRaw, 100, 200000, 0) : 0,
@@ -199,6 +202,7 @@ export function mergeTravelProfile(input: Record<string, unknown>, extracted: Re
     seasonalNeeds: [...new Set(list(extracted.seasonalNeeds))].slice(0, 10), unknownFields: unknownFields.slice(0, 20), returnTime: explicit(pickTextFirst("returnTime")) || "Unknown",
     clarificationNeeded: Boolean(extracted.clarificationNeeded) && (!city || !startDate) || !city || !startDate,
     clarificationQuestion: !city ? "请先说明一个中国境内的目的城市或区县。" : !startDate ? "请先说明出发日期；支持“8.25出发”“明天出发”等表达。" : clean(extracted.clarificationQuestion),
+    tripPurpose, destinationTimeZone: "Asia/Shanghai",
     fieldSources: sources, freeText: text,
   };
 }

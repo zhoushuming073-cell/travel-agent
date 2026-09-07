@@ -49,7 +49,7 @@ import {
   normalizeAiResearchRequests,
   skippedResearchItems,
 } from "./domain/research-planner.ts";
-import { FACT_FRESHNESS_POLICIES, sourceFitFor, sourceFreshness } from "./domain/research-policy.ts";
+import { FACT_FRESHNESS_POLICIES, FACT_POLICY_VERSION, sourceFitFor, sourceFreshness } from "./domain/research-policy.ts";
 import {
   SearchOrchestrator,
   classifySourceTier,
@@ -70,8 +70,14 @@ import { buildPreferenceProfile, scorePreferenceMatch } from "./domain/preferenc
 import { optimizeRouteBuckets, precheckRouteFeasibility } from "./domain/route-optimizer.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "./domain/decision-trace.ts";
 import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
+import { buildPlanDiversityProfiles } from "./domain/diversity.ts";
+import { reproducibilitySnapshot } from "./domain/reproducibility.ts";
 import { calibrateCrowdWithResearch, crowdRiskForVisit, predictCrowdRisk } from "./domain/crowd-risk.ts";
 import { estimateTripCost } from "./domain/trip-cost.ts";
+import { parseAvailabilityWindows } from "./domain/availability.ts";
+import { compileConstraintModel } from "./domain/constraint-model.ts";
+import { approximateTokens, enforceOutputTokenBudget, modelTokenBudget } from "./domain/model-budget.ts";
+import { PLANNING_WORKFLOW_DAG, workflowExecutionGroups } from "./domain/workflow-dag.ts";
 import { clamp, cleanText, list, minutesToTime, normalizeName, timeToMinutes } from "./lib/value-utils.ts";
 import {
   applyFinalTimelineSafetyRepair,
@@ -80,6 +86,7 @@ import {
   completePlannerVariant,
   enforceRequiredCoverage,
   legalizePlannerTimelines,
+  normalizePlannerSkeleton,
   normalizePlannerVariant,
   recoverPlannerVariant,
 } from "./planning/planner-normalization.ts";
@@ -594,24 +601,24 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
     allRequests.push(...requests.map((request) => ({ ...request, executedAt: new Date().toISOString() })));
     const executions = await mapWithConcurrency(requests, 3, async (request) => {
       const cacheKey = `${request.targetId}|${request.questionType}|${request.query}`;
-      const cached = await persistentCacheGet("research-search-v1", cacheKey) as any;
+      const cached = await persistentCacheGet(`research-search:${FACT_POLICY_VERSION}`, cacheKey) as any;
       if (cached?.results) return cached;
       const execution = await orchestrator.execute(request, 2);
       const searchPolicy = FACT_FRESHNESS_POLICIES[request.questionType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
-      await persistentCachePut("research-search-v1", cacheKey, execution, searchPolicy.searchCacheTtlMs);
+      await persistentCachePut(`research-search:${FACT_POLICY_VERSION}`, cacheKey, execution, searchPolicy.searchCacheTtlMs);
       return execution;
     });
     for (const settled of executions) if (settled.status === "fulfilled") searchExecutions.push(settled.value);
     const roundResults = searchExecutions.filter((execution) => requests.some((request) => request.queryId === execution.request.queryId)).flatMap((execution) => execution.results || []);
     const pageUrls = [...new Set(roundResults.map((result: any) => result.url).filter(Boolean))].slice(0, Math.max(0, budget.targetPageBudget - pages.size));
     const fetched = await mapWithConcurrency(pageUrls, 3, async (url: string) => {
-      const cached = await persistentCacheGet("research-page-v1", url) as any;
+      const cached = await persistentCacheGet(`research-page:${FACT_POLICY_VERSION}`, url) as any;
       if (cached?.status) return cached;
       const page = await orchestrator.fetchPage(url);
       const related = roundResults.find((result: any) => result.url === url);
       const pagePolicy = related ? FACT_FRESHNESS_POLICIES[related.questionType] : null;
       const ttl = pagePolicy?.pageCacheTtlMs || 6 * 60 * 60 * 1000;
-      await persistentCachePut("research-page-v1", url, page, ttl);
+      await persistentCachePut(`research-page:${FACT_POLICY_VERSION}`, url, page, ttl);
       return page;
     });
     fetched.forEach((outcome, index) => { if (outcome.status === "fulfilled") pages.set(pageUrls[index], outcome.value); });
@@ -672,7 +679,7 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
   };
   for (const fact of facts) {
     const policy = FACT_FRESHNESS_POLICIES[fact.factType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
-    await persistentCachePut("research-fact-v1", `${profile.city}|${profile.startDate}|${fact.targetId}|${fact.factType}`, fact, policy.factCacheTtlMs);
+    await persistentCachePut(`research-fact:${FACT_POLICY_VERSION}`, `${profile.city}|${profile.startDate}|${fact.targetId}|${fact.factType}`, fact, policy.factCacheTtlMs);
   }
   return report;
 }
@@ -687,12 +694,16 @@ function applyResearchFactsToKnowledge(knowledge: any, research: any) {
       const spotFacts = facts.get(spot.id) || [];
       const opening = spotFacts.find((fact) => fact.factType === "special_opening_hours" && fact.status !== "unknown") || spotFacts.find((fact) => fact.factType === "opening_hours" && fact.status !== "unknown");
       const reservation = spotFacts.find((fact) => fact.factType === "reservation" && fact.status !== "unknown");
+      const ticket = spotFacts.find((fact) => fact.factType === "ticket_policy" && fact.status !== "unknown");
+      const ticketValue = ticket?.value && typeof ticket.value === "object" ? (ticket.value.adult ?? ticket.value.price ?? ticket.value.amount) : ticket?.value;
+      const ticketPrice = Number(String(ticketValue ?? "").replace(/[^\d.]/g, ""));
       const crowdSignals = spotFacts.filter((fact) => ["crowd_pattern", "queue_pattern", "weekend_crowd", "holiday_crowd"].includes(fact.factType) && fact.status !== "unknown");
       return {
         ...spot,
         openingHours: opening?.value?.open && opening?.value?.close ? `${opening.value.open}-${opening.value.close}` : spot.openingHours,
         openingStatus: opening ? opening.status : spot.openingStatus,
         reservation: reservation ? { ...spot.reservation, status: reservation.status, researchValue: reservation.value, evidenceIds: reservation.supportingEvidenceIds } : spot.reservation,
+        ticketPrice: Number.isFinite(ticketPrice) && ticketPrice >= 0 ? ticketPrice : spot.ticketPrice,
         researchFacts: spotFacts,
         crowdResearchSignals: crowdSignals,
       };
@@ -775,7 +786,7 @@ async function aiRequest(env: any, options: {
         const payload: any = {
           model,
           messages,
-          max_tokens: options.maxTokens || 6000,
+          max_tokens: enforceOutputTokenBudget(options.purpose, options.maxTokens),
           stream: false,
           thinking: { type: options.thinking ? "enabled" : "disabled" },
           chat_template_kwargs: { enable_thinking: Boolean(options.thinking) },
@@ -794,7 +805,7 @@ async function aiRequest(env: any, options: {
           acquire: () => acquireAiRequestSlot(quotaScope, aiRequestInterval(env)),
           block: (milliseconds) => blockAiRequests(quotaScope, milliseconds),
           sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-          now: Date.now, assertActive: env.AI_ASSERT_ACTIVE,
+          now: Date.now, random: Math.random, assertActive: env.AI_ASSERT_ACTIVE,
         });
         const message = result?.choices?.[0]?.message;
         if (!message) throw new Error(`${provider} ${model} 没有返回消息`);
@@ -867,7 +878,7 @@ async function extractProfile(input: any, env: any) {
     const merged = mergeTravelProfile(input, { ...hints, requiredAttractions: [...new Set([...list(hints.requiredAttractions), ...replanRequired])] });
     return { ...merged, extractionModel: "结构化重规划复用（未重复调用模型）", extractionFormatRepaired: false, extractionFallbackReason: "", extractionReuseReason: "复用已确认用户画像，避免自动重规划重复消耗 V4 Flash 配额" };
   }
-  const prompt = `请把用户的中国旅行需求整理成严格 json。用户原文是事实提取的第一优先级；当前表单只是原文没提到字段时的默认参数，绝不能用表单默认人数、日期、天数覆盖原文。支持中文数字以及“8.25出发”“8月25日”“明天出发”等口语日期；没有年份时按中国时区、相对今天 ${today} 推断最近的未过日期。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。用户明确说“想去/希望去/必须去”的地点属于 requiredAttractions，普通兴趣偏好不得提升为必去。\n字段：city,startDate(YYYY-MM-DD),days,nights,partySize,adults,children,seniors,budget,budgetLevel,style,preferences(string[]),interestPriorities([{name,priority}]),avoid(string[]),requiredAttractions(string[]),excludedAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,crowdSensitivity,weatherSensitivity,walkingSensitivity,seasonalNeeds(string[]),requestedVariants(string[]),returnTime,unknownFields(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。未明确字段填 "Unknown" 或放入 unknownFields，不得自行猜测。当前规划器一次只支持一个明确城市或区县。\n当前表单（仅作缺省值）：${JSON.stringify({ ...input, freeText: undefined })}\n用户原文（最高优先级）：${cleanText(input.freeText)}`;
+  const prompt = `请把用户的中国旅行需求整理成严格 json。用户原文是事实提取的第一优先级；当前表单只是原文没提到字段时的默认参数，绝不能用表单默认人数、日期、天数覆盖原文。支持中文数字以及“8.25出发”“8月25日”“明天出发”等口语日期；没有年份时按中国时区、相对今天 ${today} 推断最近的未过日期。只提取用户明确表达或可直接计算的信息，不虚构景点、客流、预约、天气、酒店价格。用户明确说“想去/希望去/必须去”的地点属于 requiredAttractions，普通兴趣偏好不得提升为必去。\n字段：city,startDate(YYYY-MM-DD),days,nights,partySize,adults,children,seniors,budget,budgetLevel,style,preferences(string[]),interestPriorities([{name,priority}]),avoid(string[]),requiredAttractions(string[]),excludedAttractions(string[]),pace,transport,hotelPreference,lodgingArea,dayStart(HH:mm),dayEnd(HH:mm),mealPreference,crowdSensitivity,weatherSensitivity,walkingSensitivity,seasonalNeeds(string[]),requestedVariants(string[]),returnTime,tripPurpose(first_visit|repeat_visit|business|family|photography|food|general),unknownFields(string[]),clarificationNeeded(boolean),clarificationQuestion(string)。未明确字段填 "Unknown" 或放入 unknownFields，不得自行猜测。当前规划器一次只支持一个明确城市或区县；目的地时区由后端实体解析，模型不得猜。\n当前表单（仅作缺省值）：${JSON.stringify({ ...input, freeText: undefined })}\n用户原文（最高优先级）：${cleanText(input.freeText)}`;
   let extracted: any;
   try {
     extracted = await aiJson(env, {
@@ -1154,17 +1165,35 @@ function scoreSpot(spot: any, profile: any) {
   const matched = preferenceMatch.matched;
   const preference = preferenceMatch.score;
   const rating = Number(spot.rating || 0);
-  const quality = rating >= 4.5 ? 96 : rating >= 4 ? 88 : rating >= 3.5 ? 76 : spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
+  const ratingCount = Math.max(0, Number(spot.ratingCount || spot.reviewCount || spot.commentCount || 0));
+  const cityPrior = 4.2;
+  const shrunkRating = rating > 0 ? (ratingCount / (ratingCount + 120)) * rating + (120 / (ratingCount + 120)) * cityPrior : 0;
+  const quality = shrunkRating >= 4.5 ? 96 : shrunkRating >= 4 ? 88 : shrunkRating >= 3.5 ? 76 : spot.staticPoiQuality === "较高" ? 88 : spot.staticPoiQuality === "一般" ? 68 : 58;
   const completeness = Math.min(100, 45 + (spot.sourceUrl ? 15 : 0) + (spot.lat && spot.lng ? 20 : 0) + (spot.extract ? 12 : 0) + (spot.openingHours ? 8 : 0));
-  const season = spot.seasonality?.score == null ? 50 : Number(spot.seasonality.score);
-  const crowdProbability = spot.crowd?.score == null ? 50 : Number(spot.crowd.score);
+  const rawSeason = spot.seasonality?.score == null ? 50 : Number(spot.seasonality.score);
+  const seasonConfidence = spot.seasonality?.score == null ? 0 : Number(spot.seasonality?.confidence || 0.55);
+  const season = 50 + (rawSeason - 50) * seasonConfidence;
+  const crowdRiskScore = spot.crowd?.score == null ? 50 : Number(spot.crowd.score);
   const avoidCrowd = profile.crowdSensitivity === "high" || (profile.avoid || []).some((item: string) => /拥挤|人流/.test(item));
-  const crowdFit = avoidCrowd ? 100 - crowdProbability : 55;
+  const crowdFit = avoidCrowd ? 100 - crowdRiskScore : 55;
   const required = Boolean(spot.requiredByUser);
   const final = required ? 100 : Math.round(preference * 0.42 + quality * 0.2 + completeness * 0.16 + season * 0.12 + crowdFit * 0.1);
   return {
     final, required, matched,
-    breakdown: { preference, poiQuality: quality, dataCompleteness: completeness, seasonality: season, crowdFit },
+    breakdown: {
+      preference,
+      poiQuality: quality,
+      dataCompleteness: completeness,
+      seasonality: season,
+      crowdFit,
+      confidence: {
+        preference: preferenceMatch.confidence,
+        poiQuality: rating > 0 ? Math.min(0.92, 0.55 + Math.log10(ratingCount + 1) * 0.09) : 0.48,
+        dataCompleteness: 0.9,
+        seasonality: seasonConfidence,
+        crowdFit: Number(spot.crowd?.confidence || 0.45),
+      },
+    },
     basis: "结构化偏好 42% · POI 质量 20% · 数据完整度 16% · 时令证据 12% · 拥挤适配 10%",
     preferenceContributions: preferenceMatch.contributions,
   };
@@ -1703,7 +1732,11 @@ async function enrichDayTransit(day: any, city: any, env: any, exactCache = new 
   await Promise.all(day.blocks.filter((block: any) => block.type === "leg").map(async (block: any) => {
     const from = byName.get(block.from), to = byName.get(block.to);
     if (!from || !to) return;
-    const key = `${Number(from.lng).toFixed(5)},${Number(from.lat).toFixed(5)}->${Number(to.lng).toFixed(5)},${Number(to.lat).toFixed(5)}`;
+    const startMinute = timeToMinutes(block.startTime, 9 * 60);
+    const timeBucket = `${String(Math.floor(startMinute / 60)).padStart(2, "0")}:00-${String(Math.floor(startMinute / 60) + 1).padStart(2, "0")}:00`;
+    const weekdayClass = /六|日/.test(weekday(day.date)) ? "weekend" : "weekday";
+    const mode = cleanText(block.mode, "transit");
+    const key = `${Number(from.lng).toFixed(5)},${Number(from.lat).toFixed(5)}->${Number(to.lng).toFixed(5)},${Number(to.lat).toFixed(5)}|${mode}|${weekdayClass}|${timeBucket}`;
     if (!exactCache.has(key)) exactCache.set(key, amapTransitFor(from, to, city, env));
     const result: any = await exactCache.get(key);
     if (result.status === "ready") {
@@ -1711,8 +1744,9 @@ async function enrichDayTransit(day: any, city: any, env: any, exactCache = new 
       if (result.durationMin) {
         block.durationMin = result.durationMin;
         block.source = result.source;
-        block.quality = "verified";
-        block.fetchedAt = result.fetchedAt;
+      block.quality = "verified";
+      block.fetchedAt = result.fetchedAt;
+      block.temporalProfile = { mode, weekday: weekdayClass, timeBucket };
       }
       if (result.fare != null) block.fare = result.fare;
     } else block.mcpStatus = result;
@@ -1837,6 +1871,20 @@ export function reflowDayAfterTransit(day: any, profile: any) {
       trimmedActivityMinutes += reduction;
     }
   }
+  if (overflow > 0) {
+    const removable = [...rebuilt].reverse().find((block: any) => block.type === "attraction" && block.item && !block.item.requiredByUser);
+    if (removable) {
+      day.blocks = rebuilt.filter((block: any) => block !== removable);
+      day.finalTransitAdjustment = {
+        type: "deterministic-micro-repair",
+        removedSpotId: removable.item.id,
+        removedSpotName: removable.item.name,
+        reason: "最终交通核验后仍超出返程上限，移除末端最低优先级非必去节点；未改变必去点和用餐。",
+      };
+      reflowDayAfterTransit(day, profile);
+      return;
+    }
+  }
   if (trimmedActivityMinutes) day.finalTransitAdjustment = { type: "minor-overflow-compression", trimmedActivityMinutes, reason: "最终公交核验后压缩少量景点停留时间，保留用餐、必选点与用户返程上限" };
   const conflicts: string[] = [];
   if (cursor > dayEnd) conflicts.push(`最终公交核验后结束时间 ${minutesToTime(cursor)} 超出用户要求 ${minutesToTime(dayEnd)}`);
@@ -1852,7 +1900,7 @@ export function reflowDayAfterTransit(day: any, profile: any) {
     const end = timeToMinutes(item.endTime, start);
     const open = openingRange(item.openingHours);
     if (open && (start < open[0] || end > open[1])) conflicts.push(`${item.name} 在最终交通顺延后与地图常规开放时间冲突`);
-    if (item.timeRole === "nightscape" && start < timeToMinutes(day.weather?.sunset, 18 * 60)) conflicts.push(`${item.name} 在最终交通顺延后早于日落`);
+    if (item.timeRole === "nightscape" && start < timeToMinutes(day.weather?.sunset, 18 * 60) + 25) conflicts.push(`${item.name} 在最终交通顺延后早于民用暮光时段`);
     if (item.timeRole === "meal-landmark" && !((start >= 11 * 60 + 30 && start <= 13 * 60 + 30) || (start >= 17 * 60 + 30 && start <= 20 * 60))) conflicts.push(`${item.name} 在最终交通顺延后不处于饭点`);
   }
   day.conflicts = conflicts;
@@ -1888,9 +1936,21 @@ async function resolveLodgingAnchor(profile: any, city: any) {
   return { id: "hotel", name: label, lat: Number(city.lat), lng: Number(city.lng), source: city.source || "城市中心坐标" };
 }
 
+function transitEstimateBreakdown(distanceM: number) {
+  if (distanceM <= 1200) {
+    const walk = Math.max(8, Math.round(distanceM / 75));
+    return { access: walk, waiting: 0, riding: 0, transfers: 0, egress: 0, total: walk, method: "walkable-distance" };
+  }
+  const access = Math.min(12, Math.max(5, Math.round(distanceM / 2200)));
+  const waiting = distanceM > 12_000 ? 8 : 6;
+  const riding = Math.max(4, Math.round(distanceM * 1.12 / 430));
+  const transfers = distanceM > 16_000 ? 9 : distanceM > 7_000 ? 5 : 0;
+  const egress = Math.min(10, Math.max(4, Math.round(distanceM / 2800)));
+  return { access, waiting, riding, transfers, egress, total: access + waiting + riding + transfers + egress, method: "access+wait+ride+transfer+egress" };
+}
+
 function transitEstimate(distanceM: number) {
-  if (distanceM <= 1200) return Math.max(8, Math.round(distanceM / 75));
-  return Math.max(15, Math.round(9 + distanceM * 1.18 / 330));
+  return transitEstimateBreakdown(distanceM).total;
 }
 
 function withTransitUncertainty(leg: any) {
@@ -1935,6 +1995,7 @@ function fallbackMatrix(nodes: any[], fetchedAt: string, publicTransit = false) 
         distanceM,
         source: publicTransit ? "公共交通距离模型（等待高德精确段）" : "坐标距离×1.25 透明估算",
         quality: "estimated", fetchedAt,
+        ...(publicTransit ? { transitComponents: transitEstimateBreakdown(distanceM) } : {}),
       });
     }
   }
@@ -1986,6 +2047,7 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
         distanceM,
         source: publicTransit ? "公共交通距离模型（规划前高德精确段补强）" : "OSRM Table 道路路由",
         quality: publicTransit ? "estimated" : "routed", fetchedAt,
+        ...(publicTransit ? { transitComponents: transitEstimateBreakdown(distanceM) } : {}),
       });
     }));
     if (legs.length < nodes.length * (nodes.length - 1) * 0.8) throw new Error("OSRM 矩阵缺失过多");
@@ -2003,13 +2065,21 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
       .sort((left: any, right: any) => left.distanceM - right.distanceM)
       .slice(0, 2));
     const pairKeys = new Set<string>();
-    const riskDrivenCap = Math.max(3, Math.min(10, 3 + requiredIds.size * 2 + Math.ceil(Number(profile.days || 1) / 2)));
+    const riskDrivenCap = profile.deepReasoning === false
+      ? Math.max(3, Math.min(10, 3 + requiredIds.size * 2 + Math.ceil(Number(profile.days || 1) / 2)))
+      : Math.max(5, Math.min(18, 5 + requiredIds.size * 2 + Number(profile.days || 1)));
     const queryLegs = [...directed, ...nearest].filter((leg: any) => {
       const key = `${leg.fromId}->${leg.toId}`;
       if (pairKeys.has(key)) return false;
       pairKeys.add(key);
       return true;
-    }).slice(0, riskDrivenCap);
+    }).map((leg: any) => ({
+      ...leg,
+      edgeRiskScore: (leg.fromId === "hotel" || leg.toId === "hotel" ? 25 : 0)
+        + (requiredIds.has(leg.fromId) || requiredIds.has(leg.toId) ? 40 : 0)
+        + Math.min(25, Number(leg.distanceM || 0) / 1500)
+        + (leg.quality === "estimated" ? 15 : 5),
+    })).sort((left: any, right: any) => right.edgeRiskScore - left.edgeRiskScore).slice(0, riskDrivenCap);
     const exact = await mapWithConcurrency(queryLegs, 4, async (leg: any) => ({
       leg,
       result: await amapTransitFor(nodeById.get(leg.fromId), nodeById.get(leg.toId), city, env),
@@ -2448,7 +2518,7 @@ export function shouldRecoverPlannerImmediately(error: unknown) {
 function newWorkflowPlannerState(profile: any, env: any) {
   return {
     verifiedWebContext: [], research: null, decisionMemo: "", draft: { variants: [] }, audit: null,
-    modelAudit: { researchModel: aiPrimaryModel(env, "research"), plannerModel: aiPrimaryModel(env, "planner"), criticModel: aiPrimaryModel(env, "critic"), repairModel: aiPrimaryModel(env, "repair"), planningMode: "ai_optimized", criticStatus: "pending", criticIssues: [], toolCalls: [], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [] },
+    modelAudit: { researchModel: aiPrimaryModel(env, "research"), plannerModel: aiPrimaryModel(env, "planner"), criticModel: aiPrimaryModel(env, "critic"), repairModel: aiPrimaryModel(env, "repair"), planningMode: "ai_optimized", criticStatus: "pending", criticIssues: [], toolCalls: [], formatRepairs: 0, repairRounds: 0, deepReasoningUsed: profile.deepReasoning !== false, degraded: false, degradationReason: "", compilerIssues: [], feasibilityPrecheck: null },
   };
 }
 
@@ -2469,8 +2539,18 @@ function researchContextForPlanner(research: any) {
 
 async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: any, env: any, replanContext: any, previousState?: any, retryContext?: any) {
   assertPlannerContext(knowledge);
+  if (knowledge.constraintModel?.conflicts?.length) {
+    throw new Error(`用户硬约束互相冲突：${knowledge.constraintModel.conflicts.map((item: any) => item.reason).join("；")}`);
+  }
   const state = previousState || newWorkflowPlannerState(profile, env);
   const effectiveKnowledge = applyResearchFactsToKnowledge(knowledge, state.research);
+  if ((stage === "planner_memo" || stage.startsWith("variant_")) && !state.modelAudit.feasibilityPrecheck) {
+    const feasibility = precheckRouteFeasibility({ profile, knowledge: effectiveKnowledge });
+    state.modelAudit.feasibilityPrecheck = feasibility;
+    if (!feasibility.feasible) {
+      throw new Error(`用户硬约束当前不可行：${feasibility.violations.map((item: any) => item.message).join("；")}。最小冲突集：${feasibility.minimalConflictSet.join("、")}。请减少必去项、延长每日时段或调整日期后重试。`);
+    }
+  }
   const plannerInput = { task: replanContext ? "局部重规划" : "首次规划", objectives: WORKFLOW_OBJECTIVES, knowledge: compactPlannerKnowledge(effectiveKnowledge), research: researchContextForPlanner(state.research), verifiedWebContext: state.verifiedWebContext, replanContext };
   if (stage === "planner_research") {
     state.research = await runResearchAgent(profile, knowledge, env);
@@ -2510,30 +2590,35 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
     return state;
   }
   if (stage.startsWith("variant_")) {
+    // V2 兼容说明：旧流程以 maxTokens: 5400 生成完整时间表，并在“结构校验失败后的最后一次定向重试”中修补；
+    // V3 改为短骨架 + 确定性编译器。若明确要求“本次只生成某一套”，仍由独立 D1 stage 隔离该方案。
     const variantId = stage.slice("variant_".length);
     const variantIndex = WORKFLOW_OBJECTIVES.findIndex((objective) => objective.id === variantId);
     const objective = WORKFLOW_OBJECTIVES[variantIndex];
     if (!objective) throw new Error(`未知方案阶段：${stage}`);
     if (state.draft.variants.some((variant: any) => variant.id === variantId)) return state;
     let supplemental: any = null;
-    let variant: any = null;
+    const previousVariantSpotIds = state.draft.variants.flatMap((item: any) => item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)));
+    const deterministicBase = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, null, "确定性优化器生成初始可行骨架", previousVariantSpotIds);
+    let variant: any = deterministicBase;
     let failure = "";
     try {
       supplemental = await aiJson(env, {
-        purpose: "planner", thinking: false, maxTokens: 5400, requestTimeoutMs: 150000,
+        purpose: "planner", thinking: false, maxTokens: 1800, requestTimeoutMs: 150000,
         messages: [
-          { role: "system", content: `${PLANNER_SYSTEM_PROMPT}\n后端已完成联网取证。本次只生成 ${objective.id}=${objective.goal} 这一套方案，仍须覆盖所有必去点和全部旅行日期。输出 {"variants":[一套完整方案]}。${retryContext?.attempts ? `\n这是结构校验失败后的最后一次定向重试。上次错误：${cleanText(retryContext.lastError)}。必须输出正好 ${profile.days} 个 days，day 从 1 连续到 ${profile.days}，每一天都有 activities。允许 days、daysPlan、itinerary 等常见日期容器，后端会安全归一化。` : ""}${state.decisionMemo ? `\n共享 AI 决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
-          { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, existingVariantSummaries: state.draft.variants.map((item: any) => ({ id: item.id, strategy: item.strategy, spotIds: item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), requiredOutputShape: { variants: [{ id: objective.id, days: Array.from({ length: profile.days }, (_, index) => ({ day: index + 1, activities: "non-empty array" })) }] }, instruction: `只输出 ${objective.id} 的完整 JSON 方案，并与已有方案形成实质差异。` }) },
+          { role: "system", content: `你是旅行偏好与策略决策器，不是排程器。事实、精确分钟、开放窗、交通、用餐与硬约束由后端优化器决定。你只能从候选池选择 spotId，并说明高层策略，不得创造事实或时间。为 ${objective.id}=${objective.goal} 输出严格 JSON：{"skeleton":{"title":"","style":"","strategy":"","selectedSpotIds":[],"dayThemes":[]}}。selectedSpotIds 必须包含全部 requiredByUser=true 的 ID，并与已有方案保持体验差异。${state.decisionMemo ? `\n共享决策备忘录（不是新增事实）：\n${state.decisionMemo}` : ""}` },
+          { role: "user", content: JSON.stringify({ ...plannerInput, verifiedWebContext: state.verifiedWebContext, objective, optimizerProposal: { title: deterministicBase.title, days: deterministicBase.days.map((day: any) => ({ day: day.day, theme: day.theme, spotIds: day.activities.map((activity: any) => activity.spotId).filter(Boolean) })) }, existingVariantSummaries: state.draft.variants.map((item: any) => ({ id: item.id, strategy: item.strategy, spotIds: item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)) })), instruction: `确定性优化器已给出可行骨架。只做 ${objective.id} 的高层候选偏好调整和策略解释，不输出分钟级时间表。` }) },
         ],
       });
-      variant = normalizePlannerVariant(supplemental.value, profile, variantIndex);
-      if (!completePlannerVariant(variant, profile)) throw new Error(`${objective.name}返回 ${variant?.days?.length || 0}/${profile.days} 个完整日期`);
+      const skeleton = normalizePlannerSkeleton(supplemental.value, profile, variantIndex);
+      variant = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, skeleton, "确定性优化器根据 AI 高层候选策略生成可执行时间线", previousVariantSpotIds);
+      variant.strategy = cleanText(skeleton.strategy, variant.strategy);
     } catch (error: any) {
       if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
       failure = cleanText(error?.message, `${objective.name}模型调用失败`);
       if (!retryContext?.attempts && !shouldRecoverPlannerImmediately(error)) throw new Error(failure);
-      const previousVariantSpotIds = state.draft.variants.flatMap((item: any) => item.days.flatMap((day: any) => day.activities.map((activity: any) => activity.spotId).filter(Boolean)));
-      variant = recoverPlannerVariant(profile, effectiveKnowledge, variantIndex, variant, failure, previousVariantSpotIds);
+      variant = deterministicBase;
+      variant.recoveryReason = failure;
       state.modelAudit.degraded = true;
       state.modelAudit.planningMode = "deterministic_recovery";
       const recoveryReason = shouldRecoverPlannerImmediately(error) ? "模型不存在或鉴权不可用" : `在 ${Number(retryContext?.attempts || 0) + 1} 次阶段尝试后仍未获得可编译方案`;
@@ -2554,19 +2639,32 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       changes: coverageRepair.changes,
     });
     const deterministicAudit = auditPlannerDraft(state.draft, effectiveKnowledge);
+    const semanticCriticNeeded = deterministicAudit.hardIssues.length === 0
+      && (list(profile.preferences).length > 0 || list(profile.avoid).length > 0 || deterministicAudit.differences.maxJaccard > 0.75);
+    if (!semanticCriticNeeded) {
+      state.modelAudit.criticStatus = "skipped-structural-repair-first";
+      state.modelAudit.compilerIssues.push({ code: "AI_CRITIC_SKIPPED", severity: "info", message: "确定性审计已发现结构问题，先进入确定性修复层；未为可程序判断的问题消耗 Critic 调用。" });
+      return state;
+    }
     try {
       const critique = await aiJson(env, {
         purpose: "critic", thinking: profile.deepReasoning !== false, maxTokens: 2200, requestTimeoutMs: 120000,
         messages: [
-          { role: "system", content: "你是独立旅行方案 Critic。只能审查输入中的三套草案和已给事实，不得补充新事实。寻找必去遗漏、时间重叠、开放冲突、交通不足、饭点缺失、雨天不适配、客流证据误用、三方案过度相似。只输出 JSON：{issues:[{variantId,code,severity,message,suggestedRepair,evidenceIds}]}。severity 仅 hard/warning/info。" },
+          { role: "system", content: "你是独立旅行方案 Structured Critic。确定性程序已经负责时间重叠、开放窗、交通间隔、饭点和必去覆盖；你只检查偏好违背、体验重复、方案风格不一致、天气语义和解释是否误用证据。不得补充新事实。只输出 JSON：{issues:[{target,type,severity,evidenceRef,proposedAction,confidence,message,variantId}]}。target 必须是现有 spotId、dayId 或 variantId；severity 仅 warning/info。" },
           { role: "user", content: JSON.stringify({ profile: effectiveKnowledge.profile, draft: state.draft, deterministicIssues: deterministicAudit.issues, research: researchContextForPlanner(state.research), trafficMatrix: effectiveKnowledge.trafficMatrix }) },
         ],
       });
       state.modelAudit.criticModel = critique.model;
       state.modelAudit.criticStatus = "ready";
       state.modelAudit.criticIssues = list(critique.value?.issues).slice(0, 40).map((issue: any) => ({
-        variantId: cleanText(issue.variantId), code: cleanText(issue.code, "AI_CRITIC_NOTE"), severity: ["hard", "warning", "info"].includes(cleanText(issue.severity)) ? cleanText(issue.severity) : "warning",
-        message: cleanText(issue.message), suggestedRepair: cleanText(issue.suggestedRepair), evidenceIds: list(issue.evidenceIds).slice(0, 8),
+        target: cleanText(issue.target),
+        variantId: cleanText(issue.variantId),
+        code: cleanText(issue.type || issue.code, "AI_CRITIC_NOTE"),
+        severity: ["warning", "info"].includes(cleanText(issue.severity)) ? cleanText(issue.severity) : "warning",
+        message: cleanText(issue.message),
+        suggestedRepair: cleanText(issue.proposedAction || issue.suggestedRepair),
+        evidenceIds: [...new Set([cleanText(issue.evidenceRef), ...list(issue.evidenceIds)].filter(Boolean))].slice(0, 8),
+        confidence: Math.max(0, Math.min(1, Number(issue.confidence || 0.5))),
       })).filter((issue: any) => issue.message);
     } catch (error: any) {
       if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
@@ -2639,6 +2737,20 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
   }
   if (stage.startsWith("repair_round_")) {
     if (!state.audit) state.audit = auditPlannerDraft(state.draft, effectiveKnowledge);
+    if (!state.audit.hardIssues.length) return state;
+    const beforeDeterministicRepair = state.audit.hardIssues.length;
+    const coverageRepair = enforceRequiredCoverage(state.draft, effectiveKnowledge);
+    bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
+    const legalization = legalizePlannerTimelines(state.draft, effectiveKnowledge);
+    const safetyRepair = applyFinalTimelineSafetyRepair(state.draft, effectiveKnowledge);
+    bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
+    state.audit = auditPlannerDraft(state.draft, effectiveKnowledge);
+    state.modelAudit.compilerIssues.push({
+      code: "DETERMINISTIC_REPAIR_LAYER",
+      severity: state.audit.hardIssues.length ? "warning" : "info",
+      stage,
+      message: `确定性修复层先处理 ${beforeDeterministicRepair - state.audit.hardIssues.length}/${beforeDeterministicRepair} 个硬冲突：补回必去 ${coverageRepair.replaced + coverageRepair.rebuilt} 项、顺延 ${legalization.shiftedActivities} 个节点、补午餐 ${safetyRepair.insertedLunches} 次、补晚餐 ${safetyRepair.insertedDinners} 次、移除低价值超时节点 ${safetyRepair.removedFlexibleStops} 个。`,
+    });
     if (!state.audit.hardIssues.length) return state;
     const affectedIds = new Set(state.audit.hardIssues.map((issue: any) => cleanText(issue.variantId)).filter(Boolean));
     if (!affectedIds.size) affectedIds.add("relax");
@@ -3385,25 +3497,28 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
     const canonicalName = cleanText(requiredNameById.get(spot.id), spot.name);
     const tags = [...new Set([spot.category, ...(spot.matchedPreferences || []), ...(/夜|江|湖|河|桥/.test(canonicalName) ? ["夜景"] : []), ...(/园|湖|山|湿地|溪|谷/.test(canonicalName) ? ["自然", "摄影"] : []), ...(/寺|庙|博物馆|遗址|故居|古镇/.test(canonicalName) ? ["文化"] : [])].map((value) => cleanText(value)).filter(Boolean))];
     const semantics = visitSemantics({ ...spot, name: canonicalName }, weather.tripForecast);
-    const parsedOpening = openingRange(spot.openingHours);
-    const availabilityWindows = parsedOpening ? weather.tripForecast.map((day: any) => ({
-      date: day.date,
-      start: minutesToTime(parsedOpening[0]),
-      end: minutesToTime(parsedOpening[1]),
-      confidence: spot.openingStatus?.status === "verified" ? 0.9 : 0.62,
+    const availabilityWindows = parseAvailabilityWindows({
+      openingHours: spot.openingHours,
+      dates: weather.tripForecast.map((day: any) => day.date),
       sourceId: `source-${spot.id}-opening`,
-      status: spot.openingStatus?.status === "verified" ? "verified" : "estimated",
-    })) : [];
+      verified: spot.openingStatus?.status === "verified",
+    });
     return {
       id: spot.id, name: canonicalName, officialName: spot.officialName || spot.name, aliases: imageLookupNames(canonicalName, city.name), lat: Number(spot.lat), lng: Number(spot.lng),
       category: spot.category, poiType: spot.category || "旅游景点", cluster: cleanText(spot.district || spot.address, "Unknown"),
       plannerScore: Number(spot.plannerScore || 0),
       scoreBreakdown: { ...spot.scoreBreakdown },
+      scoreConfidence: {
+        ...spot.scoreBreakdown?.confidence,
+        overall: Number((Object.values(spot.scoreBreakdown?.confidence || {}).reduce((sum: number, value: any) => sum + Number(value || 0), 0) / Math.max(1, Object.keys(spot.scoreBreakdown?.confidence || {}).length)).toFixed(2)),
+      },
       scoreBasis: spot.scoreBasis,
       preferenceContributions: spot.preferenceContributions,
       matchedPreferences: spot.matchedPreferences,
       recommendationReasons: spot.recommendationReasons,
-      recommendedDurationMin: clamp(spot.durationMin || 120, 60, 240), openingHours: spot.openingHours || null,
+      recommendedDurationMin: clamp(spot.durationMin || 120, 60, 240),
+      duration: { min: clamp((spot.durationMin || 120) * 0.65, 40, 180), expected: clamp(spot.durationMin || 120, 60, 240), max: clamp((spot.durationMin || 120) * 1.45, 90, 300) },
+      openingHours: spot.openingHours || null,
       availabilityWindows,
       openingStatus: spot.openingStatus?.status || (spot.openingHours ? "estimated" : "unknown"), openingAlert: spot.openingStatus?.alert || null,
       reservation: {
@@ -3421,7 +3536,9 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
         : { status: "unknown", note: profile.seasonalNeeds?.length ? `用户关注 ${profile.seasonalNeeds.join("、")}；尚无指定日期时令实况证据` : "未取得指定日期时令实况证据" },
       hotness: spot.hotness,
       crowdRisk: spot.crowd,
-      tags, requiredByUser: Boolean(spot.requiredByUser), sourceName: spot.sourceName || spot.source || "公开地图 / 中文维基百科",
+      tags, experienceTags: tags.map((tag) => tag.toLowerCase()), requiredByUser: Boolean(spot.requiredByUser), sourceName: spot.sourceName || spot.source || "公开地图 / 中文维基百科",
+      chosenEntrance: { status: "fallback_centroid", lat: Number(spot.lat), lng: Number(spot.lng), source: "POI 中心点；尚未取得可核验入口坐标" },
+      entryExitBufferMin: /景区|乐园|故宫|山|湿地|古镇|动物园|海洋馆/.test(`${canonicalName}${spot.category || ""}`) ? 20 : 6,
       constraints: {
         mustVisit: Boolean(spot.requiredByUser),
         excluded: false,
@@ -3441,6 +3558,7 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
   });
   const knowledge = {
     profile: { ...profile, freeText: undefined, extractionModel: undefined }, city,
+    constraintModel: compileConstraintModel(profile),
     spots: plannerSpots,
     weather: weather.tripForecast,
     hotel,
@@ -3454,6 +3572,22 @@ async function preparePlanKnowledge(profile: any, city: any, env: any, report?: 
     dataPolicy: { verified: "仅来自工具返回", prediction: "必须显示 Prediction、概率、依据与不确定性", unknown: "不得升级为 Verified", crowd: "预测拥挤概率，不生成实时人数", trends: "Hotness 与 Seasonality 分离" },
     intelligence: { news: { status: intelligence.news.status, provider: intelligence.news.provider, fetchedAt: intelligence.news.fetchedAt, articleCount: intelligence.news.articles?.length || 0 }, social: { status: intelligence.social.status, provider: intelligence.social.provider, fetchedAt: intelligence.social.fetchedAt, detail: intelligence.social.detail } },
   };
+  if (Array.isArray(hotel.candidates) && hotel.candidates.length) {
+    const anchors = plannerSpots.filter((spot: any) => spot.requiredByUser).concat(plannerSpots.filter((spot: any) => !spot.requiredByUser).slice(0, 8)).slice(0, 12);
+    hotel.candidates = hotel.candidates.map((candidate: any) => {
+      const [candidateLng, candidateLat] = cleanText(candidate.location).split(",").map(Number);
+      const lat = Number(candidate.lat || candidateLat);
+      const lng = Number(candidate.lng || candidateLng);
+      const averageAnchorDistanceKm = Number.isFinite(lat) && Number.isFinite(lng) && anchors.length
+        ? anchors.reduce((sum: number, spot: any) => sum + haversine(lat, lng, Number(spot.lat), Number(spot.lng)) / 1000, 0) / anchors.length
+        : null;
+      const pricePenalty = Number(candidate.price || 0) / 120;
+      const locationUtility = averageAnchorDistanceKm == null ? 50 : clamp(100 - averageAnchorDistanceKm * 8, 0, 100);
+      const hotelUtility = Number((locationUtility * 0.65 + Number(candidate.rating || 4) * 7 - pricePenalty).toFixed(1));
+      return { ...candidate, averageAnchorDistanceKm: averageAnchorDistanceKm == null ? null : Number(averageAnchorDistanceKm.toFixed(2)), hotelUtility, hotelUtilityBasis: "候选 POI 距离启发式 65% + 地图评分 - 参考价惩罚；非实时交通或成交价" };
+    }).sort((left: any, right: any) => Number(right.hotelUtility || 0) - Number(left.hotelUtility || 0));
+    hotel.recommendedCandidateId = hotel.candidates[0]?.id || null;
+  }
   return {
     providerBundle, weather, hotel, rawSpots, required,
     requiredNameEntries: [...requiredNameById.entries()],
@@ -3551,7 +3685,7 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       daysPlan, hotelPlan: hotel,
       budgetBreakdown,
       budgetWarning: ["tight", "over_budget", "unknown"].includes(budgetBreakdown.budgetStatus) ? `${budgetBreakdown.budgetStatusLabel}：${budgetBreakdown.note}` : null,
-      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", costs: "Trip Cost V1：酒店 Provider、门票研究证据、实际 itinerary legs、实际饭点与确定性估算规则", images: "高德官方 / Wikimedia / Unsplash", crowd: "Crowd Risk v2：日期/时段、景点承载特征、天气、公开趋势（非实时人数）", hotness: intelligence.news.status === "ready" ? intelligence.news.provider : "Unknown", seasonality: "近期公开报道中的时令实况信号；无证据则 Unknown", social: intelligence.social.status === "ready" ? intelligence.social.provider : "可选社交 MCP 未连接", reservations: "Unknown" },
+      dataSources: { weather: weather.source || "Unavailable", spots: "中文维基百科 / OSM / 高德 POI", hotels: hotel.candidates?.length ? "高德酒店 POI / 酒店 MCP" : "Unknown", routing: trafficMatrix.source, transit: "高德地图 MCP；不可用时保留 OSRM 矩阵事实", costs: "Trip Cost V2：酒店 Provider、门票研究证据、实际 itinerary legs、实际饭点与金额加权不确定性规则", images: "高德官方 / Wikimedia / Unsplash", crowd: "Crowd Risk v2：日期/时段、景点承载特征、天气、公开趋势（非实时人数）", hotness: intelligence.news.status === "ready" ? intelligence.news.provider : "Unknown", seasonality: "近期公开报道中的时令实况信号；无证据则 Unknown", social: intelligence.social.status === "ready" ? intelligence.social.provider : "可选社交 MCP 未连接", reservations: "Unknown" },
       generatedAt: fetchedAt,
       planningDecision: { mode: generated.modelAudit.planningMode, researchModel: generated.modelAudit.researchModel, model: generated.modelAudit.plannerModel, criticModel: generated.modelAudit.criticModel, criticStatus: generated.modelAudit.criticStatus, criticIssues: generated.modelAudit.criticIssues, repairModel: generated.modelAudit.repairModel, repairRounds: generated.modelAudit.repairRounds, formatRepairs: generated.modelAudit.formatRepairs, networkToolCalls: generated.modelAudit.toolCalls, degraded: generated.modelAudit.degraded, degradationReason: generated.modelAudit.degradationReason || null, draftCompilerIssues: generated.modelAudit.compilerIssues },
       changeScope: replanContext && variantId === replanContext.activeVariant ? { mode: affectedDayIndexes.length ? "minimum-disruption" : "global-with-preservation-guidance", affectedDays: affectedDayIndexes.map((index: number) => index + 1), preservedDays: Array.from({ length: profile.days }, (_, index) => index + 1).filter((day) => !affectedDayIndexes.includes(day - 1)), note: "未受影响日期的稳定景点 ID 与原时间由后端锁定，不交给模型重写。" } : null,
@@ -3559,10 +3693,24 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
   }
 
   for (const plan of alternatives) {
+    plan.contractVersion = "3.0";
+    plan.plannerVersion = "deterministic-optimizer-v3";
+    plan.scoringVersion = "candidate-score-v3-confidence";
+    plan.crowdModelVersion = "crowd-risk-v2";
+    plan.costModelVersion = "trip-cost-v2";
     plan.evaluation = planEvaluation(plan, profile, spots.length);
     plan.optimization = { algorithm: `${modelFamily(generated.modelAudit.plannerModel)} ${generated.modelAudit.deepReasoningUsed ? "深度决策" : "快速决策"} + Research Agent + 多目标路线优化 + Travel Compiler`, candidateCount: spots.length, selectedCount: plan.evaluation.evidence.selectedCount, requiredCoverage: `${plan.evaluation.evidence.requiredMatched.length}/${plan.evaluation.evidence.requiredTotal}`, note: generated.modelAudit.planningMode === "deterministic_recovery" ? "规划模型未返回可编译结构；系统已明确降级为确定性多目标路线优化，并继续执行开放时间、交通、用餐和必去约束校验。" : `Research Agent 先按信息增益取证；交通矩阵在模型调用前生成；实际模型 ${cleanText(generated.modelAudit.plannerModel, "unknown")} ${generated.modelAudit.deepReasoningUsed ? "形成决策备忘录后" : "在用户关闭深度思考时直接"}生成三套草案，独立 Critic 与确定性编译器再检查硬冲突。` };
-    plan.candidatePool = spots.slice(0, 16).map((spot: any) => ({ id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore, scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis, requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences, selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)) }));
+    plan.candidatePool = spots.map((spot: any) => ({ id: spot.id, name: spot.name, category: spot.category, score: spot.plannerScore, scoreBreakdown: spot.scoreBreakdown, scoreBasis: spot.scoreBasis, requiredByUser: spot.requiredByUser, matchedPreferences: spot.matchedPreferences, selected: plan.daysPlan.some((day: any) => day.items.some((item: any) => item.id === spot.id)) }));
     Object.assign(plan, analyzePlanTrustV2(plan, profile));
+    plan.reproducibility = reproducibilitySnapshot({
+      request: { ...profile, freeText: undefined },
+      candidates: plan.candidatePool,
+      facts: plan.travelFacts,
+      providers: plan.dataSources,
+      model: generated.modelAudit.plannerModel,
+      createdAt: fetchedAt,
+    });
+    if (plan.robustnessSimulation?.seed != null) plan.reproducibility.randomSeed = plan.robustnessSimulation.seed;
     if (profile.budget && ["tight", "over_budget"].includes(plan.budgetBreakdown?.budgetStatus)) {
       plan.compiler?.issues?.push({
         code: plan.budgetBreakdown.budgetStatus === "over_budget" ? "BUDGET_OVER" : "BUDGET_TIGHT",
@@ -3578,6 +3726,9 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       plan.changeSet = computeChangeSet({ ...plan, daysPlan: previousDaysPlan, changeSet: null }, plan, affectedDayIndexes.map((index: number) => index + 1));
     }
   }
+
+  const diversityProfiles = buildPlanDiversityProfiles(alternatives);
+  for (const plan of alternatives) plan.diversity = diversityProfiles[plan.id];
 
   const requiredCoverage = alternatives.every((plan: any) => profile.requiredAttractions.every((name: string) => plan.daysPlan.flatMap((day: any) => day.items).some((item: any) => normalizeName(item.name) === normalizeName(name) && item.requiredByUser)));
   if (!requiredCoverage) {
@@ -3665,6 +3816,13 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       repairRounds: generated.modelAudit.repairRounds,
       planningMode: generated.modelAudit.planningMode,
       degraded: generated.modelAudit.degraded,
+      tokenBudget: {
+        planner: modelTokenBudget("planner"),
+        research: modelTokenBudget("research"),
+        repair: modelTokenBudget("repair"),
+        compactKnowledgeApproxTokens: approximateTokens(compactPlannerKnowledge(knowledge)),
+      },
+      workflow: { type: "dependency-dag", nodes: PLANNING_WORKFLOW_DAG, executionGroups: workflowExecutionGroups(), uiMilestones: WORKFLOW_STAGES },
       stages: [
         `${profile.extractionModel || aiPrimaryModel(env, "extract")} 需求结构化`,
         `${generated.modelAudit.researchModel} 自适应 Research Agent 与多源证据合成`,

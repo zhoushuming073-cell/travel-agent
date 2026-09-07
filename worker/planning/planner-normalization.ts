@@ -107,6 +107,24 @@ export function normalizePlannerVariant(value: any, profile: any, variantIndex: 
   };
 }
 
+export function normalizePlannerSkeleton(value: any, profile: any, variantIndex: number) {
+  const variantId = ["hot", "niche", "relax"][variantIndex];
+  const raw = value?.skeleton || modelVariants(value)[0] || value?.[variantId] || value?.variant || value?.plan || value;
+  const selectedSpotIds = [...new Set([
+    ...list(raw?.selectedSpotIds),
+    ...list(raw?.spotIds),
+    ...modelDays(raw).flatMap((day: any) => modelActivities(day).map((activity: any) => cleanText(activity?.spotId || activity?.poiId || activity?.placeId))),
+  ].map((item) => cleanText(item)).filter(Boolean))];
+  return {
+    id: variantId,
+    title: cleanText(raw?.title, ["经典覆盖", "自然摄影", "轻松避峰"][variantIndex]),
+    style: cleanText(raw?.style, ["经典", "自然摄影", "轻松避峰"][variantIndex]),
+    strategy: cleanText(raw?.strategy),
+    dayThemes: list(raw?.dayThemes).slice(0, Number(profile.days || 1)),
+    days: [{ day: 1, activities: selectedSpotIds.map((spotId) => ({ type: "attraction", spotId })) }],
+  };
+}
+
 export function completePlannerVariant(variant: any, profile: any) {
   return Boolean(variant && variant.days?.length === Number(profile.days) && variant.days.every((day: any, index: number) => Number(day.day) === index + 1 && Array.isArray(day.activities) && day.activities.length > 0));
 }
@@ -143,13 +161,13 @@ export function recoverPlannerVariant(profile: any, knowledge: any, variantIndex
       cursor += 115;
     }
     if (nightscape) {
-      const sunset = timeToMinutes(knowledge?.weather?.[dayIndex]?.sunset, 18 * 60);
+      const sunset = timeToMinutes(knowledge?.weather?.[dayIndex]?.sunset, 18 * 60) + 25;
       const start = Math.max(cursor, sunset, 18 * 60);
       if (start + 90 <= dayEnd) activities.push({ type: "attraction", spotId: nightscape.id, startTime: minutesToTime(start), endTime: minutesToTime(start + 90), durationMin: 90, reason: "夜景型地点安排在日落后", evidenceRefs: [nightscape.id], alternativeSpotIds: [] });
     }
     const lastEnd = activities.reduce((latest, activity) => Math.max(latest, timeToMinutes(activity.endTime, latest)), dayStart);
     if (lastEnd + 30 <= dayEnd) activities.push({ type: "rest", label: "弹性缓冲 / 返回住宿地", startTime: minutesToTime(lastEnd), endTime: minutesToTime(lastEnd + 30), durationMin: 30, reason: "为交通波动和临时调整预留缓冲", evidenceRefs: [] });
-    return { day: dayIndex + 1, theme: `${titles[variantIndex]} · 第 ${dayIndex + 1} 天`, returnHotelTime: minutesToTime(Math.min(dayEnd, lastEnd + 30)), totalActivityMin: activities.reduce((sum, activity) => sum + Number(activity.durationMin || 0), 0), totalTransportMin: 0, activities };
+    return { day: dayIndex + 1, theme: cleanText(partial?.dayThemes?.[dayIndex], `${titles[variantIndex]} · 第 ${dayIndex + 1} 天`), returnHotelTime: minutesToTime(Math.min(dayEnd, lastEnd + 30)), totalActivityMin: activities.reduce((sum, activity) => sum + Number(activity.durationMin || 0), 0), totalTransportMin: 0, activities };
   });
   return {
     id: variantId,
@@ -271,7 +289,7 @@ export function legalizePlannerTimelines(draft: any, knowledge: any) {
         let minimumStart = previousEnd;
         const semanticSpot: any = activity.spotId ? spotMap.get(activity.spotId) : null;
         if (semanticSpot?.timeRole === "nightscape") {
-          minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60));
+          minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60) + 25);
         }
         if (semanticSpot?.timeRole === "meal-landmark") {
           if (originalStart < 11 * 60 + 30) minimumStart = Math.max(minimumStart, 11 * 60 + 30);
@@ -352,7 +370,7 @@ export function applyFinalTimelineSafetyRepair(draft: any, knowledge: any) {
         activity.type = "meal";
         minimumStart = Math.max(minimumStart, originalStart <= 14 * 60 ? 11 * 60 + 30 : 17 * 60 + 30);
       }
-      if (semanticSpot?.timeRole === "nightscape") minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60));
+      if (semanticSpot?.timeRole === "nightscape") minimumStart = Math.max(minimumStart, timeToMinutes(knowledge?.weather?.[day.day - 1]?.sunset, 18 * 60) + 25);
       if (activity.spotId && previousSpot?.spotId && matrix?.legs?.length) {
         const leg = matrix.legs.find((item: any) => item.fromId === previousSpot.spotId && item.toId === activity.spotId)
           || matrix.legs.find((item: any) => item.fromId === activity.spotId && item.toId === previousSpot.spotId);

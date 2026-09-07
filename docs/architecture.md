@@ -89,7 +89,13 @@ The ordered `WORKFLOW_STAGES` contract is:
 
 - `worker/planning/planner-normalization.ts` normalizes variable model response shapes, recovers incomplete variants, restores required-place coverage, binds matrix facts, and performs final meal/time-window safety repair.
 - `worker/domain/planner-v4.ts` defines planner context checks, audits, deterministic profile merging, opening ranges, and provider settlement.
-- `worker/domain/route-optimizer.ts` clusters and selects route buckets for deterministic recovery.
+- `worker/domain/route-optimizer.ts` is the primary minute-based route scheduler: time-window insertion, objective presets, 2-opt, relocate/swap, cross-day moves, deterministic LNS, weather/crowd/cost penalties, duration ranges, fatigue, critical slack, switch cost, and experience continuity.
+- `worker/domain/availability.ts` compiles split opening hours, last admission, and weekday closures into dated windows.
+- `worker/domain/constraint-model.ts` separates hard constraints, penalty-based soft constraints, preferences, assumptions, unknowns, source priorities, and explicit conflicts before planning.
+- `worker/domain/fact-graph.ts` builds the shared entity/fact/source/derived graph with versions, aliases, validity, confidence, and provenance.
+- `worker/domain/diversity.ts`, `robustness.ts`, and `reproducibility.ts` provide multi-dimensional variant diversity, seeded Monte Carlo simulation, and replay hashes.
+- `worker/domain/model-budget.ts` caps output tokens by model role; `workflow-dag.ts` exposes the logical dependency DAG while the public 17-checkpoint contract remains compatible.
+- `worker/domain/offline-benchmark.ts` runs 120 deterministic fixed scenarios without external providers or models.
 - `worker/domain/contract.ts` enforces the final three-plan API contract.
 - `worker/domain/compiler.ts`, `dependency-graph.ts`, `fragility.ts`, and `stress-test.ts` derive execution blocks, dependencies, buffers, fragility, and simulations.
 - `worker/domain/model-routing.ts` selects verified Flash/Pro model candidates, classifies failures, and maintains short-lived circuit breakers.
@@ -131,6 +137,18 @@ The authoritative schema history is in `drizzle/`. `db/schema.ts` is a supportin
 - Crowd scores are predictions with confidence/evidence context, not live counts.
 - Transit coverage separately counts verified and estimated legs.
 - Required attractions cannot be removed to satisfy crowd, opening, or optimization preferences; unresolved risk is surfaced instead.
+- Contract `3.0` requires algorithm versions, a fact graph, seeded robustness simulation, reproducibility metadata, and diversity metrics for each alternative.
+
+## Four decision layers
+
+The planner keeps four responsibilities separate:
+
+1. Fact — providers, research evidence, Unknown/conflicting states, validity windows, and derivations.
+2. Constraint — hard feasibility and penalty-based soft preferences compiled before route generation.
+3. Optimization — deterministic candidate selection and minute scheduling under time, transit, meal, weather, crowd, cost, fatigue, and diversity objectives.
+4. LLM — requirement extraction, high-level strategy, semantic critique, and last-resort semantic repair. It cannot invent IDs or own exact times.
+
+The UI and D1 still expose the stable 17 checkpoints. Internally, non-model work is represented as a dependency DAG so independent candidate, weather, hotel, research, and transit work can be reasoned about and parallelized safely.
 
 ## Deployment invariants
 

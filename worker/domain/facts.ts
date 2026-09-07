@@ -182,6 +182,28 @@ export function buildTravelFacts(plan: ItineraryPlan, profile: TravelProfile, no
       downstreamImpact: impact("天气", "逐日预报"),
       ttlMs: FACT_TTL_MS.weather,
     });
+    const sunset = text(day.weather?.sunset);
+    if (sunset) {
+      const match = sunset.match(/^(\d{1,2}):(\d{2})$/);
+      const civilDuskMinute = match ? Number(match[1]) * 60 + Number(match[2]) + 25 : null;
+      add({
+        subject: `${day.date} 太阳时段`,
+        field: "日落与民用暮光",
+        value: {
+          sunset,
+          civilDusk: civilDuskMinute === null ? null : `${String(Math.floor(civilDuskMinute / 60)).padStart(2, "0")}:${String(civilDuskMinute % 60).padStart(2, "0")}`,
+        },
+        status: weatherReady ? "predicted" : "estimated",
+        nature: weatherReady ? "forecast" : "public-reference",
+        sourceType: weatherReady ? "weather-service" : "calculation",
+        sourceName: weatherReady ? text(day.weather?.source, "天气服务") : "代码默认日落估算",
+        updatedAt: weatherUpdatedAt,
+        importance: "medium",
+        uncertaintyReason: weatherReady ? "天文时刻来自天气服务，民用暮光为日落后 25 分钟的透明近似" : "缺少指定日期天文数据，使用已披露默认值",
+        downstreamImpact: "决定夜景、灯光和日落体验的最早安排时段",
+        ttlMs: FACT_TTL_MS.weather,
+      });
+    }
 
     const routeKnown = day.route?.quality === "routed" || day.route?.quality === "exact";
     const routeUpdatedAt = iso(day.route?.fetchedAt, generatedAt);

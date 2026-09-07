@@ -67,6 +67,8 @@ export function synthesizeFact(targetId: string, targetName: string, factType: R
   const conflict = Boolean(runnerUp && runnerUp.weight >= Math.max(0.65, winner.weight * 0.72));
   const officialFetched = winner.values.some((row) => row.sourceTier === "tier_1_official" && row.pageStatus === "page_fetched");
   const confidence = Number(Math.min(0.97, winner.weight / Math.max(1, winner.values.length)).toFixed(3));
+  const conflictDominance = runnerUp ? winner.weight / Math.max(0.01, winner.weight + runnerUp.weight) : 1;
+  const conflictConfidence = Number(Math.min(0.72, Math.max(0.35, confidence * conflictDominance + (officialFetched ? 0.12 : 0))).toFixed(3));
   const allConflictIds = conflict ? ranked.slice(1).flatMap((group) => group.values.map((row) => row.id)) : [];
   return {
     id: `fact:${targetId}:${factType}`,
@@ -76,7 +78,7 @@ export function synthesizeFact(targetId: string, targetName: string, factType: R
     value: winner.values[0].extractedValue,
     conservativeValue: conflict ? conservativeValue(ranked.flatMap((group) => group.values.map((row) => row.extractedValue)), factType) : undefined,
     status: conflict ? "conflicting" : officialFetched ? "verified" : confidence >= 0.68 ? "supported" : "inferred",
-    confidence: conflict ? Math.min(confidence, 0.55) : confidence,
+    confidence: conflict ? conflictConfidence : confidence,
     supportingEvidenceIds: winner.values.map((row) => row.id),
     conflictingEvidenceIds: allConflictIds,
     fetchedAt: now,

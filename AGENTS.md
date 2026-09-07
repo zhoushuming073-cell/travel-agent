@@ -62,6 +62,11 @@ DeepSeek V4 Flash 只用于需求提取和用户画像；V4 Pro 用于研究、�
 - `compiler.ts`、`dependency-graph.ts`、`fragility.ts`、`stress-test.ts`：可执行性、依赖、缓冲、脆弱性和情景模拟；
 - `research-*`、`decision-trace.ts`、`evidence.ts`：研究预算、证据综合和决策追踪；
 - `crowd-*`、`traffic-coverage.ts`：拥挤风险预测和交通核验覆盖。
+- `availability.ts`、`constraint-model.ts`：日期化开放窗口与分层约束编译；
+- `fact-graph.ts`、`reproducibility.ts`：统一事实图、别名/来源关系和可复现快照；
+- `diversity.ts`、`robustness.ts`：多维方案差异与可重复 Monte Carlo 鲁棒性仿真；
+- `model-budget.ts`、`workflow-dag.ts`：按职责限制模型输出预算，并描述逻辑依赖 DAG；
+- `offline-benchmark.ts`：不依赖模型的固定场景回归基准。
 
 自动化测试集中在 `tests/`。
 
@@ -112,6 +117,9 @@ npm run build
 
 # 当前脚本等价于 test:domain + build
 npm test
+
+# 生产规划器固定场景与架构回归
+npm run benchmark:planner
 ```
 
 提交到 `main` 前，至少运行 `test:domain`、`typecheck` 和 `lint`。影响 Worker、构建配置、依赖或部署产物时还必须运行 `build`。不要通过关闭规则、扩大 `any`、删除失败测试或降低合同要求来让检查通过。

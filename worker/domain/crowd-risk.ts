@@ -42,6 +42,9 @@ export interface CrowdVisitAdvice {
 export interface CrowdRiskPrediction {
   score: number;
   crowdRiskScore: number;
+  crowdIntensity: number;
+  crowdUncertainty: number;
+  crowdImpact: number;
   /** @deprecated use crowdRiskScore; retained only for persisted-plan compatibility */
   riskProbability: number;
   label: CrowdPredictionLabel;
@@ -326,6 +329,9 @@ export function calibrateCrowdWithResearch(base: CrowdRiskPrediction | null | un
     ...schedule,
     score,
     crowdRiskScore: score,
+    crowdIntensity: score,
+    crowdUncertainty: Math.round((1 - confidence) * 100),
+    crowdImpact: Math.round(score * confidence),
     riskProbability: score,
     label: crowdLabelForScore(score),
     confidence,
@@ -395,6 +401,9 @@ export function predictCrowdRisk(input: CrowdPredictionInput): CrowdRiskPredicti
   return {
     score,
     crowdRiskScore: score,
+    crowdIntensity: score,
+    crowdUncertainty: Math.round((1 - confidence) * 100),
+    crowdImpact: Math.round(score * confidence),
     riskProbability: score,
     label: crowdLabelForScore(score),
     confidence,
@@ -462,6 +471,9 @@ export function crowdRiskForVisit(crowd: CrowdRiskPrediction | null | undefined,
     ...schedule,
     score,
     crowdRiskScore: score,
+    crowdIntensity: score,
+    crowdUncertainty: Math.round((1 - crowd.confidence) * 100),
+    crowdImpact: Math.round(score * crowd.confidence),
     riskProbability: score,
     label: crowdLabelForScore(score),
     forecastBand: { low: clamp(score - halfBand, 0, 100), high: clamp(score + halfBand, 0, 100) },

@@ -11,6 +11,7 @@
     "start": "node node_modules/cross-env/dist/bin/cross-env.js WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run test:domain && npm run build",
     "test:domain": "node --experimental-strip-types --test tests/*.test.ts",
+    "benchmark:planner": "node --experimental-strip-types --test tests/production-planner-v3.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },

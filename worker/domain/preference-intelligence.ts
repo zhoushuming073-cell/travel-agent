@@ -5,10 +5,13 @@ export interface PreferenceProfile {
   avoidTerms: string[];
   crowdSensitivity: number;
   walkingSensitivity: number;
+  vector: Record<string, number>;
+  confidence: number;
 }
 
 export interface PreferenceScore {
   score: number;
+  confidence: number;
   matched: string[];
   avoided: string[];
   contributions: Array<{ id: string; label: string; points: number; evidence: string }>;
@@ -22,6 +25,11 @@ const ONTOLOGY: Record<string, string[]> = {
   亲子: ["亲子", "动物", "植物", "科技", "海洋", "乐园", "公园", "博物"],
   夜景: ["夜景", "城市夜景", "广场", "滨水", "步行街", "古城", "塔", "地标", "灯光"],
   美食: ["美食", "小吃", "餐厅", "饭店", "茶", "菜馆", "夜市"],
+  现代城市: ["现代", "城市", "高楼", "天际线", "商务区", "密度", "都市"],
+  科技: ["科技", "科学", "创新", "数码", "未来", "互动"],
+  建筑: ["建筑", "地标", "设计", "高楼", "天际线", "空间"],
+  特色交通: ["交通", "电车", "轮渡", "巴士", "缆车", "有轨"],
+  商业娱乐: ["商业", "娱乐", "夜生活", "街区", "市集"],
 };
 
 const normalize = (value: unknown) => String(value ?? "").trim();
@@ -38,11 +46,18 @@ export function buildPreferenceProfile(profile: unknown): PreferenceProfile {
     const rawWeight = Number(explicit?.priority ?? explicit?.weight ?? 0.7);
     return { id: label, label, weight: Math.max(0.15, Math.min(1, rawWeight > 1 ? rawWeight / 100 : rawWeight)), terms: ONTOLOGY[label] || [label] };
   });
+  const vector = Object.fromEntries(Object.keys(ONTOLOGY).map((key) => {
+    const direct = interests.find((interest) => interest.label === key);
+    const related = interests.filter((interest) => interest.terms.some((term) => ONTOLOGY[key].includes(term)));
+    return [key, direct?.weight ?? (related.length ? Math.max(...related.map((interest) => interest.weight * 0.65)) : 0)];
+  }));
   return {
     interests,
     avoidTerms: list(profileRecord.avoid),
     crowdSensitivity: profileRecord.crowdSensitivity === "high" || list(profileRecord.avoid).some((term) => /拥挤|排队|人流/.test(term)) ? 1 : profileRecord.crowdSensitivity === "low" ? 0.2 : 0.55,
     walkingSensitivity: profileRecord.walkingSensitivity === "high" ? 1 : profileRecord.walkingSensitivity === "low" ? 0.2 : 0.5,
+    vector,
+    confidence: interests.length ? Math.min(0.95, 0.55 + interests.length * 0.08) : 0.25,
   };
 }
 
@@ -71,6 +86,6 @@ export function scorePreferenceMatch(spot: unknown, preference: PreferenceProfil
     const points = -Math.round(Math.max(0, crowd - 45) * 0.25 * preference.crowdSensitivity * (objective === "relax" ? 1.4 : 1));
     if (points) contributions.push({ id: "crowd", label: "拥挤敏感修正", points, evidence: `预测风险 ${Math.round(crowd)}%` });
   }
-  const base = preference.interests.length ? 35 + 65 * earned / Math.max(0.1, possible) : 60;
-  return { score: clamp(base + contributions.filter((item) => item.points < 0).reduce((sum, item) => sum + item.points, 0)), matched, avoided, contributions };
+  const base = preference.interests.length ? 35 + 65 * earned / Math.max(0.1, possible) : 50;
+  return { score: clamp(base + contributions.filter((item) => item.points < 0).reduce((sum, item) => sum + item.points, 0)), confidence: preference.confidence, matched, avoided, contributions };
 }

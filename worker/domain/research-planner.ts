@@ -75,6 +75,7 @@ function gap(profile: GapProfile, spot: GapSpot, factType: ResearchQuestionType,
     blocking: overrides.blocking ?? Boolean(defaults.blocking && spot.requiredByUser),
     reason: clean(overrides.reason) || `${spot.requiredByUser ? "用户必去" : "高价值候选"}${spot.name}缺少${factType}事实，可能影响路线`,
     affectedDecisions: overrides.affectedDecisions || ["spot_selected", "visit_time", "duration"],
+    counterfactualUplift: overrides.counterfactualUplift ?? (spot.requiredByUser ? 1 : Math.max(0, Math.min(1, Number(spot.plannerScore || 0) / 100))),
   };
 }
 
@@ -85,7 +86,9 @@ function currentStatus(value: unknown) {
 }
 
 export function buildResearchGapMap(profile: GapProfile, spots: GapSpot[], maxCandidates = 15) {
-  const selected = [...spots].sort((left, right) => Number(Boolean(right.requiredByUser)) - Number(Boolean(left.requiredByUser)) || Number(right.plannerScore || 0) - Number(left.plannerScore || 0)).slice(0, maxCandidates);
+  const ranked = [...spots].sort((left, right) => Number(Boolean(right.requiredByUser)) - Number(Boolean(left.requiredByUser)) || Number(right.plannerScore || 0) - Number(left.plannerScore || 0));
+  const required = ranked.filter((spot) => spot.requiredByUser);
+  const selected = [...new Map([...required, ...ranked.slice(0, Math.max(maxCandidates, Math.min(24, spots.length)))].map((spot) => [spot.id, spot])).values()];
   const gaps: ResearchGap[] = [];
   for (const spot of selected) {
     const important = Boolean(spot.requiredByUser);
@@ -152,6 +155,8 @@ export function deterministicResearchRequests(profile: GapProfile, gaps: Researc
     ].filter(Boolean);
     for (const query of variants) {
       if (requests.length >= budget.targetQueryBudget) break;
+      const correlation = requests.reduce((highest, request) => Math.max(highest, requestCorrelation(request, { targetId: current.targetId, questionType: current.factType, query })), 0);
+      if (!current.blocking && correlation >= 0.78) continue;
       requests.push({
         queryId: `query:${current.targetId}:${current.factType}:${requests.length + 1}`,
         targetId: current.targetId,
@@ -170,6 +175,16 @@ export function deterministicResearchRequests(profile: GapProfile, gaps: Researc
     }
   }
   return dedupeRequests(requests);
+}
+
+export function requestCorrelation(left: Pick<ResearchRequest, "targetId" | "questionType" | "query">, right: Pick<ResearchRequest, "targetId" | "questionType" | "query">) {
+  const tokens = (query: string) => new Set(clean(query).toLowerCase().split(/[\s，。；、:：/]+/).filter((token) => token.length > 1));
+  const a = tokens(left.query);
+  const b = tokens(right.query);
+  const lexical = [...a].filter((token) => b.has(token)).length / Math.max(1, new Set([...a, ...b]).size);
+  const target = left.targetId === right.targetId ? 0.35 : 0;
+  const type = left.questionType === right.questionType ? 0.35 : 0;
+  return Math.min(1, lexical * 0.3 + target + type);
 }
 
 export function normalizeAiResearchRequests(value: unknown, profile: GapProfile, gaps: ResearchGap[], budget: AdaptiveResearchBudget) {

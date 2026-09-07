@@ -2,6 +2,7 @@ import type { PageAccessStatus, ResearchQuestionType, SourceTier } from "./resea
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
+export const FACT_POLICY_VERSION = "fact-policy-2026-09";
 
 export interface FactFreshnessPolicy {
   sourceMaxAgeMs: number | null;

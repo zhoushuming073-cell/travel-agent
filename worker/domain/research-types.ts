@@ -78,6 +78,8 @@ export interface ResearchGap {
   blocking: boolean;
   reason: string;
   affectedDecisions: string[];
+  /** Expected objective uplift if this unknown fact becomes decision-changing. */
+  counterfactualUplift?: number;
 }
 
 export interface ResearchRequest {

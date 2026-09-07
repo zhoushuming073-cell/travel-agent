@@ -108,6 +108,8 @@ export interface TravelProfile {
   mealPreference?: string;
   requestedVariants?: string[];
   freeText?: string;
+  tripPurpose?: "first_visit" | "repeat_visit" | "business" | "family" | "photography" | "food" | "general";
+  destinationTimeZone?: string;
 }
 
 export interface FactSource {
@@ -165,6 +167,32 @@ export interface EvidenceGraph {
   sourceCount: number;
   factCount: number;
   itineraryNodeCount: number;
+}
+
+export interface PlanningFactGraph {
+  version: "1.0";
+  generatedAt: string;
+  nodes: Array<{
+    id: string;
+    kind: "entity" | "fact" | "source" | "derived";
+    label: string;
+    entityId?: string;
+    factId?: string;
+    field?: string;
+    status?: TravelFactStatus;
+    confidence?: number;
+    validFrom?: string | null;
+    validTo?: string | null;
+    factVersion?: string;
+    aliases?: string[];
+    derivation?: { method: string; inputFactIds: string[] } | null;
+  }>;
+  edges: Array<{
+    id: string;
+    from: string;
+    to: string;
+    relation: "describes" | "supported-by" | "derived-from" | "alias-of" | "conflicts-with";
+  }>;
 }
 
 export interface UnknownItem {
@@ -316,9 +344,15 @@ export interface ItinerarySpot {
 
 export interface TransitEvidence {
   durationMin?: number;
+  expected?: number;
+  p80?: number;
+  p95?: number;
+  min?: number;
+  confidence?: number;
   fare?: number | null;
   source?: string;
   fetchedAt?: string;
+  temporalProfile?: { mode: string; weekday: string; timeBucket: string };
 }
 
 export interface ItineraryBlock {
@@ -339,6 +373,7 @@ export interface ItineraryBlock {
   mode?: string;
   fare?: number | null;
   fetchedAt?: string;
+  temporalProfile?: { mode: string; weekday: string; timeBucket: string };
   reason?: string;
 }
 
@@ -394,6 +429,11 @@ export interface PlanEvaluation {
 }
 
 export interface ItineraryPlan {
+  contractVersion?: "3.0";
+  plannerVersion?: string;
+  scoringVersion?: string;
+  crowdModelVersion?: string;
+  costModelVersion?: string;
   id: string;
   variant: string;
   title: string;
@@ -426,6 +466,7 @@ export interface ItineraryPlan {
   } | null;
   travelFacts?: TravelFact[];
   evidenceGraph?: EvidenceGraph;
+  factGraph?: PlanningFactGraph;
   uncertainty?: UnknownAnalysis;
   minimumVerification?: VerificationItem[];
   compiler?: CompilerResult;
@@ -434,6 +475,9 @@ export interface ItineraryPlan {
   bufferAnalysis?: BufferAnalysis;
   fragility?: FragilityResult;
   stressTest?: StressResult;
+  robustnessSimulation?: RobustnessSimulation;
+  reproducibility?: ReproducibilitySnapshot;
+  diversity?: PlanDiversityProfile;
   changeSet?: ChangeSet | null;
   planningDecision?: {
     model?: string;
@@ -445,6 +489,42 @@ export interface ItineraryPlan {
     degradationReason?: string | null;
     draftCompilerIssues?: CompilerIssue[];
   };
+}
+
+export interface RobustnessSimulation {
+  type: "simulation";
+  version: "1.0";
+  runs: number;
+  seed: number;
+  onTimeRate: number;
+  hardConstraintSuccessRate: number;
+  p50DelayMinutes: number;
+  p90DelayMinutes: number;
+  expectedDroppedOptionalStops: number;
+  note: string;
+}
+
+export interface ReproducibilitySnapshot {
+  version: "1.0";
+  requestHash: string;
+  candidateSnapshotHash: string;
+  factSnapshotHash: string;
+  providerSnapshotHash: string;
+  randomSeed: number;
+  model: string;
+  optimizer: string;
+  promptVersion: string;
+  createdAt: string;
+}
+
+export interface PlanDiversityProfile {
+  version: "1.0";
+  poi: number;
+  category: number;
+  area: number;
+  time: number;
+  pace: number;
+  overall: number;
 }
 
 export interface DependencyNode {

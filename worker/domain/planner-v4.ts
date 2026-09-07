@@ -272,7 +272,7 @@ export function auditPlannerDraft(draft: PlannerDraft, pack: PlannerKnowledgePac
           if (activity.type !== "meal" || !inMealWindow) issues.push({ code: "MEAL_LANDMARK_TIME", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spot.name} 是餐饮型目的地，必须作为午餐或晚餐安排` });
         }
         if (spot?.timeRole === "nightscape") {
-          const sunset = timeToMinutes((pack.weather as Array<{ sunset?: string }>)?.[day.day - 1]?.sunset ?? "18:00") ?? 1080;
+          const sunset = (timeToMinutes((pack.weather as Array<{ sunset?: string }>)?.[day.day - 1]?.sunset ?? "18:00") ?? 1080) + 25;
           if (start !== null && start < sunset) issues.push({ code: "NIGHTSCAPE_TOO_EARLY", severity: "error", variantId: variant.id, day: day.day, spotId: activity.spotId, message: `${spot.name} 应安排在当日日落后` });
         }
         const currentIndex = spotActivities.indexOf(activity);

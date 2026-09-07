@@ -16,6 +16,7 @@ interface ThrottleRuntime {
   sleep(milliseconds: number): Promise<void>;
   now(): number;
   assertActive?(): Promise<void>;
+  random?(): number;
 }
 
 export async function requestWithAiThrottle<T>(request: () => Promise<T>, runtime: ThrottleRuntime): Promise<T> {
@@ -33,7 +34,8 @@ export async function requestWithAiThrottle<T>(request: () => Promise<T>, runtim
     catch (error) {
       if (classifyAiFailure(error) !== "RATE_LIMITED") throw error;
       // Persist the cooldown so another Worker/request cannot immediately hit the same quota.
-      await runtime.block(AI_RATE_LIMIT_COOLDOWN_MS);
+      const jitter = runtime.random ? Math.floor(runtime.random() * 15_001) : 0;
+      await runtime.block(AI_RATE_LIMIT_COOLDOWN_MS + jitter);
       if (attempt === 2) throw error;
     }
   }

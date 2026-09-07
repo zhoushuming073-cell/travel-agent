@@ -56,6 +56,13 @@ export function validatePlanContract(value: PlanningEnvelope): ContractIssue[] {
     if (!Array.isArray(plan.minimumVerification)) issues.push({ path: `${base}.minimumVerification`, message: "缺少 Minimum Verification" });
     if (!plan.fragility) issues.push({ path: `${base}.fragility`, message: "缺少 Fragility" });
     if (plan.stressTest?.type !== "simulation") issues.push({ path: `${base}.stressTest`, message: "压力测试必须明确标注 Simulation" });
+    if (plan.contractVersion === "3.0") {
+      if (!plan.factGraph?.nodes.length) issues.push({ path: `${base}.factGraph`, message: "Contract 3.0 缺少版本化 Fact Graph" });
+      if (plan.robustnessSimulation?.type !== "simulation") issues.push({ path: `${base}.robustnessSimulation`, message: "Contract 3.0 缺少 Monte Carlo 鲁棒性模拟" });
+      if (!plan.reproducibility?.requestHash) issues.push({ path: `${base}.reproducibility`, message: "Contract 3.0 缺少可复现快照" });
+      if (!plan.diversity) issues.push({ path: `${base}.diversity`, message: "Contract 3.0 缺少多维方案差异指标" });
+      if (!plan.plannerVersion || !plan.scoringVersion || !plan.crowdModelVersion || !plan.costModelVersion) issues.push({ path: base, message: "Contract 3.0 缺少算法版本号" });
+    }
     if (!("changeScope" in plan)) issues.push({ path: `${base}.changeScope`, message: "必须保留 Change Preview 兼容字段" });
   });
 

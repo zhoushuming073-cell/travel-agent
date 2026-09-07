@@ -67,8 +67,14 @@ export function createAdaptiveResearchBudget(input: ResearchComplexity): Adaptiv
 
 export function researchUtility(gap: ResearchGap) {
   const decisionChangeProbability = bounded(gap.uncertainty) * bounded(gap.expectedInformationGain);
-  const valueOfInformation = decisionChangeProbability * bounded(gap.decisionImpact) * bounded(gap.freshnessNeed, 0.25, 1);
+  const counterfactualMultiplier = 1 + bounded(gap.counterfactualUplift || 0) * 0.5;
+  const valueOfInformation = decisionChangeProbability * bounded(gap.decisionImpact) * bounded(gap.freshnessNeed, 0.25, 1) * counterfactualMultiplier;
   return Number((valueOfInformation / Math.max(0.15, gap.researchCost)).toFixed(4));
+}
+
+export function counterfactualResearchValue(gap: ResearchGap, baselineObjective: number, verifiedObjective: number) {
+  const uplift = Math.max(0, verifiedObjective - baselineObjective) / Math.max(1, Math.abs(baselineObjective));
+  return researchUtility({ ...gap, counterfactualUplift: bounded(uplift) });
 }
 
 export function prioritizeResearchGaps(gaps: ResearchGap[]) {
