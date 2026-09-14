@@ -16,6 +16,7 @@ export interface TrafficMatrix {
   quality: MatrixQuality;
   nodes: Array<{ id: string; name: string; lat?: number; lng?: number }>;
   legs: TrafficMatrixLeg[];
+  graphPolicy?: string;
 }
 
 export interface PlannerSpot {

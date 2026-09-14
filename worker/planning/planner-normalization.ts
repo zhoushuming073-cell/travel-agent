@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- model responses are normalized from untyped provider JSON at this boundary */
 import { openingRange } from "../domain/planner-v4.ts";
 import { optimizeRouteBuckets } from "../domain/route-optimizer.ts";
+import { materializeSelectedSparseLegs } from "../domain/sparse-transit.ts";
 import { clamp, cleanText, list, minutesToTime, timeToMinutes } from "../lib/value-utils.ts";
 export function compactPlannerKnowledge(knowledge: any) {
   const matrix = knowledge?.trafficMatrix || {};
@@ -247,6 +248,7 @@ export function enforceRequiredCoverage(draft: any, knowledge: any) {
 export function bindTrafficMatrixFacts(draft: any, knowledge: any) {
   const matrix = knowledge?.trafficMatrix;
   if (!matrix?.legs?.length) return draft;
+  materializeSelectedSparseLegs(draft, knowledge);
   for (const variant of draft.variants || []) {
     for (const day of variant.days || []) {
       const spotActivities = (day.activities || [])

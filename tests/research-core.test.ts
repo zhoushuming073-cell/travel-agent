@@ -65,6 +65,13 @@ test("research stops after two low-gain rounds but not while useful blocking wor
   assert.equal(shouldContinueResearch({ gaps: [gap], budget, recentInformationGains: [0.01, 0.02], queriesExecuted: 2 }).reason, "stalled");
 });
 
+test("nonblocking low-gain research stops after one round", () => {
+  const budget = createAdaptiveResearchBudget({ tripDays: 2, cityCount: 1, requiredSpotCount: 0, blockingUnknownCount: 0, highRiskFactCount: 1, candidateCount: 8 });
+  const gap: ResearchGap = { id: "g", targetId: "s", targetName: "景点", factType: "recent_travel_feedback", currentStatus: "unknown", decisionImpact: 0.1, uncertainty: 1, expectedInformationGain: 0.8, researchCost: 0.5, freshnessNeed: 1, blocking: false, reason: "optional", affectedDecisions: ["ranking"] };
+  assert.equal(shouldContinueResearch({ gaps: [gap], budget, recentInformationGains: [0.01], queriesExecuted: 3 }).reason, "low_information_gain");
+  assert.equal(shouldContinueResearch({ gaps: [{ ...gap, decisionImpact: 0.9 }], budget, recentInformationGains: [0.01], queriesExecuted: 3 }).continue, true);
+});
+
 test("Hangzhou required spots create date-aware, multi-angle research requests", () => {
   const profile = { city: "杭州", startDate: "2026-09-05", days: 2, requiredAttractions: ["西湖", "灵隐寺"], preferences: ["摄影"], crowdSensitivity: "高" };
   const spots = [

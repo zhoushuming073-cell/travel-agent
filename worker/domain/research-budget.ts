@@ -97,6 +97,7 @@ export function shouldContinueResearch(input: {
   if (input.queriesExecuted >= input.budget.hardCap) return { continue: false, reason: "hard_cap" as const };
   if (input.budget.remainingCostUnits <= 0) return { continue: false, reason: "budget_exhausted" as const };
   const recent = input.recentInformationGains.slice(-2);
+  if (!blocking.length && recent.length >= 1 && recent.at(-1)! < 0.04 && researchUtility(active[0]) < 0.2) return { continue: false, reason: "low_information_gain" as const };
   if (recent.length === 2 && recent.every((gain) => gain < 0.04)) return { continue: false, reason: "stalled" as const };
   const utility = researchUtility(active[0]);
   if (!blocking.length && utility < (input.minimumUtility ?? 0.08)) return { continue: false, reason: "low_information_gain" as const };

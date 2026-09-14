@@ -68,6 +68,7 @@ import type {
 import { deterministicProfileHints, mergeTravelProfile } from "./domain/profile-extraction.ts";
 import { buildPreferenceProfile, scorePreferenceMatch } from "./domain/preference-intelligence.ts";
 import { optimizeRouteBuckets, precheckRouteFeasibility } from "./domain/route-optimizer.ts";
+import { estimatedRoadMinutes } from "./domain/sparse-transit.ts";
 import { buildResearchDecisionTrace, traceCoverage } from "./domain/decision-trace.ts";
 import { summarizeTrafficCoverage } from "./domain/traffic-coverage.ts";
 import { buildPlanDiversityProfiles } from "./domain/diversity.ts";
@@ -572,7 +573,10 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
     const continuation = shouldContinueResearch({ gaps, budget, recentInformationGains, queriesExecuted: allRequests.length });
     if (!continuation.continue) { stopReason = continuation.reason; break; }
     let requests: ResearchRequest[] = [];
-    if (budget.aiCallBudget > aiCallCount) {
+    // The first model pass sets the research direction. Later rounds can use
+    // the remaining ranked gaps directly instead of repeatedly asking Pro to
+    // plan nearly identical queries before each evidence fetch.
+    if (round === 1 && budget.aiCallBudget > aiCallCount) {
       try {
         const planned = await aiJson(env, {
           purpose: "research", thinking: false, maxTokens: 2600, requestTimeoutMs: 90000,
@@ -1991,7 +1995,7 @@ function fallbackMatrix(nodes: any[], fetchedAt: string, publicTransit = false) 
       const distanceM = Math.round(haversine(nodes[fromIndex].lat, nodes[fromIndex].lng, nodes[toIndex].lat, nodes[toIndex].lng) * 1.25);
       legs.push({
         fromId: nodes[fromIndex].id, toId: nodes[toIndex].id,
-        durationMin: publicTransit ? transitEstimate(distanceM) : Math.max(8, Math.round(distanceM / 260 / 60)),
+        durationMin: publicTransit ? transitEstimate(distanceM) : estimatedRoadMinutes(distanceM),
         distanceM,
         source: publicTransit ? "公共交通距离模型（等待高德精确段）" : "坐标距离×1.25 透明估算",
         quality: "estimated", fetchedAt,
@@ -2638,6 +2642,7 @@ async function runPlannerWorkflowStage(stage: string, profile: any, knowledge: a
       message: `硬约束编译器在 Critic 前修复 ${coverageRepair.replaced} 个模型遗漏的必选绑定${coverageRepair.rebuilt ? `，并重建 ${coverageRepair.rebuilt} 套无法局部修复的方案` : ""}`,
       changes: coverageRepair.changes,
     });
+    bindTrafficMatrixFacts(state.draft, effectiveKnowledge);
     const deterministicAudit = auditPlannerDraft(state.draft, effectiveKnowledge);
     const semanticCriticNeeded = deterministicAudit.hardIssues.length === 0
       && (list(profile.preferences).length > 0 || list(profile.avoid).length > 0 || deterministicAudit.differences.maxJaccard > 0.75);
