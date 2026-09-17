@@ -41,6 +41,10 @@ export async function fetchJson(url: string, init: RequestInit = {}, timeoutMs =
   const provider = providerNameFor(url, source);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const controller = new AbortController();
+    const upstreamSignal = init.signal;
+    const abortFromUpstream = () => controller.abort(upstreamSignal?.reason);
+    if (upstreamSignal?.aborted) abortFromUpstream();
+    else upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, fetchOptions({ ...init, signal: controller.signal }));
@@ -80,6 +84,7 @@ export async function fetchJson(url: string, init: RequestInit = {}, timeoutMs =
       throw error;
     } finally {
       clearTimeout(timer);
+      upstreamSignal?.removeEventListener("abort", abortFromUpstream);
     }
   }
   throw new Error(`${source}请求失败`);

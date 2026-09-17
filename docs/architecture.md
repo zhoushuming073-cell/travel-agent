@@ -49,8 +49,8 @@ The HttpOnly session cookie and D1 job ownership are authoritative. Browser stor
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/plan/start` | Validate input and create or reconnect to an idempotent job. |
-| `POST /api/plan/advance` | Execute at most the next incomplete durable stage. |
-| `GET /api/plan/status` | Return progress, events, provider attempts, terminal error, or result. |
+| `POST /api/plan/advance` | Execute at most one bounded durable work unit inside the next incomplete stage. |
+| `GET /api/plan/status` | Return progress, RUNNING/WAITING/STALLED runtime state, events, provider attempts, terminal error, or result. |
 | `GET /api/plan/active` | Find the session's active job after refresh or reconnect. |
 | `POST /api/plan/retry` | Resume an errored job from the first incomplete checkpoint. |
 | `POST /api/plan/cancel` | Persist cancellation so an in-flight lease cannot commit later. |
@@ -84,6 +84,14 @@ The ordered `WORKFLOW_STAGES` contract is:
 17. `compile_result` — final contract, reliability, provenance, and UI result compilation.
 
 `hot`, `niche`, and `relax` are stable IDs, not display-only labels. Every variant must contain the supported number of days and every user-required attraction.
+
+## V30 execution budget and micro-checkpoints
+
+The public workflow remains the same 17 stages. Internally, long work is constrained by a 40-second advance soft budget, a 30-second external-call ceiling, and a 6-second commit reserve. A model slot that is more than two seconds away becomes a durable WAITING state with `retryNotBefore`; the Worker does not sleep across that interval.
+
+`planner_research` persists `research:state:v30` plus bounded operation artifacts. Its cursor advances through `plan_queries`, query-sized `search_batch`, URL-sized `fetch_batch`, deterministic `extract_batch`, optional `refine_batch`, `fuse`, and `finalize`. Deterministic operation IDs make artifact-first/cursor-second crash recovery idempotent: an existing operation artifact is reused after lease expiry or process interruption.
+
+`worker/workflow/advance-budget.ts`, `model-execution.ts`, `runtime-state.ts`, and `workflow/research/*` are strict TypeScript modules. New execution architecture must stay outside the legacy `travel-api.ts` type-check exemption.
 
 ## Planning and domain modules
 
@@ -148,7 +156,7 @@ The planner keeps four responsibilities separate:
 3. Optimization — deterministic candidate selection and minute scheduling under time, transit, meal, weather, crowd, cost, fatigue, and diversity objectives.
 4. LLM — requirement extraction, high-level strategy, semantic critique, and last-resort semantic repair. It cannot invent IDs or own exact times.
 
-The UI and D1 still expose the stable 17 checkpoints. Internally, non-model work is represented as a dependency DAG so independent candidate, weather, hotel, research, and transit work can be reasoned about and parallelized safely.
+The UI and D1 still expose the stable 17 checkpoints. V30 additionally exposes durable micro-step state and RUNNING/WAITING/STALLED telemetry; the dependency DAG continues to describe logical relationships without changing the public planning contract.
 
 ## Deployment invariants
 

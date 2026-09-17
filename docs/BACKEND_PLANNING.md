@@ -6,7 +6,7 @@
 
 这是“外部取证 + 确定性约束优化 + LLM 高层决策与解释”的混合系统，不是把用户一句话直接交给模型生成最终网页，也不是宣称全局最优的数学规划求解器。模型失败时，时间窗插入与局部搜索仍可生成结构化恢复方案。
 
-真实执行路径是浏览器调用 `/api/plan/start` 建立任务，再串行调用 `/api/plan/advance` 推进检查点，同时通过 `/api/plan/status` 查看进度。页面的四阶段是展示层分组，后端实际有 17 个阶段。三套方案在后端逐套生成，并非三路模型并发。
+真实执行路径是浏览器调用 `/api/plan/start` 建立任务，再串行调用 `/api/plan/advance` 推进检查点，同时通过 `/api/plan/status` 查看进度。页面的四阶段是展示层分组，后端实际有 17 个阶段。V30 保留这 17 个高层阶段，但每次 `/advance` 只执行一个受预算约束的可恢复工作单元。三套方案在后端逐套生成，并非三路模型并发。
 
 | 顺序 | 检查点 | 实际工作 |
 | --- | --- | --- |
@@ -30,11 +30,13 @@
 
 `start` 检查单次 1—7 天限制、会话、幂等键、同会话活动任务、全站并发和每日额度。任务及输入写入 D1，恢复期限是 24 小时。
 
-每次推进只执行下一个未完成阶段。阶段通过 owner + nonce 获取 45 秒租约，每 15 秒续租；写入检查点前确认任务未取消、租约仍属于自己。阶段结果、事件、provider attempts 都持久化。
+每次推进只执行下一个未完成阶段中的一个工作单元。阶段通过 owner + nonce 获取 45 秒租约，每 15 秒续租；写入检查点前确认任务未取消、租约仍属于自己。V30 的 advance soft budget 为 40 秒，外部调用上限为 30 秒，并预留 6 秒写 artifact、更新任务、释放租约和序列化响应。阶段结果、事件、provider attempts 与 runtime telemetry 都持久化。
 
 模型请求新增跨 Worker 的原子调用闸门：同 endpoint + API key 的所有用途共用间隔，数据库只存散列标识，不存明文 key。`AI_REQUEST_MIN_INTERVAL_MS` 默认 65000 毫秒，是保守设置，不是已测得的服务商 QPM。不同部署或本地与生产使用不同数据库时，闸门不互通，因此仍应错开测试。
 
-HTTP 429 最多在同一个请求内尝试 3 次，冷却写入 D1；等待中每至多 5 秒检查取消状态。若仍限流，阶段保存独立的 rate-limit 计数，70 秒后重试，不增加结构错误计数；连续 3 个限流阶段尝试后明确报 `AI_RATE_LIMITED`，保留检查点。用户主动恢复任务时重置对应重试计数。
+短等待可以在请求内完成；若 AI slot、429 冷却或退避超过 2 秒，Worker 不再循环休眠，而是持久化 `retryNotBefore` 并返回 `retryable=true`。浏览器在 WAITING 期间只轮询状态，不重复 POST `/advance`。持续三次限流后明确报 `AI_RATE_LIMITED`，保留检查点；限流不计为结构错误。
+
+`planner_research` 的内部 cursor 依次为 query planning、search batch、page fetch batch、deterministic extraction、optional AI refinement、fact fusion 和 finalize。每个 operation 使用确定性 ID，先写独立 artifact 再推进 cursor；Worker 在两者之间中断时，下次 advance 发现 artifact 后直接复用，不重复搜索、证据累计或预算扣减。
 
 永久 404/鉴权失败可以直接走透明恢复；其他草案错误先做阶段重试。没有通过校验的结果不能伪装成功。当前限流队列不是严格 FIFO；保守节流会增加总耗时，不能保证跨部署共享账号的配额。
 
@@ -139,7 +141,7 @@ S = 0.25×实体匹配 + 0.20×相关性 + 0.15×来源适配
 
 模型只能从合法候选 ID 中输出标题、策略、候选 ID 与 day theme，不再决定精确分钟。后端优化器根据完整事实、时间窗、交通与目标 preset 生成每一天的可执行时间轴。旧版完整 days/daysPlan/itinerary 容器仍可在 repair 边界归一化，但不是主规划路径。
 
-`aiJson` 先严格解析 JSON；语法失败最多再做一次只修语法/容器的模型调用，不允许新增事实。当前生产路由使用 DeepSeek 官方 API：需求提取与用户画像固定走 `deepseek-v4-flash`，研究、增强、规划、critic、修复和解释固定走 `deepseek-v4-pro`。`AI_STRICT_MODEL_ROUTING=true` 时不会跨职责静默回退；模型是否可调用仍取决于账号授权，不能把 UI 标题当实际返回模型。
+`aiJson` 先严格解析 JSON；语法失败且当前 advance 仍有安全预算时，最多再做一次只修语法/容器的模型调用，不允许新增事实。当前生产路由使用 DeepSeek 官方 API：需求提取与用户画像默认走 `deepseek-flash`（保留旧 `deepseek-v4-flash` 兼容别名），研究、增强、规划、critic、修复和解释默认走 `deepseek-v4-pro`。`AI_STRICT_MODEL_ROUTING=true` 时不会跨职责静默回退；模型是否可调用仍取决于账号授权，不能把 UI 标题当实际返回模型。
 
 请求显式发送 `thinking: {type: "enabled" | "disabled"}`，同时保留 `chat_template_kwargs.enable_thinking` 兼容字段。参数依据 [DeepSeek 官方接口说明](https://api-docs.deepseek.com/guides/thinking_mode/)；必须根据真实输出、错误码与结构校验验收，不能仅因配置字段存在就宣称模型正常。
 
@@ -190,7 +192,7 @@ Trip Cost V2 确定性汇总住宿、票价、餐饮、市内交通、已识别�
 - 预算参与提示词和研究，但最终超预算目前主要给出警告；不能描述成严格预算可行性求解。
 - 启发式优化与 Monte Carlo 不构成全局最优或现实成功率保证；精确校准仍需要未来真实用户反馈数据。
 - 入口坐标没有可靠来源时使用明确标记的 POI centroid fallback；不会伪称已核验入口。大型景区增加透明 entry/exit buffer，但精细内部路线仍取决于可用证据。
-- 17 个 D1 checkpoint 为现有恢复和 UI 兼容合同；内部另提供依赖 DAG 元数据，尚未把持久化状态机改造成并行调度器。
+- 17 个 D1 checkpoint 仍是恢复和 UI 兼容合同；V30 已把长 Research 阶段改为持久化 micro-checkpoint，但没有把整个工作流改造成后台并行调度器。
 - 模型名、页面“进行中”、动画标题和后台调用成功是不同事实，必须分别验证。
 - 本地与生产 D1 不共用配额闸门；使用同账号时仍应错峰。429 或 404 的账号授权/额度问题无法仅靠本地代码保证消失。
 - 模型恢复成功不代表天气、预约、酒店价格、交通全部已核验。最终仍可能因其他真实数据缺口标记降级。

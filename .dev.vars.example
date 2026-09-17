@@ -1,7 +1,7 @@
 # DeepSeek 官方 OpenAI 兼容接口（服务端使用，切勿把密钥放入前端代码）
 AI_API_KEY=
 AI_API_BASE_URL=https://api.deepseek.com/chat/completions
-AI_EXTRACT_MODEL=deepseek-v4-flash
+AI_EXTRACT_MODEL=deepseek-flash
 AI_RESEARCH_MODEL=deepseek-v4-pro
 AI_ENRICH_MODEL=deepseek-v4-pro
 AI_PLANNER_MODEL=deepseek-v4-pro

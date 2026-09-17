@@ -17,18 +17,41 @@ interface ThrottleRuntime {
   now(): number;
   assertActive?(): Promise<void>;
   random?(): number;
+  /** Maximum time this HTTP request may spend sleeping for a future slot. */
+  inRequestWaitBudgetMs?: number;
+}
+
+export class DurableAiWaitError extends Error {
+  readonly code = "AI_DURABLE_WAIT";
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super(`[DURABLE_WAIT] AI slot available in ${Math.max(1, Math.ceil(retryAfterMs))}ms`);
+    this.name = "DurableAiWaitError";
+    this.retryAfterMs = Math.max(1, Math.ceil(retryAfterMs));
+  }
+}
+
+export function isDurableAiWait(error: unknown): error is DurableAiWaitError {
+  return error instanceof DurableAiWaitError
+    || (error instanceof Error && /\[DURABLE_WAIT\]|AI_DURABLE_WAIT/.test(error.message));
 }
 
 export async function requestWithAiThrottle<T>(request: () => Promise<T>, runtime: ThrottleRuntime): Promise<T> {
   // Retry the SAME HTTP request, not the whole multi-call research/repair stage.
+  const inRequestWaitBudgetMs = Math.max(0, runtime.inRequestWaitBudgetMs ?? 5_000);
+  let sleptMs = 0;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const deadline = runtime.now() + 180_000;
     for (;;) {
       await runtime.assertActive?.();
       const wait = await runtime.acquire();
       if (!wait) break;
-      if (runtime.now() + wait > deadline) throw new Error("[RATE_LIMITED] 模型调用队列繁忙，请从检查点稍后重试");
-      await runtime.sleep(Math.min(wait, 5000));
+      const shortWait = Math.min(wait, 1_000);
+      if (sleptMs + shortWait > inRequestWaitBudgetMs || wait > inRequestWaitBudgetMs - sleptMs) {
+        throw new DurableAiWaitError(wait);
+      }
+      await runtime.sleep(shortWait);
+      sleptMs += shortWait;
     }
     try { return await request(); }
     catch (error) {

@@ -33,6 +33,7 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 - `worker/travel-api.ts`：旅行 API、17 阶段规划的高层编排和最终结果装配。它是兼容现有调用的后端门面，修改时必须保持范围小并补回归测试。
 - `worker/providers/`：外部 provider 的 HTTP/MCP 调用、重试、缓存、健康记录和 POI 数据归一化。
 - `worker/planning/`：模型规划结果归一化、缺失内容恢复、必去地点覆盖和时间线安全修复。
+- `worker/workflow/`：V30 的 advance 执行预算、模型主动超时、运行遥测和 Research durable micro-checkpoint；这里的新模块必须保持 strict TypeScript。
 - `worker/lib/`：Worker 侧无业务状态的通用值处理工具。
 - `worker/persistence.ts`：D1 任务、阶段工件、事件、provider attempts、租约、缓存和配额。
 - `drizzle/`：正式 D1 迁移。
@@ -49,7 +50,7 @@ Smart Travel 是一个面向中国城市旅行的规划 Agent 网站。用户用
 - `worker/providers/provider-client.ts`：模型与数据 provider 的传输、超时、有限重试、缓存和健康遥测。
 - `travel/hooks/usePlanningLifecycle.ts` 与 `travel/services/planningApi.ts`：浏览器驱动 `/api/plan/advance`，并负责恢复、重试和真实服务端取消。
 
-DeepSeek V4 Flash 只用于需求提取和用户画像；V4 Pro 用于研究、增强、规划、critic、修复和解释。生产环境启用严格模型路由，不允许不同职责静默串用模型。不要重新引入已经停用的 GLM 路由。
+DeepSeek `deepseek-flash` 只用于需求提取和用户画像；旧 `deepseek-v4-flash` 仅保留兼容。V4 Pro 用于研究、增强、规划、critic、修复和解释。生产环境启用严格模型路由，不允许不同职责静默串用模型。不要重新引入已经停用的 GLM 路由。
 
 ### 算法与可靠性规则
 
@@ -181,6 +182,7 @@ git pull --ff-only github main
 - 首次打开页面不能自动开始规划。
 - 访问凭证只保存在 Secure、HttpOnly、SameSite=Strict Cookie 中，不得放进浏览器 JavaScript、URL 或 localStorage。
 - 保持浏览器驱动的 `/api/plan/advance`、D1 检查点、租约、幂等、取消和恢复语义。长模型调用不得放进完整任务级 `waitUntil()`。
+- V30 起每次 `/api/plan/advance` 只能执行一个有限时长工作单元：soft budget 40 秒、外部调用最多 30 秒、长节流等待必须写入 `retryNotBefore`。Research operation 必须先写 artifact 再推进 cursor，并通过确定性 operation ID 幂等复用。
 - 模型 429/QPM 是调用限流，不是输出结构错误；必须等待、有界重试并保留检查点，不能直接宣称“两次结构失败”后降级。永久 404/鉴权失败与结构错误分别处理，持续限流应明确报错。单次连通性测试通过不代表完整规划链路通过。
 - D1 结构变更必须通过 `drizzle/` 新迁移完成，并兼容已有任务；不要只改 `db/schema.ts`。
 - 本地工作区存储保留现有 schema 兼容，不要随意清空用户历史。

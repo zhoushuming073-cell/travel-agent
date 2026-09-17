@@ -7,7 +7,7 @@ Smart Travel（智能旅游助手）把自然语言旅行需求转化为三套�
 ## What it does / 项目能力
 
 - Extracts dates, party size, budget, pace, preferences, exclusions, and must-visit places from natural language.
-- Runs a resumable 17-stage planning workflow instead of one long model request.
+- Runs a resumable 17-stage planning workflow; V30 splits long stages into durable, idempotent micro-checkpoints instead of one long Worker request.
 - Produces exactly three differentiated itinerary variants: `hot`, `niche`, and `relax`.
 - Collects weather forecasts, map entities, transit candidates, hotel candidates, images, and controlled web evidence.
 - Optimizes route buckets against user constraints, travel time, opening information, meal windows, night views, crowd risk, and itinerary diversity.
@@ -46,6 +46,8 @@ flowchart LR
 
 See [docs/architecture.md](docs/architecture.md) for the request flow, all 17 stages, persistence semantics, provider boundaries, and module responsibilities.
 
+V30 keeps the public 17-stage contract, but one `/api/plan/advance` now executes only one bounded work unit. The normal soft budget is 40 seconds, external/model calls are capped at 30 seconds, and long throttle/backoff waits are represented by `retryNotBefore` rather than sleeping inside a Worker request.
+
 ## Project structure
 
 | Path | Responsibility |
@@ -58,6 +60,7 @@ See [docs/architecture.md](docs/architecture.md) for the request flow, all 17 st
 | `worker/providers/` | Provider transport and POI normalization boundaries. |
 | `worker/planning/` | Planner response normalization, hard-constraint coverage, and timeline safety repair. |
 | `worker/domain/` | Contracts, routing, evidence, trust, crowd risk, research, compiler, and other domain algorithms. |
+| `worker/workflow/` | V30 advance budget, model timeout, runtime telemetry, and durable research micro-checkpoint runner. |
 | `worker/persistence.ts` | D1 jobs, artifacts, events, leases, cache, provider health, quotas, and rate limits. |
 | `tests/` | Domain, contract, lifecycle, recovery, and structural regression tests. |
 | `drizzle/` | Authoritative D1 migrations. |

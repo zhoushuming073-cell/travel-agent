@@ -86,7 +86,7 @@ interface StartResponse {
 }
 
 type StatusResponse =
-  | { jobId: string; status: "queued" | "working" | "needs_input"; progress: PlanningProgress; currentStep?: string; heartbeatAt?: string }
+  | { jobId: string; status: "queued" | "working" | "needs_input"; progress: PlanningProgress; currentStep?: string; heartbeatAt?: string; retryAfterMs?: number; retryNotBefore?: number | null; execution?: WorkflowExecutionState | null }
   | { jobId: string; status: "done"; result: PlanningResult; progress?: PlanningProgress }
   | { jobId: string; status: "error" | "cancelled"; error: { message?: string; code?: string }; progress?: PlanningProgress };
 
@@ -95,6 +95,24 @@ interface AdvanceResponse {
   progress?: PlanningProgress;
   retryable?: boolean;
   retryAfterMs?: number;
+  retryNotBefore?: number;
+  executionState?: "running" | "waiting" | "stalled";
+}
+
+interface WorkflowExecutionState {
+  mode: "running" | "waiting" | "stalled";
+  currentStage: string;
+  currentMicroStep: string;
+  microStepStartedAt: number;
+  lastHeartbeatAt: number;
+  retryNotBefore?: number;
+  attempt: number;
+  provider?: string;
+  model?: string;
+  providerCallStartedAt?: number;
+  providerCallDurationMs?: number;
+  providerOutcome?: string;
+  degradedReason?: string;
 }
 
 const ACTIVE_JOB_KEY = "smart-travel-active-job-v29";
@@ -126,7 +144,8 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
           const stored = readStoredJob();
           writeStoredJob({ jobId, input, createdAt: stored?.createdAt || Date.now(), progress: advanced.progress, workspaceId: stored?.workspaceId });
         }
-        if (advanced.retryAfterMs) retryNotBefore = Date.now() + advanced.retryAfterMs;
+        if (advanced.retryNotBefore) retryNotBefore = Math.max(retryNotBefore, advanced.retryNotBefore);
+        else if (advanced.retryAfterMs) retryNotBefore = Date.now() + advanced.retryAfterMs;
       })
       .catch((error) => { advanceFailure = error; })
       .finally(() => { advanceInFlight = null; });
@@ -141,6 +160,11 @@ async function pollPlanningJob(jobId: string, input: PlanningInput, onProgress: 
         writeStoredJob({ jobId, input, createdAt: stored?.createdAt || Date.now(), progress: status.progress, workspaceId: stored?.workspaceId });
       }
       if (status.status === "queued" || status.status === "working") {
+        if (status.retryNotBefore) retryNotBefore = Math.max(retryNotBefore, status.retryNotBefore);
+        else if (status.retryAfterMs) retryNotBefore = Math.max(retryNotBefore, Date.now() + status.retryAfterMs);
+        if (status.execution?.mode === "waiting" && status.execution.retryNotBefore) {
+          retryNotBefore = Math.max(retryNotBefore, status.execution.retryNotBefore);
+        }
         if (advanceFailure) {
           const failure = advanceFailure;
           advanceFailure = null;

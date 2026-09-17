@@ -4,30 +4,30 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { aiRequestInterval, isAiRateLimited, requestWithAiThrottle } from "../worker/domain/ai-throttle.ts";
 import { acquireAiRequestSlot, blockAiRequests, configurePersistence, type D1DatabaseLike } from "../worker/persistence.ts";
 
-function clock() {
+function clock(intervalMs = 1000, cooldownMs = 1000) {
   let now = 1000;
   let next = 0;
   return {
     now: () => now,
     sleep: async (ms: number) => { now += ms; },
-    acquire: async () => { if (next > now) return next - now; next = now + 65000; return 0; },
-    block: async (ms: number) => { next = Math.max(next, now + ms); },
+    acquire: async () => { if (next > now) return next - now; next = now + intervalMs; return 0; },
+    block: async () => { next = Math.max(next, now + cooldownMs); },
   };
 }
 
-test("all AI purposes pace successful calls and retry the same HTTP request after QPM", async () => {
+test("short AI waits stay in-request and retry the same HTTP request after QPM", async () => {
   const runtime = clock();
   const times: number[] = [];
   const request = async () => { times.push(runtime.now()); if (times.length === 1) throw new Error("429 QPM限流"); return "ok"; };
   assert.equal(await requestWithAiThrottle(request, runtime), "ok");
   assert.equal(await requestWithAiThrottle(request, runtime), "ok");
-  assert.deepEqual(times, [1000, 66000, 131000]);
+  assert.deepEqual(times, [1000, 2000, 3000]);
 });
 
-test("persistent throttling is bounded, retains rate classification and never retries unauthorized", async () => {
+test("long provider cooldown becomes a durable wait and never retries unauthorized", async () => {
   let calls = 0;
-  await assert.rejects(requestWithAiThrottle(async () => { calls += 1; throw new Error("429 QPM限流"); }, clock()), /429/);
-  assert.equal(calls, 3);
+  await assert.rejects(requestWithAiThrottle(async () => { calls += 1; throw new Error("429 QPM限流"); }, clock(1000, 65000)), /DURABLE_WAIT/);
+  assert.equal(calls, 1);
   calls = 0;
   await assert.rejects(requestWithAiThrottle(async () => { calls += 1; throw new Error("401 Unauthorized"); }, clock()), /401/);
   assert.equal(calls, 1);

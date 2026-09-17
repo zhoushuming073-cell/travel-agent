@@ -1,7 +1,7 @@
 // @ts-nocheck
 
 import { assertPlanContract } from "./domain/contract.ts";
-import { aiRequestInterval, isAiRateLimited, requestWithAiThrottle } from "./domain/ai-throttle.ts";
+import { aiRequestInterval, isAiRateLimited, isDurableAiWait, requestWithAiThrottle } from "./domain/ai-throttle.ts";
 import { acquireAiRequestSlot, blockAiRequests } from "./persistence.ts";
 import { buildPlanningEvents } from "./domain/agent.ts";
 import { computeChangeSet } from "./domain/replan.ts";
@@ -101,6 +101,20 @@ import {
   wikiPageToSpot,
 } from "./providers/poi-normalization.ts";
 import { callMcp, fetchJson, fetchTextResource } from "./providers/provider-client.ts";
+import {
+  ADVANCE_SOFT_BUDGET_MS,
+  EXTERNAL_CALL_MAX_MS,
+  MAX_IN_REQUEST_THROTTLE_WAIT_MS,
+  createAdvanceExecutionBudget,
+  externalCallTimeoutMs,
+  isAdvanceBudgetExhausted,
+} from "./workflow/advance-budget.ts";
+import {
+  advancePlannerResearch,
+  currentResearchMicroStep,
+} from "./workflow/research/research-runner.ts";
+import type { PlannerResearchState } from "./workflow/research/research-state.ts";
+import { runtimeStateForClient } from "./workflow/runtime-state.ts";
 import {
   acquireTravelJobLease,
   addTravelJobEvent,
@@ -688,6 +702,156 @@ async function runResearchAgent(profile: any, knowledge: any, env: any) {
   return report;
 }
 
+async function advanceResearchAgentCheckpoint(jobId: string, profile: any, knowledge: any, env: any) {
+  const orchestrator = researchProviderFor(env);
+  const store = {
+    get: (key: string) => getTravelJobArtifact(jobId, key),
+    put: (key: string, value: unknown) => putTravelJobArtifact(jobId, key, value),
+  };
+  const result = await advancePlannerResearch(store, {
+    initialize: async () => {
+      const gaps = buildResearchGapMap(profile, knowledge.spots || [], profile.deepReasoning === false ? 10 : 15);
+      const budget = createAdaptiveResearchBudget({
+        tripDays: Number(profile.days || 1), cityCount: 1, requiredSpotCount: list(profile.requiredAttractions).length,
+        blockingUnknownCount: gaps.filter((gap) => gap.blocking).length,
+        highRiskFactCount: gaps.filter((gap) => gap.decisionImpact >= 0.8).length,
+        candidateCount: knowledge.spots?.length || 0, dynamicEventCount: list(profile.seasonalNeeds).length,
+        deepResearch: profile.deepReasoning !== false,
+      });
+      return { gaps, budget, maxRounds: profile.deepReasoning === false ? 2 : 3 };
+    },
+    planQueries: async (state) => {
+      const continuation = shouldContinueResearch({ gaps: state.gaps, budget: state.budget, recentInformationGains: state.informationGains, queriesExecuted: state.completedQueryIds.length });
+      if (!continuation.continue) {
+        state.stopReason = continuation.reason;
+        return { requests: [], model: state.model, modelStatus: state.modelStatus };
+      }
+      const previousRequests = (await Promise.all(state.queryArtifactKeys.map((key) => getTravelJobArtifact(jobId, key)))).flatMap((value: any) => list(value));
+      const usedKeys = new Set(previousRequests.map((request: any) => `${request.targetId}|${request.questionType}|${cleanText(request.query).toLowerCase().replace(/\s+/g, "")}`));
+      let requests: ResearchRequest[] = [];
+      let model = state.model;
+      let modelStatus = state.modelStatus;
+      let degradedReason = "";
+      let aiCalls = 0;
+      if (state.round === 0 && state.budget.aiCallBudget > state.aiCallCount) {
+        try {
+          const planned = await aiJson(env, {
+            purpose: "research", thinking: false, maxTokens: 2600, requestTimeoutMs: EXTERNAL_CALL_MAX_MS,
+            messages: [
+              { role: "system", content: "你是旅游Research Planner。只决定缺少哪些会改变路线的事实以及应搜索什么，不回答事实本身。只输出JSON：{requests:[{targetId,questionType,query,reason,expectedDecisionImpact,expectedInformationGain,estimatedCost}]}。只能使用给定gap中的targetId和questionType；query必须包含目标景点并结合日期/星期/官方名称或合适来源角度。优先可执行性、开放、预约、临时限制、人流、交通和最佳时段；用户设置预算且存在 ticket_policy 缺口时，至少包含一条门票或免费政策查询；不要搜索低决策影响的文化背景。" },
+              { role: "user", content: JSON.stringify({ city: profile.city, startDate: profile.startDate, days: profile.days, preferences: profile.preferences, requiredAttractions: profile.requiredAttractions, round: state.round + 1, remainingBudget: state.budget, gaps: state.gaps.slice(0, 35).map((gap) => ({ ...gap, utility: researchUtility(gap) })) }) },
+            ],
+          });
+          requests = normalizeAiResearchRequests(planned.value, profile, state.gaps, state.budget);
+          model = planned.model;
+          modelStatus = "ready";
+          aiCalls = 1;
+        } catch (error: any) {
+          if (isDurableAiWait(error) || isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
+          degradedReason = `AI research query planner timeout/unavailable：${cleanText(error?.message)}`;
+          modelStatus = state.modelStatus === "ready" ? "degraded" : "unavailable";
+        }
+      }
+      if (!requests.length) requests = deterministicResearchRequests(profile, state.gaps, state.budget);
+      requests = requests.filter((request) => {
+        const key = `${request.targetId}|${request.questionType}|${request.query.toLowerCase().replace(/\s+/g, "")}`;
+        if (usedKeys.has(key)) return false;
+        usedKeys.add(key);
+        return true;
+      }).slice(0, Math.max(0, Math.min(state.budget.targetQueryBudget - state.completedQueryIds.length, state.round === 0 ? 8 : 5)));
+      return { requests, model, modelStatus, degradedReason: degradedReason || undefined, aiCalls };
+    },
+    search: async (requests, operationId) => {
+      const executions = await mapWithConcurrency(requests, 2, async (request) => {
+        const cacheKey = `${request.targetId}|${request.questionType}|${request.query}`;
+        const cached = await persistentCacheGet(`research-search:${FACT_POLICY_VERSION}`, cacheKey) as any;
+        if (cached?.results) return cached;
+        const execution = await orchestrator.execute(request, 2);
+        const policy = FACT_FRESHNESS_POLICIES[request.questionType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
+        await persistentCachePut(`research-search:${FACT_POLICY_VERSION}`, cacheKey, execution, policy.searchCacheTtlMs);
+        return execution;
+      });
+      return executions.filter((item) => item.status === "fulfilled").map((item: any) => item.value);
+    },
+    fetch: async (urls) => {
+      const fetched = await mapWithConcurrency(urls, 3, async (url: string) => {
+        const cached = await persistentCacheGet(`research-page:${FACT_POLICY_VERSION}`, url) as any;
+        if (cached?.status) return cached;
+        const page = await orchestrator.fetchPage(url);
+        await persistentCachePut(`research-page:${FACT_POLICY_VERSION}`, url, page, 6 * 60 * 60 * 1000);
+        return page;
+      });
+      return fetched.map((item: any, index) => item.status === "fulfilled" ? item.value : ({ url: urls[index], status: "network_failed", fetchedAt: new Date().toISOString(), error: cleanText(item.reason?.message) }));
+    },
+    extract: async ({ requests, executions, pages }) => {
+      const pageMap = new Map(pages.map((page: any) => [page.url, page]));
+      const evidence: ResearchEvidence[] = [];
+      for (const request of requests) {
+        const results = executions.filter((execution) => execution.request.queryId === request.queryId).flatMap((execution) => execution.results || []);
+        evidence.push(...await researchEvidenceFromSources(request, results, pageMap));
+      }
+      return evidence;
+    },
+    refine: async (evidence) => {
+      if (!evidence.length) return { evidence, aiCalls: 0 };
+      try {
+        const refined = await refineEvidenceWithAi(env, evidence);
+        return { evidence: refined.rows, model: refined.model, aiCalls: refined.called ? 1 : 0 };
+      } catch (error: any) {
+        if (isDurableAiWait(error) || isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
+        return { evidence, aiCalls: 0, degradedReason: `AI evidence extraction timeout/unavailable：${cleanText(error?.message)}` };
+      }
+    },
+    fuse: async ({ state, requests, executions, pages, evidence }) => {
+      const beforeResolved = state.gaps.filter((gap) => gap.currentStatus !== "unknown" && gap.currentStatus !== "conflicting").reduce((sum, gap) => sum + gap.decisionImpact, 0);
+      const grouped = new Map<string, ResearchEvidence[]>();
+      for (const row of evidence) {
+        const key = `${row.targetId}:${row.questionType}`;
+        const values = grouped.get(key) || [];
+        values.push(row);
+        grouped.set(key, values);
+      }
+      const facts = [...grouped.values()].map((rows) => synthesizeFact(rows[0].targetId, rows[0].targetName, rows[0].questionType, rows));
+      const gaps = applyFactsToGaps(state.gaps, facts);
+      const afterResolved = gaps.filter((gap) => gap.currentStatus !== "unknown" && gap.currentStatus !== "conflicting").reduce((sum, gap) => sum + gap.decisionImpact, 0);
+      const informationGain = Number(Math.max(0, (afterResolved - beforeResolved) / Math.max(1, gaps.reduce((sum, gap) => sum + gap.decisionImpact, 0))).toFixed(3));
+      const currentIds = new Set(state.pendingQueryIds);
+      const roundRequests = requests.filter((request) => currentIds.has(request.queryId));
+      const roundPageCount = new Set(executions.filter((execution) => currentIds.has(execution.request.queryId)).flatMap((execution) => execution.results.map((row) => row.url).filter(Boolean))).size;
+      let budget = spendResearchBudget(state.budget, roundRequests.reduce((sum, request) => sum + request.estimatedCost, 0) + roundPageCount * 0.5 + 1.5);
+      budget = extendResearchBudget(budget, gaps.filter((gap) => gap.blocking && (gap.currentStatus === "unknown" || gap.currentStatus === "conflicting")).length, informationGain);
+      const continuation = shouldContinueResearch({ gaps, budget, recentInformationGains: [...state.informationGains, informationGain], queriesExecuted: state.completedQueryIds.length });
+      return { facts, gaps, budget, informationGain, continueResearch: continuation.continue, stopReason: continuation.reason || "continuing" };
+    },
+    finalize: async ({ state, requests, executions, pages, evidence, facts }) => {
+      const accepted = evidence.filter((row) => row.disposition !== "reject");
+      const deduped = deduplicateEvidence(accepted);
+      const metrics = researchMetrics({
+        rawResultCount: executions.reduce((sum, execution) => sum + (execution.results?.length || 0), 0), pageReadCount: pages.length,
+        evidence, facts, gaps: state.gaps, searchCount: requests.length, aiCallCount: state.aiCallCount,
+        realizedInformationGain: state.informationGains.reduce((sum, gain) => sum + gain, 0),
+      });
+      await Promise.all(facts.map((fact) => {
+        const policy = FACT_FRESHNESS_POLICIES[fact.factType] || FACT_FRESHNESS_POLICIES.recent_travel_feedback;
+        return persistentCachePut(`research-fact:${FACT_POLICY_VERSION}`, `${profile.city}|${profile.startDate}|${fact.targetId}|${fact.factType}`, fact, policy.factCacheTtlMs);
+      }));
+      return {
+        version: "research-intelligence-v30", status: executions.length ? (facts.some((fact) => fact.status === "verified" || fact.status === "supported") ? "ready" : "degraded") : "unavailable",
+        model: state.model || aiPrimaryModel(env, "research"), modelStatus: state.modelStatus, modelError: state.degradedReasons.join("；"),
+        budget: { ...state.budget, stopReason: state.stopReason }, rounds: state.informationGains.length, requests,
+        skipped: skippedResearchItems(state.gaps, requests, state.budget.remainingCostUnits <= 0 || requests.length >= state.budget.targetQueryBudget),
+        searchExecutions: executions,
+        pageSummary: pages.map((page) => ({ url: page.url, status: page.status, title: page.title, publisher: page.publisher, publishedAt: page.publishedAt, fetchedAt: page.fetchedAt, error: page.error })),
+        evidence: deduped.independent, rejectedEvidence: evidence.filter((row) => row.disposition === "reject").map((row) => ({ id: row.id, url: row.url, reasons: row.rejectionReasons })),
+        facts, gaps: state.gaps, metrics, fetchedAt: new Date().toISOString(), elapsedMs: Date.now() - Date.parse(state.startedAt),
+        durableState: { version: state.version, completedQueryIds: state.completedQueryIds, searchOperationIds: state.searchOperationIds, fetchOperationIds: state.fetchOperationIds, extractOperationIds: state.extractOperationIds, refineOperationIds: state.refineOperationIds },
+        dataPolicy: "网页均作为不可信外部证据处理；snippet不能验证关键事实；冲突保持conflicting；无官方实时客流时只生成预测信号。",
+      };
+    },
+  });
+  return result;
+}
+
 function applyResearchFactsToKnowledge(knowledge: any, research: any) {
   if (!research?.facts?.length) return knowledge;
   const facts = factsByTarget(research.facts);
@@ -801,15 +965,33 @@ async function aiRequest(env: any, options: {
         // queries in that round, then it must synthesize from the returned evidence.
         if (tools && toolLog.length === 0) { payload.tools = tools; payload.tool_choice = "auto"; }
         const longRunning = options.thinking || options.purpose === "planner" || options.purpose === "repair";
-        const result = await requestWithAiThrottle(() => fetchJson(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-          body: JSON.stringify(payload),
-        }, options.requestTimeoutMs || (longRunning ? 120000 : 60000), `${provider} ${model}`), {
+        const requestedTimeoutMs = options.requestTimeoutMs || (longRunning ? 120000 : 60000);
+        const requestTimeoutMs = env.ADVANCE_EXECUTION_BUDGET
+          ? externalCallTimeoutMs(env.ADVANCE_EXECUTION_BUDGET, requestedTimeoutMs)
+          : Math.min(EXTERNAL_CALL_MAX_MS, requestedTimeoutMs);
+        const result = await requestWithAiThrottle(async () => {
+          const providerCallStartedAt = Date.now();
+          await env.AI_RUNTIME_UPDATE?.({ provider, model, providerCallStartedAt, providerOutcome: "running" });
+          try {
+            const value = await fetchJson(endpoint, {
+              method: "POST",
+              headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+              body: JSON.stringify(payload),
+            }, requestTimeoutMs, `${provider} ${model}`);
+            await env.AI_RECORD_MODEL_ATTEMPT?.({ purpose: options.purpose, provider, model, providerCallStartedAt, providerCallDurationMs: Date.now() - providerCallStartedAt, providerOutcome: "success" });
+            return value;
+          } catch (error: any) {
+            const code = classifyAiFailure(error);
+            const providerOutcome = code === "TIMEOUT" ? "timeout" : code === "RATE_LIMITED" ? "rate_limited" : "failed";
+            await env.AI_RECORD_MODEL_ATTEMPT?.({ purpose: options.purpose, provider, model, providerCallStartedAt, providerCallDurationMs: Date.now() - providerCallStartedAt, providerOutcome, error: cleanText(error?.message) });
+            throw error;
+          }
+        }, {
           acquire: () => acquireAiRequestSlot(quotaScope, aiRequestInterval(env)),
           block: (milliseconds) => blockAiRequests(quotaScope, milliseconds),
           sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
           now: Date.now, random: Math.random, assertActive: env.AI_ASSERT_ACTIVE,
+          inRequestWaitBudgetMs: MAX_IN_REQUEST_THROTTLE_WAIT_MS,
         });
         const message = result?.choices?.[0]?.message;
         if (!message) throw new Error(`${provider} ${model} 没有返回消息`);
@@ -846,6 +1028,7 @@ async function aiRequest(env: any, options: {
       throw new Error(`${model} 联网工具调用超过安全上限`);
     } catch (error: any) {
       if (/TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
+      if (isDurableAiWait(error) || isAdvanceBudgetExhausted(error)) throw error;
       const classified = classifyAiFailure(error);
       openModelCircuit(endpoint, model, error);
       failures.push(`${model}: [${classified}] ${cleanText(error?.message, "请求失败")}`);
@@ -896,7 +1079,7 @@ async function extractProfile(input: any, env: any) {
     if (isAiRateLimited(error) || /TASK_CANCELLED|LEASE_LOST/.test(String(error))) throw error;
     extracted = {
       value: hints,
-      model: "deepseek-v4-flash（限流时文本规则兜底）",
+      model: "deepseek-flash（兼容旧 deepseek-v4-flash；限流时文本规则兜底）",
       formatRepaired: false,
       fallbackReason: cleanText(error?.message, "需求模型暂不可用"),
     };
@@ -2928,6 +3111,24 @@ async function progressForStage(jobId: string, stage: string, envelope: any, ext
   };
 }
 
+async function updateWorkflowRuntime(jobId: string, patch: Record<string, unknown>) {
+  const previous: any = await getTravelJobArtifact(jobId, "runtime:v30");
+  const now = Date.now();
+  const next = {
+    ...previous,
+    version: 30,
+    mode: patch.mode || previous?.mode || "running",
+    currentStage: cleanText(patch.currentStage || previous?.currentStage || "queued"),
+    currentMicroStep: cleanText(patch.currentMicroStep || previous?.currentMicroStep || "queued"),
+    microStepStartedAt: Number(patch.microStepStartedAt || previous?.microStepStartedAt || now),
+    lastHeartbeatAt: Number(patch.lastHeartbeatAt || now),
+    attempt: Number(patch.attempt ?? previous?.attempt ?? 1),
+    ...patch,
+  };
+  await putTravelJobArtifact(jobId, "runtime:v30", next);
+  return next;
+}
+
 async function runInternalPlanStage(jobId: string, stage: string, workflowId: string, env: any) {
   if (!WORKFLOW_STAGES.includes(stage)) throw new Error(`未知规划阶段：${stage}`);
   const job = await getTravelJob(jobId);
@@ -2942,15 +3143,49 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
   const owner = workflowId || `workflow-${jobId}`;
   const nonce = crypto.randomUUID();
   if (!await acquireTravelJobLease(jobId, owner, nonce)) throw new Error("任务阶段租约暂不可用");
+  const microStepStartedAt = Date.now();
+  const researchState = stage === "planner_research" ? await getTravelJobArtifact<PlannerResearchState>(jobId, "research:state:v30") : null;
+  await updateWorkflowRuntime(jobId, {
+    mode: "running", currentStage: stage,
+    currentMicroStep: stage === "planner_research" ? currentResearchMicroStep(researchState) : stage,
+    microStepStartedAt, lastHeartbeatAt: microStepStartedAt,
+    retryNotBefore: undefined, attempt: Number(job.attemptCount || 0) + 1,
+    provider: undefined, model: undefined, providerCallStartedAt: undefined,
+    providerCallDurationMs: undefined, providerOutcome: undefined, degradedReason: undefined,
+  });
   await updateTravelJob(jobId, { status: "working", workflowId: owner, currentStep: stage, heartbeatAt: Date.now(), progress: await progressForStage(jobId, stage, await getTravelJobArtifact(jobId, "envelope") || job.payload) });
   await addTravelJobEvent({ jobId, eventType: "stage_started", step: stage, message: stageLabels[stage] || stage, createdAt: Date.now() });
-  const heartbeat = setInterval(() => { renewTravelJobLease(jobId, owner, nonce).catch(() => undefined); }, 15_000);
+  let leaseRenewalFailed = false;
+  const heartbeat = setInterval(() => {
+    renewTravelJobLease(jobId, owner, nonce).then(async (renewed) => {
+      if (!renewed) leaseRenewalFailed = true;
+      else await updateWorkflowRuntime(jobId, { lastHeartbeatAt: Date.now() });
+    }).catch(() => { leaseRenewalFailed = true; });
+  }, 15_000);
   const assertCommitAllowed = async () => {
+    if (leaseRenewalFailed) throw new Error("LEASE_LOST");
     const current = await getTravelJob(jobId);
     if (!current || current.status === "cancelled" || current.cancelRequestedAt) throw new Error("TASK_CANCELLED");
     if (current.leaseOwner !== owner || current.leaseNonce !== nonce || Number(current.leaseExpiresAt || 0) < Date.now()) throw new Error("LEASE_LOST");
   };
-  env = { ...env, AI_ASSERT_ACTIVE: assertCommitAllowed };
+  env = {
+    ...env,
+    AI_ASSERT_ACTIVE: assertCommitAllowed,
+    ADVANCE_EXECUTION_BUDGET: createAdvanceExecutionBudget(microStepStartedAt, ADVANCE_SOFT_BUDGET_MS),
+    AI_RUNTIME_UPDATE: (patch: Record<string, unknown>) => updateWorkflowRuntime(jobId, { ...patch, lastHeartbeatAt: Date.now() }),
+    AI_RECORD_MODEL_ATTEMPT: async (attempt: any) => {
+      await updateWorkflowRuntime(jobId, { ...attempt, lastHeartbeatAt: Date.now() });
+      await recordJobProviderAttempt(jobId, stage, {
+        provider: `${attempt.provider}：${attempt.model}`,
+        capability: `模型调用 / ${attempt.purpose}`,
+        status: attempt.providerOutcome === "success" ? "success" : attempt.providerOutcome === "rate_limited" ? "rate_limited" : "failed",
+        code: attempt.providerOutcome === "timeout" ? "TIMEOUT" : attempt.providerOutcome === "rate_limited" ? "RATE_LIMITED" : undefined,
+        detail: attempt.error || attempt.providerOutcome,
+        latencyMs: attempt.providerCallDurationMs,
+        resultCount: attempt.providerOutcome === "success" ? 1 : 0,
+      });
+    },
+  };
   try {
     let envelope: any = await getTravelJobArtifact(jobId, "envelope");
     if (stage === "parse_profile") {
@@ -3000,30 +3235,65 @@ async function runInternalPlanStage(jobId: string, stage: string, workflowId: st
         await recordJobProviderAttempt(jobId, stage, { provider: prepared.trafficMatrix?.source || "交通矩阵", capability: "候选交通矩阵", status: total ? "success" : "failed", detail: `高德核验 ${verified} 段 / 模型估算 ${Math.max(0, total - verified)} 段`, resultCount: total });
       }
     }
-    if (stage === "planner_research" || stage === "planner_memo" || stage === "critic_review" || stage.startsWith("variant_") || stage.startsWith("audit_") || stage.startsWith("repair_")) {
+    if (stage === "planner_research") {
+      const prepared: any = await getTravelJobArtifact(jobId, "prepared");
+      if (!prepared?.knowledge) throw new Error("规划知识包检查点缺失");
+      const researchAdvance = await advanceResearchAgentCheckpoint(jobId, envelope.profile, prepared.knowledge, env);
+      await assertCommitAllowed();
+      await updateWorkflowRuntime(jobId, {
+        mode: "running", currentStage: stage,
+        currentMicroStep: currentResearchMicroStep(researchAdvance.state),
+        lastHeartbeatAt: Date.now(),
+      });
+      if (!researchAdvance.done) {
+        const progress = await progressForStage(jobId, stage, envelope, [
+          `✓ 已持久化微检查点：${researchAdvance.operationId}${researchAdvance.reused ? "（幂等复用）" : ""}`,
+          `● 下一工作单元：${currentResearchMicroStep(researchAdvance.state)}`,
+        ]);
+        await updateTravelJob(jobId, { status: "working", currentStep: stage, heartbeatAt: Date.now(), progress });
+        await addTravelJobEvent({ jobId, eventType: "micro_step_completed", step: stage, message: researchAdvance.operationId, detail: { next: currentResearchMicroStep(researchAdvance.state), reused: researchAdvance.reused }, createdAt: Date.now() });
+        return { ok: true, stage, microStep: researchAdvance.operationId, nextMicroStep: currentResearchMicroStep(researchAdvance.state), partial: true, done: false };
+      }
+      const research: any = researchAdvance.report;
+      const plannerState: any = await getTravelJobArtifact(jobId, "planner_state") || newWorkflowPlannerState(envelope.profile, env);
+      plannerState.research = research;
+      plannerState.modelAudit.researchModel = research.model;
+      plannerState.verifiedWebContext = list(research.searchExecutions).map((execution: any) => ({
+        tool: "search_orchestrator", query: execution.request?.query, questionType: execution.request?.questionType,
+        reason: execution.request?.reason, expectedDecisionImpact: execution.request?.expectedDecisionImpact,
+        providers: execution.providersAttempted, providerFailures: execution.providerFailures,
+        resultCount: execution.results?.length || 0, fetchedAt: execution.executedAt,
+      }));
+      plannerState.modelAudit.toolCalls = plannerState.verifiedWebContext;
+      if (research.modelStatus !== "ready") {
+        plannerState.modelAudit.degraded = true;
+        plannerState.modelAudit.planningMode = "ai_assisted";
+        plannerState.modelAudit.degradationReason = [plannerState.modelAudit.degradationReason, "Research Agent 模型不可用，已使用确定性缺口规划与多源检索继续取证"].filter(Boolean).join("；");
+        plannerState.modelAudit.compilerIssues.push({ code: "RESEARCH_MODEL_DEGRADED", severity: "warning", message: research.modelError || "Research Agent 未返回可用查询计划" });
+      }
+      await putTravelJobArtifact(jobId, "planner_state", plannerState);
+      await Promise.all([
+        putTravelJobArtifact(jobId, "research:gap-map", research.gaps),
+        putTravelJobArtifact(jobId, "research:queries", research.searchExecutions),
+        putTravelJobArtifact(jobId, "research:evidence", research.evidence),
+        putTravelJobArtifact(jobId, "research:fact-store", research.facts),
+        putTravelJobArtifact(jobId, "research:metrics", research.metrics),
+        putTravelJobArtifact(jobId, "research:skipped", research.skipped),
+      ]);
+      await recordJobProviderAttempt(jobId, stage, {
+        provider: `Search Orchestrator + ${research.model || "确定性研究规划器"}`,
+        capability: "AI Research / 多源证据",
+        status: research.status === "ready" ? "success" : research.status === "unavailable" ? "failed" : "degraded",
+        detail: `${research.searchExecutions?.length || 0} 次搜索 · ${research.evidence?.length || 0} 条独立证据 · ${research.facts?.length || 0} 个事实；停止原因 ${research.budget?.stopReason || "unknown"}`,
+        resultCount: research.facts?.length || 0,
+      });
+    }
+    if (stage === "planner_memo" || stage === "critic_review" || stage.startsWith("variant_") || stage.startsWith("audit_") || stage.startsWith("repair_")) {
       const prepared: any = await getTravelJobArtifact(jobId, "prepared");
       if (!prepared?.knowledge) throw new Error("规划知识包检查点缺失");
       const plannerState = await runPlannerWorkflowStage(stage, envelope.profile, prepared.knowledge, env, envelope.replanContext, await getTravelJobArtifact(jobId, "planner_state"), await getTravelJobArtifact(jobId, `attempt:${stage}`));
       await assertCommitAllowed();
       await putTravelJobArtifact(jobId, "planner_state", plannerState);
-      if (stage === "planner_research" && plannerState.research) {
-        const research = plannerState.research;
-        await Promise.all([
-          putTravelJobArtifact(jobId, "research:gap-map", research.gaps),
-          putTravelJobArtifact(jobId, "research:queries", research.searchExecutions),
-          putTravelJobArtifact(jobId, "research:evidence", research.evidence),
-          putTravelJobArtifact(jobId, "research:fact-store", research.facts),
-          putTravelJobArtifact(jobId, "research:metrics", research.metrics),
-          putTravelJobArtifact(jobId, "research:skipped", research.skipped),
-        ]);
-        await recordJobProviderAttempt(jobId, stage, {
-          provider: `Search Orchestrator + ${research.model || "确定性研究规划器"}`,
-          capability: "AI Research / 多源证据",
-          status: research.status === "ready" ? "success" : research.status === "unavailable" ? "failed" : "degraded",
-          detail: `${research.searchExecutions?.length || 0} 次搜索 · ${research.evidence?.length || 0} 条独立证据 · ${research.facts?.length || 0} 个事实；停止原因 ${research.budget?.stopReason || "unknown"}`,
-          resultCount: research.facts?.length || 0,
-        });
-      }
       if (stage === "critic_review") await putTravelJobArtifact(jobId, "critic:review", { status: plannerState.modelAudit.criticStatus, model: plannerState.modelAudit.criticModel, issues: plannerState.modelAudit.criticIssues });
       if (stage.startsWith("variant_")) await putTravelJobArtifact(jobId, stage, plannerState.draft.variants.find((variant: any) => variant.id === stage.slice(8)));
     }
@@ -3080,6 +3350,29 @@ async function advancePlanningJob(jobId: string, env: any) {
     const message = cleanText(error?.message, "阶段执行失败");
     if (/TASK_CANCELLED/.test(message)) return { status: "cancelled", currentStep: stage, retryable: false };
     if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, retryAfterMs: 10_000, currentStep: stage };
+    if (isDurableAiWait(error) || isAdvanceBudgetExhausted(error)) {
+      const retryAfterMs = isDurableAiWait(error) ? error.retryAfterMs : error.retryAfterMs;
+      const retryNotBefore = Date.now() + Math.max(500, retryAfterMs);
+      const runtime: any = await getTravelJobArtifact(jobId, "runtime:v30");
+      await updateWorkflowRuntime(jobId, {
+        mode: "waiting", currentStage: stage, currentMicroStep: runtime?.currentMicroStep || stage,
+        retryNotBefore, lastHeartbeatAt: Date.now(),
+        degradedReason: isDurableAiWait(error) ? "正在等待模型调用窗口" : "当前工作单元已用完安全执行预算",
+      });
+      if (stage === "planner_research") {
+        const researchState: any = await getTravelJobArtifact(jobId, "research:state:v30");
+        if (researchState) {
+          const key = currentResearchMicroStep(researchState);
+          researchState.retryNotBefore = retryNotBefore;
+          researchState.retryCounters[key] = Number(researchState.retryCounters[key] || 0) + 1;
+          await putTravelJobArtifact(jobId, "research:state:v30", researchState);
+        }
+      }
+      const envelope = await getTravelJobArtifact(jobId, "envelope") || job.payload;
+      const progress = await progressForStage(jobId, stage, envelope, [isDurableAiWait(error) ? "● 正在等待模型调用窗口；不会在 Worker 请求中长时间休眠" : "● 当前工作单元已安全结束，将从检查点继续"]);
+      await updateTravelJob(jobId, { progress, heartbeatAt: Date.now() });
+      return { status: "working", executionState: "waiting", currentStep: stage, retryable: true, retryAfterMs: Math.max(500, retryAfterMs), retryNotBefore, progress };
+    }
     if (isAiRateLimited(error)) {
       const previous: any = await getTravelJobArtifact(jobId, `rate-limit:${stage}`);
       const attempts = Number(previous?.attempts || 0) + 1;
@@ -3091,7 +3384,10 @@ async function advancePlanningJob(jobId: string, env: any) {
       const envelope = await getTravelJobArtifact(jobId, "envelope") || job.payload;
       const progress = await progressForStage(jobId, stage, envelope, ["! 模型请求限流，正在等待配额恢复；这不是方案结构错误"]);
       await updateTravelJob(jobId, { progress, heartbeatAt: Date.now() });
-      return { status: "working", currentStep: stage, retryable: true, retryAfterMs: AI_RATE_LIMIT_COOLDOWN_MS + 5000, progress };
+      const retryAfterMs = AI_RATE_LIMIT_COOLDOWN_MS + 5000;
+      const retryNotBefore = Date.now() + retryAfterMs;
+      await updateWorkflowRuntime(jobId, { mode: "waiting", currentStage: stage, retryNotBefore, lastHeartbeatAt: Date.now(), providerOutcome: "rate_limited", degradedReason: "模型服务限流" });
+      return { status: "working", executionState: "waiting", currentStep: stage, retryable: true, retryAfterMs, retryNotBefore, progress };
     }
     const attemptKey = `attempt:${stage}`;
     const previous: any = await getTravelJobArtifact(jobId, attemptKey);
@@ -3352,13 +3648,13 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const created = await createTravelJob({
         id: jobId, idempotencyKey, clientHash, accessTokenHash: "", status: "queued", payload: input,
         progress, result: null, errorMessage: null, createdAt: now, updatedAt: now, expiresAt: now + 24 * 60 * 60 * 1000,
-        workflowId: null, engineVersion: "v29-sites-checkpoint", currentStep: "queued", heartbeatAt: now, leaseOwner: null, leaseNonce: null, leaseExpiresAt: null, cancelRequestedAt: null, attemptCount: 0, errorCode: null, completedAt: null, sessionHash: session.hash,
+        workflowId: null, engineVersion: "v30-durable-micro-checkpoint", currentStep: "queued", heartbeatAt: now, leaseOwner: null, leaseNonce: null, leaseExpiresAt: null, cancelRequestedAt: null, attemptCount: 0, errorCode: null, completedAt: null, sessionHash: session.hash,
       });
       if (created.created) {
         await updateTravelJob(jobId, { status: "queued", workflowId: "sites-checkpoint-runner", currentStep: "queued", heartbeatAt: Date.now() });
-        await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "站内断点执行器已就绪；刷新或断网后可从最后检查点续跑", detail: { runner: "sites-checkpoint-v29" }, createdAt: Date.now() });
+        await addTravelJobEvent({ jobId, eventType: "job_queued", step: "queued", message: "站内断点执行器已就绪；刷新或断网后可从最后检查点续跑", detail: { runner: "durable-micro-checkpoint-v30" }, createdAt: Date.now() });
       }
-      return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v29-sites-checkpoint" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
+      return json({ jobId: created.job.id, status: "queued", progress: created.job.progress || progress, engineVersion: "v30-durable-micro-checkpoint" }, 202, { "set-cookie": session.setCookie, "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/plan/advance" && request.method === "POST") {
@@ -3399,8 +3695,15 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       if (!job) return json({ status: "error", error: { message: "规划任务不存在或已清理" } }, 404);
       if (job.sessionHash !== session.hash) return json({ status: "error", error: { message: "无权访问该规划任务" } }, 403);
       if (Date.now() > job.expiresAt) return json({ status: "error", error: { message: "规划任务已过期，请重新生成" } }, 410);
-      const [events, providerAttempts] = await Promise.all([listTravelJobEvents(id), listJobProviderAttempts(id)]);
-      const common = { jobId: id, status: job.status, progress: job.progress, currentStep: job.currentStep, heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null, events, providerAttempts, engineVersion: job.engineVersion };
+      const [events, providerAttempts, rawRuntime] = await Promise.all([listTravelJobEvents(id), listJobProviderAttempts(id), getTravelJobArtifact(id, "runtime:v30")]);
+      const execution = runtimeStateForClient(rawRuntime as any, Date.now(), job.leaseExpiresAt);
+      const common = {
+        jobId: id, status: job.status, progress: job.progress, currentStep: job.currentStep,
+        heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null,
+        execution, retryNotBefore: execution?.retryNotBefore || null,
+        retryAfterMs: execution?.retryNotBefore ? Math.max(0, execution.retryNotBefore - Date.now()) : 0,
+        events, providerAttempts, engineVersion: job.engineVersion,
+      };
       if (job.status === "done" && job.result) return json({ ...common, result: job.result }, 200, { "cache-control": "no-store" });
       if (job.status === "error") return json({ ...common, error: { message: job.errorMessage || "规划任务执行失败", code: job.errorCode } }, 200, { "cache-control": "no-store" });
       if (job.status === "cancelled") return json({ ...common, error: { message: "规划任务已取消", code: "USER_CANCELLED" } }, 200, { "cache-control": "no-store" });
@@ -3411,7 +3714,8 @@ export async function handleTravelApi(request: Request, env: any, url: URL, ctx?
       const session = await taskSession(request, env);
       if (!session.hash) return json({ active: false }, 200, { "cache-control": "no-store" });
       const job = await findActiveTravelJob(session.hash);
-      return json(job ? { active: true, jobId: job.id, status: job.status, progress: job.progress, currentStep: job.currentStep, heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null, createdAt: new Date(job.createdAt).toISOString() } : { active: false }, 200, { "cache-control": "no-store" });
+      const runtime = job ? runtimeStateForClient(await getTravelJobArtifact(job.id, "runtime:v30") as any, Date.now(), job.leaseExpiresAt) : null;
+      return json(job ? { active: true, jobId: job.id, status: job.status, progress: job.progress, currentStep: job.currentStep, execution: runtime, retryNotBefore: runtime?.retryNotBefore || null, heartbeatAt: job.heartbeatAt ? new Date(job.heartbeatAt).toISOString() : null, createdAt: new Date(job.createdAt).toISOString() } : { active: false }, 200, { "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/plan/cancel" && request.method === "POST") {
