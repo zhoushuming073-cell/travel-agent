@@ -14,6 +14,9 @@ import {
 
 export const RESEARCH_QUERY_BATCH_SIZE = 2;
 export const RESEARCH_PAGE_BATCH_SIZE = 3;
+export const RESEARCH_RESULTS_PER_QUERY = 3;
+export const RESEARCH_PAGE_LIMIT_PER_ROUND = 12;
+export const RESEARCH_EVIDENCE_LIMIT_PER_ROUND = 24;
 
 export interface ResearchSearchExecution {
   request: ResearchRequest;
@@ -137,6 +140,21 @@ async function loadOperations<T>(store: ResearchArtifactStore, ids: string[]): P
   return rows.flatMap((value) => value ?? []);
 }
 
+export function researchPageUrlsForRound(
+  executions: ResearchSearchExecution[],
+  targetPageBudget: number,
+): string[] {
+  return [...new Set(executions.flatMap((execution) => execution.results
+    .slice(0, RESEARCH_RESULTS_PER_QUERY)
+    .map((result) => result.url)
+    .filter((url): url is string => Boolean(url))))]
+    .slice(0, Math.max(0, Math.min(targetPageBudget, RESEARCH_PAGE_LIMIT_PER_ROUND)));
+}
+
+export function evidenceForResearchRefinement(rows: ResearchEvidence[]): ResearchEvidence[] {
+  return rows.slice(0, RESEARCH_EVIDENCE_LIMIT_PER_ROUND);
+}
+
 async function persistState(store: ResearchArtifactStore, state: PlannerResearchState): Promise<void> {
   state.updatedAt = nowIso();
   state.remainingBudget = state.budget.remainingCostUnits;
@@ -210,8 +228,7 @@ export async function advancePlannerResearch(
   const executions = await loadOperations<ResearchSearchExecution>(store, state.searchOperationIds);
   const roundQueryIds = new Set(roundRequests.map((request) => request.queryId));
   const roundExecutions = executions.filter((execution) => roundQueryIds.has(execution.request.queryId));
-  const pageUrls = [...new Set(roundExecutions.flatMap((execution) => execution.results.map((result) => result.url).filter((url): url is string => Boolean(url))))]
-    .slice(0, Math.max(0, state.budget.targetPageBudget));
+  const pageUrls = researchPageUrlsForRound(roundExecutions, state.budget.targetPageBudget);
 
   if (state.cursor.step === "fetch_batch") {
     const batches = batch(pageUrls, RESEARCH_PAGE_BATCH_SIZE);
@@ -258,7 +275,9 @@ export async function advancePlannerResearch(
   }
 
   const roundExtractIds = state.extractOperationIds.filter((id) => id.startsWith(`r${state.round}:`));
-  const extracted = await loadOperations<ResearchEvidence>(store, roundExtractIds);
+  const extracted = evidenceForResearchRefinement(
+    await loadOperations<ResearchEvidence>(store, roundExtractIds),
+  );
 
   if (state.cursor.step === "refine_batch") {
     const batches = batch(extracted, 12);

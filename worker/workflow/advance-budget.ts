@@ -1,6 +1,6 @@
 export const ADVANCE_SOFT_BUDGET_MS = 40_000;
 export const ADVANCE_COMMIT_RESERVE_MS = 6_000;
-export const EXTERNAL_CALL_MAX_MS = 30_000;
+export const EXTERNAL_CALL_MAX_MS = 24_000;
 export const MIN_EXTERNAL_CALL_WINDOW_MS = 8_000;
 export const MAX_IN_REQUEST_THROTTLE_WAIT_MS = 2_000;
 

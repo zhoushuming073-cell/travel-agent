@@ -1863,6 +1863,12 @@ function firstTransit(value: any) {
   return data?.route?.transits?.[0] || data?.transits?.[0] || data?.route?.paths?.[0] || data?.paths?.[0] || null;
 }
 
+function providerCallTimeout(env: any, requestedMs: number) {
+  return env?.ADVANCE_EXECUTION_BUDGET
+    ? externalCallTimeoutMs(env.ADVANCE_EXECUTION_BUDGET, requestedMs)
+    : requestedMs;
+}
+
 export function transitFare(value: any): number | null {
   const raw = value?.fare ?? value?.price ?? value?.transit_fee ?? value?.cost?.transit_fee ?? value?.cost?.fare ?? value?.cost?.price;
   const number = Number(raw);
@@ -1886,7 +1892,7 @@ async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
         strategy: "0",
         extensions: "base",
       });
-      const raw = await fetchJson(`https://restapi.amap.com/v3/direction/transit/integrated?${params}`, {}, 12000, "高德官方公交/地铁路线");
+      const raw = await fetchJson(`https://restapi.amap.com/v3/direction/transit/integrated?${params}`, {}, providerCallTimeout(env, 7000), "高德官方公交/地铁路线");
       const transit = raw?.route?.transits?.[0];
       const durationSeconds = Number(transit?.duration || 0);
       if (String(raw?.status) === "1" && durationSeconds > 0) return {
@@ -1900,7 +1906,7 @@ async function amapTransitFor(from: any, to: any, city: any, env: any = null) {
   try {
     const raw = await callMcp(AMAP_MCP, "maps_direction_transit_integrated", {
       origin: `${from.lng},${from.lat}`, destination: `${to.lng},${to.lat}`, city: city.name, cityd: city.name,
-    }, { timeoutMs: 10000, cacheMs: 20 * 60 * 1000 });
+    }, { timeoutMs: providerCallTimeout(env, 6000), cacheMs: 20 * 60 * 1000 });
     const transit: any = firstTransit(raw);
     if (!transit) return { status: "no-route", note: "高德 MCP 未返回可用公交方案" };
     const durationSeconds = Number(transit.duration || transit.cost?.duration || 0);
@@ -2100,22 +2106,22 @@ function routeFallback(items: any[]) {
   return { distance: Math.round(distance * 1.25), duration: Math.round(distance * 1.25 / 260), geometry: { coordinates: items.map(item => [item.lng, item.lat]) }, source: "坐标直线距离×1.25透明估算", quality: "estimated" };
 }
 
-async function routeFor(items: any[]) {
+async function routeFor(items: any[], env: any = null) {
   if (items.length < 2) return { distance: 0, duration: 0, geometry: { coordinates: items.map(item => [item.lng, item.lat]) }, source: "单点行程", quality: "exact" };
   const coords = items.map(item => `${item.lng},${item.lat}`).join(";");
   try {
-    const result = await fetchJson(`${OSRM}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`, {}, 18000);
+    const result = await fetchJson(`${OSRM}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`, {}, providerCallTimeout(env, 6000));
     const route = result?.routes?.[0];
     if (!route) throw new Error("no route");
     return { distance: Math.round(route.distance), duration: Math.round(route.duration), geometry: route.geometry, source: "OSRM 道路路由", quality: "routed" };
   } catch { return routeFallback(items); }
 }
 
-async function resolveLodgingAnchor(profile: any, city: any) {
+async function resolveLodgingAnchor(profile: any, city: any, env: any = null) {
   const label = cleanText(profile.lodgingArea, `${city.name}住宿区域`);
   if (!profile.lodgingArea) return { id: "hotel", name: label, lat: Number(city.lat), lng: Number(city.lng), source: city.source || "城市中心坐标" };
   try {
-    const raw = await callMcp(AMAP_MCP, "maps_text_search", { keywords: label, city: city.name, types: "住宿服务|商务住宅" }, { timeoutMs: 9000, cacheMs: 30 * 60 * 1000 });
+    const raw = await callMcp(AMAP_MCP, "maps_text_search", { keywords: label, city: city.name, types: "住宿服务|商务住宅" }, { timeoutMs: providerCallTimeout(env, 6000), cacheMs: 30 * 60 * 1000 });
     const row = amapPoiRows(raw)[0];
     const location = cleanText(row?.location).split(",").map(Number);
     if (location.length === 2 && location.every(Number.isFinite)) return { id: "hotel", name: label, lat: location[1], lng: location[0], source: "高德地图 MCP" };
@@ -2207,7 +2213,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
 async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: any) {
   const fetchedAt = new Date().toISOString();
   const publicTransit = /公交|地铁|公共交通/.test(cleanText(profile.transport));
-  const anchor = await resolveLodgingAnchor(profile, city);
+  const anchor = await resolveLodgingAnchor(profile, city, env);
   const candidatePool = uniqueSpots([
     ...spots.filter((spot: any) => spot.requiredByUser),
     ...spots.filter((spot: any) => !spot.requiredByUser),
@@ -2219,7 +2225,7 @@ async function buildTrafficMatrix(profile: any, city: any, spots: any[], env: an
   if (nodes.length < 2) throw new Error("无法为候选景点建立交通矩阵：有效坐标不足");
   const coordinates = nodes.map((node: any) => `${node.lng},${node.lat}`).join(";");
   try {
-    const data = await fetchJson(`${OSRM}/table/v1/driving/${coordinates}?annotations=duration,distance`, {}, 22000, "OSRM 交通矩阵");
+    const data = await fetchJson(`${OSRM}/table/v1/driving/${coordinates}?annotations=duration,distance`, {}, providerCallTimeout(env, 9000), "OSRM 交通矩阵");
     if (!Array.isArray(data?.durations) || !Array.isArray(data?.distances)) throw new Error("OSRM 未返回完整矩阵");
     const legs: any[] = [];
     nodes.forEach((from: any, fromIndex: number) => nodes.forEach((to: any, toIndex: number) => {
@@ -2407,7 +2413,7 @@ async function amapHotelsFor(env: any, city: any, location: string) {
       key, location: center, keywords: "酒店", types: "100000", radius: "10000",
       sortrule: "distance", extensions: "all", offset: "25", page,
     });
-    const raw = await fetchJson(`https://restapi.amap.com/v3/place/around?${params}`, {}, 15000, "高德酒店 POI");
+    const raw = await fetchJson(`https://restapi.amap.com/v3/place/around?${params}`, {}, providerCallTimeout(env, 8000), "高德酒店 POI");
     if (String(raw?.status) !== "1") throw new Error(cleanText(raw?.info, "高德酒店 POI 未返回成功状态"));
     return raw?.pois || [];
   }));
@@ -2432,10 +2438,16 @@ async function hotelFor(profile: any, city: any, env: any) {
   let mcpCandidates: any[] = [];
   let mcpError = "";
   try {
-    const geocoded: any = await callMcp(HOTEL_MCP, "geocode", { address: `${city.name}${area}`, city: city.name }, { timeoutMs: 12000, cacheMs: 30 * 60 * 1000 });
+    const geocoded: any = await callMcp(HOTEL_MCP, "geocode", { address: `${city.name}${area}`, city: city.name }, { timeoutMs: providerCallTimeout(env, 5000), cacheMs: 30 * 60 * 1000 });
     const geoRows = mcpData(geocoded)?.geocodes || mcpData(geocoded) || [];
     location = cleanText(Array.isArray(geoRows) ? geoRows[0]?.location : geoRows?.location, location);
-    const nearby: any = await callMcp(HOTEL_MCP, "nearby_hotel", { location, distance: 10 }, { timeoutMs: 12000, cacheMs: 15 * 60 * 1000 });
+  } catch (error: any) {
+    mcpError = cleanText(error?.message, "酒店 MCP 地理编码暂不可用");
+  }
+  const mcpTask = (async () => {
+    if (mcpError) return;
+    try {
+    const nearby: any = await callMcp(HOTEL_MCP, "nearby_hotel", { location, distance: 10 }, { timeoutMs: providerCallTimeout(env, 6000), cacheMs: 15 * 60 * 1000 });
     const rows = mcpData(nearby);
     mcpCandidates = (Array.isArray(rows) ? rows : rows?.hotels || []).map(hotelRecord).filter(Boolean).slice(0, 3);
     await Promise.all(mcpCandidates.filter(row => row.hotelId).map(async row => {
@@ -2443,7 +2455,7 @@ async function hotelFor(profile: any, city: any, env: any) {
         const raw = await callMcp(HOTEL_MCP, "hotel_product", {
           hotel_id: row.hotelId,
           query: `${checkIn}入住，${checkOut}离店，${profile.partySize}位住客，查询当前在售住宿产品及价格`,
-        }, { timeoutMs: 16000, cacheMs: 15 * 60 * 1000 });
+        }, { timeoutMs: providerCallTimeout(env, 6000), cacheMs: 15 * 60 * 1000 });
         const summary: any = hotelProductSummary(raw);
         row.products = summary.products;
         row.availability = summary.queryAvailability;
@@ -2456,12 +2468,16 @@ async function hotelFor(profile: any, city: any, env: any) {
     }));
   } catch (error: any) {
     mcpError = cleanText(error?.message, "酒店 MCP 暂不可用");
-  }
+    }
+  })();
 
   let amapCandidates: any[] = [];
   let amapError = "";
-  try { amapCandidates = await amapHotelsFor(env, city, location); }
-  catch (error: any) { amapError = cleanText(error?.message, "高德酒店 POI 暂不可用"); }
+  const amapTask = (async () => {
+    try { amapCandidates = await amapHotelsFor(env, city, location); }
+    catch (error: any) { amapError = cleanText(error?.message, "高德酒店 POI 暂不可用"); }
+  })();
+  await Promise.all([mcpTask, amapTask]);
 
   const mergedByName = new Map<string, any>();
   for (const row of [...amapCandidates, ...mcpCandidates]) {
@@ -2520,13 +2536,13 @@ function diningRecord(row: any) {
   };
 }
 
-async function diningFor(city: string, lat: number, lng: number, mealType: string) {
+async function diningFor(city: string, lat: number, lng: number, mealType: string, env: any = null) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return { status: "unavailable", candidates: [], message: "缺少路线锚点坐标" };
   try {
     const keyword = mealType === "dinner" ? "本地特色 晚餐" : "本地特色 午餐";
     const raw: any = await callMcp(AMAP_MCP, "maps_around_search", {
       location: `${lng},${lat}`, keywords: keyword, types: "餐饮服务", radius: "1500", city,
-    }, { timeoutMs: 10000, cacheMs: 30 * 60 * 1000 });
+    }, { timeoutMs: providerCallTimeout(env, 5000), cacheMs: 30 * 60 * 1000 });
     const rows = amapPoiRows(raw).map(diningRecord).filter(Boolean)
       .filter((row: any) => !/茶|咖啡|甜品|饮品/.test(`${row.name} ${row.type}`))
       .sort((a: any, b: any) => Number(a.distanceM ?? 999999) - Number(b.distanceM ?? 999999))
@@ -3990,10 +4006,10 @@ async function buildPlan(profile: any, city: any, env: any, replanContext: any =
       });
     }
     for (const day of daysPlan) {
-      day.route = await routeFor(day.items);
+      day.route = await routeFor(day.items, env);
       await enrichDayTransit(day, city, env, finalTransitCache);
       reflowDayAfterTransit(day, profile);
-      day.dining = await Promise.all(day.blocks.filter((block: any) => block.type === "rest" && block.mealType && block.anchor).map((block: any) => diningFor(city.name, block.anchor.lat, block.anchor.lng, block.mealType)));
+      day.dining = await Promise.all(day.blocks.filter((block: any) => block.type === "rest" && block.mealType && block.anchor).map((block: any) => diningFor(city.name, block.anchor.lat, block.anchor.lng, block.mealType, env)));
     }
     const budgetBreakdown = estimateTripCost({
       profile,

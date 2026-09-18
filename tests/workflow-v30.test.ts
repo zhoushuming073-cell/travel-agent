@@ -13,6 +13,11 @@ import { leaseWaitSchedule, runtimeStateForClient } from "../worker/workflow/run
 import {
   advancePlannerResearch,
   planResearchQueriesWithFallback,
+  RESEARCH_EVIDENCE_LIMIT_PER_ROUND,
+  RESEARCH_PAGE_LIMIT_PER_ROUND,
+  RESEARCH_RESULTS_PER_QUERY,
+  evidenceForResearchRefinement,
+  researchPageUrlsForRound,
   type ResearchArtifactStore,
   type ResearchRuntime,
 } from "../worker/workflow/research/research-runner.ts";
@@ -198,12 +203,38 @@ test("V30 planner, critic and repair calls all obey the active timeout boundary"
 
 test("V30 does not start a fallback model without a useful execution window", () => {
   const budget = createAdvanceExecutionBudget(1_000, 40_000);
-  assert.equal(externalCallTimeoutMs(budget, 30_000, 1_000), 30_000);
+  assert.equal(externalCallTimeoutMs(budget, 30_000, 1_000), 24_000);
   assert.throws(
     () => externalCallTimeoutMs(budget, 30_000, 34_500),
     AdvanceBudgetExhaustedError,
   );
   assert.equal(externalCallTimeoutMs(budget, 3_000, 32_000), 3_000);
+});
+
+test("V30 production research caps page and refinement fan-out", () => {
+  assert.equal(RESEARCH_RESULTS_PER_QUERY, 3);
+  assert.equal(RESEARCH_PAGE_LIMIT_PER_ROUND, 12);
+  assert.equal(RESEARCH_EVIDENCE_LIMIT_PER_ROUND, 24);
+  const executions = Array.from({ length: 6 }, (_, queryIndex) => ({
+    request,
+    results: Array.from({ length: 10 }, (_, resultIndex) => ({
+      id: `q${queryIndex}-result${resultIndex}`,
+      queryId: `query-${queryIndex}`,
+      title: `q${queryIndex}-result${resultIndex}`,
+      url: `https://example.com/q${queryIndex}/${resultIndex}`,
+      snippet: "",
+      provider: "test",
+      sourceTier: "tier_3_news" as const,
+      discoveredAt: new Date(0).toISOString(),
+      pageStatus: "search_discovered" as const,
+      targetId: request.targetId,
+      questionType: request.questionType,
+    })),
+  }));
+  const urls = researchPageUrlsForRound(executions, 100);
+  assert.equal(urls.length, 12);
+  assert.ok(urls.every((url) => Number(url.split("/").at(-1)) < 3));
+  assert.equal(evidenceForResearchRefinement(Array.from({ length: 50 }, (_, index) => ({ id: String(index) } as never))).length, 24);
 });
 
 test("V30 lease contention is exposed as a durable waiting window", () => {
