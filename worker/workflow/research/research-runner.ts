@@ -17,6 +17,9 @@ export const RESEARCH_PAGE_BATCH_SIZE = 3;
 export const RESEARCH_RESULTS_PER_QUERY = 3;
 export const RESEARCH_PAGE_LIMIT_PER_ROUND = 12;
 export const RESEARCH_EVIDENCE_LIMIT_PER_ROUND = 24;
+export const RESEARCH_FOLLOWUP_QUERY_LIMIT = 4;
+export const RESEARCH_FOLLOWUP_PAGE_LIMIT = 6;
+export const RESEARCH_FOLLOWUP_EVIDENCE_LIMIT = 12;
 
 export interface ResearchSearchExecution {
   request: ResearchRequest;
@@ -151,8 +154,11 @@ export function researchPageUrlsForRound(
     .slice(0, Math.max(0, Math.min(targetPageBudget, RESEARCH_PAGE_LIMIT_PER_ROUND)));
 }
 
-export function evidenceForResearchRefinement(rows: ResearchEvidence[]): ResearchEvidence[] {
-  return rows.slice(0, RESEARCH_EVIDENCE_LIMIT_PER_ROUND);
+export function evidenceForResearchRefinement(
+  rows: ResearchEvidence[],
+  limit = RESEARCH_EVIDENCE_LIMIT_PER_ROUND,
+): ResearchEvidence[] {
+  return rows.slice(0, Math.min(limit, RESEARCH_EVIDENCE_LIMIT_PER_ROUND));
 }
 
 async function persistState(store: ResearchArtifactStore, state: PlannerResearchState): Promise<void> {
@@ -228,7 +234,10 @@ export async function advancePlannerResearch(
   const executions = await loadOperations<ResearchSearchExecution>(store, state.searchOperationIds);
   const roundQueryIds = new Set(roundRequests.map((request) => request.queryId));
   const roundExecutions = executions.filter((execution) => roundQueryIds.has(execution.request.queryId));
-  const pageUrls = researchPageUrlsForRound(roundExecutions, state.budget.targetPageBudget);
+  const pageUrls = researchPageUrlsForRound(
+    roundExecutions,
+    Math.min(state.budget.targetPageBudget, state.round === 0 ? RESEARCH_PAGE_LIMIT_PER_ROUND : RESEARCH_FOLLOWUP_PAGE_LIMIT),
+  );
 
   if (state.cursor.step === "fetch_batch") {
     const batches = batch(pageUrls, RESEARCH_PAGE_BATCH_SIZE);
@@ -277,6 +286,7 @@ export async function advancePlannerResearch(
   const roundExtractIds = state.extractOperationIds.filter((id) => id.startsWith(`r${state.round}:`));
   const extracted = evidenceForResearchRefinement(
     await loadOperations<ResearchEvidence>(store, roundExtractIds),
+    state.round === 0 ? RESEARCH_EVIDENCE_LIMIT_PER_ROUND : RESEARCH_FOLLOWUP_EVIDENCE_LIMIT,
   );
 
   if (state.cursor.step === "refine_batch") {

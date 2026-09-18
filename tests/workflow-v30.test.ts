@@ -8,12 +8,16 @@ import {
   AdvanceBudgetExhaustedError,
   createAdvanceExecutionBudget,
   externalCallTimeoutMs,
+  providerIoTimeoutMs,
 } from "../worker/workflow/advance-budget.ts";
 import { leaseWaitSchedule, runtimeStateForClient } from "../worker/workflow/runtime-state.ts";
 import {
   advancePlannerResearch,
   planResearchQueriesWithFallback,
   RESEARCH_EVIDENCE_LIMIT_PER_ROUND,
+  RESEARCH_FOLLOWUP_EVIDENCE_LIMIT,
+  RESEARCH_FOLLOWUP_PAGE_LIMIT,
+  RESEARCH_FOLLOWUP_QUERY_LIMIT,
   RESEARCH_PAGE_LIMIT_PER_ROUND,
   RESEARCH_RESULTS_PER_QUERY,
   evidenceForResearchRefinement,
@@ -203,7 +207,7 @@ test("V30 planner, critic and repair calls all obey the active timeout boundary"
 
 test("V30 does not start a fallback model without a useful execution window", () => {
   const budget = createAdvanceExecutionBudget(1_000, 40_000);
-  assert.equal(externalCallTimeoutMs(budget, 30_000, 1_000), 24_000);
+  assert.equal(externalCallTimeoutMs(budget, 30_000, 1_000), 18_000);
   assert.throws(
     () => externalCallTimeoutMs(budget, 30_000, 34_500),
     AdvanceBudgetExhaustedError,
@@ -215,6 +219,9 @@ test("V30 production research caps page and refinement fan-out", () => {
   assert.equal(RESEARCH_RESULTS_PER_QUERY, 3);
   assert.equal(RESEARCH_PAGE_LIMIT_PER_ROUND, 12);
   assert.equal(RESEARCH_EVIDENCE_LIMIT_PER_ROUND, 24);
+  assert.equal(RESEARCH_FOLLOWUP_QUERY_LIMIT, 4);
+  assert.equal(RESEARCH_FOLLOWUP_PAGE_LIMIT, 6);
+  assert.equal(RESEARCH_FOLLOWUP_EVIDENCE_LIMIT, 12);
   const executions = Array.from({ length: 6 }, (_, queryIndex) => ({
     request,
     results: Array.from({ length: 10 }, (_, resultIndex) => ({
@@ -235,6 +242,14 @@ test("V30 production research caps page and refinement fan-out", () => {
   assert.equal(urls.length, 12);
   assert.ok(urls.every((url) => Number(url.split("/").at(-1)) < 3));
   assert.equal(evidenceForResearchRefinement(Array.from({ length: 50 }, (_, index) => ({ id: String(index) } as never))).length, 24);
+  assert.equal(evidenceForResearchRefinement(Array.from({ length: 50 }, (_, index) => ({ id: String(index) } as never)), RESEARCH_FOLLOWUP_EVIDENCE_LIMIT).length, 12);
+});
+
+test("V30 reserves the tail of provider-heavy stages for durable commits", () => {
+  const budget = createAdvanceExecutionBudget(1_000, 40_000);
+  assert.equal(providerIoTimeoutMs(budget, 7_000, 1_000), 7_000);
+  assert.equal(providerIoTimeoutMs(budget, 5_000, 15_000), 5_000);
+  assert.throws(() => providerIoTimeoutMs(budget, 7_000, 16_000), AdvanceBudgetExhaustedError);
 });
 
 test("V30 lease contention is exposed as a durable waiting window", () => {

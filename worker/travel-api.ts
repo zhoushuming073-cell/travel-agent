@@ -109,10 +109,12 @@ import {
   createAdvanceExecutionBudget,
   externalCallTimeoutMs,
   isAdvanceBudgetExhausted,
+  providerIoTimeoutMs,
 } from "./workflow/advance-budget.ts";
 import {
   advancePlannerResearch,
   currentResearchMicroStep,
+  RESEARCH_FOLLOWUP_QUERY_LIMIT,
 } from "./workflow/research/research-runner.ts";
 import type { PlannerResearchState } from "./workflow/research/research-state.ts";
 import { leaseWaitSchedule, runtimeStateForClient } from "./workflow/runtime-state.ts";
@@ -759,7 +761,7 @@ async function advanceResearchAgentCheckpoint(jobId: string, profile: any, knowl
         if (usedKeys.has(key)) return false;
         usedKeys.add(key);
         return true;
-      }).slice(0, Math.max(0, Math.min(state.budget.targetQueryBudget - state.completedQueryIds.length, state.round === 0 ? 8 : 5)));
+      }).slice(0, Math.max(0, Math.min(state.budget.targetQueryBudget - state.completedQueryIds.length, state.round === 0 ? 8 : RESEARCH_FOLLOWUP_QUERY_LIMIT)));
       return { requests, model, modelStatus, degradedReason: degradedReason || undefined, aiCalls };
     },
     search: async (requests, operationId) => {
@@ -1866,7 +1868,7 @@ function firstTransit(value: any) {
 
 function providerCallTimeout(env: any, requestedMs: number) {
   return env?.ADVANCE_EXECUTION_BUDGET
-    ? externalCallTimeoutMs(env.ADVANCE_EXECUTION_BUDGET, requestedMs)
+    ? providerIoTimeoutMs(env.ADVANCE_EXECUTION_BUDGET, requestedMs)
     : requestedMs;
 }
 

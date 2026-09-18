@@ -30,7 +30,7 @@
 
 `start` 检查单次 1—7 天限制、会话、幂等键、同会话活动任务、全站并发和每日额度。任务及输入写入 D1，恢复期限是 24 小时。
 
-每次推进只执行下一个未完成阶段中的一个工作单元。阶段通过 owner + nonce 获取 45 秒租约，每 15 秒续租；写入检查点前确认任务未取消、租约仍属于自己。V30 的 advance soft budget 为 40 秒，生产实测后把外部调用上限收紧为 24 秒，并预留 6 秒写 artifact、更新任务、释放租约和序列化响应。首个模型超时后，只有剩余调用窗口不少于 8 秒才会尝试候选模型，避免短暂的第二次调用把整个 HTTP 请求推到平台断连边界。阶段结果、事件、provider attempts 与 runtime telemetry 都持久化；租约冲突会按实际租约到期时间进入 `WAITING`。
+每次推进只执行下一个未完成阶段中的一个工作单元。阶段通过 owner + nonce 获取 45 秒租约，每 15 秒续租；写入检查点前确认任务未取消、租约仍属于自己。V30 的 advance soft budget 为 40 秒，生产实测后把单次外部调用上限收紧为 18 秒，并为地图、酒店、餐饮等非模型 Provider 设置单次推进合计 20 秒的 I/O 窗口，另外预留 6 秒写 artifact、更新任务、释放租约和序列化响应。首个模型超时后，只有剩余调用窗口不少于 8 秒才会尝试候选模型，避免短暂的第二次调用把整个 HTTP 请求推到平台断连边界。阶段结果、事件、provider attempts 与 runtime telemetry 都持久化；租约冲突会按实际租约到期时间进入 `WAITING`。
 
 模型请求新增跨 Worker 的原子调用闸门：同 endpoint + API key 的所有用途共用间隔，数据库只存散列标识，不存明文 key。`AI_REQUEST_MIN_INTERVAL_MS` 默认 65000 毫秒，是保守设置，不是已测得的服务商 QPM。不同部署或本地与生产使用不同数据库时，闸门不互通，因此仍应错开测试。
 
@@ -38,7 +38,7 @@
 
 短等待可以在请求内完成；若 AI slot、429 冷却或退避超过 2 秒，Worker 不再循环休眠，而是持久化 `retryNotBefore` 并返回 `retryable=true`。浏览器在 WAITING 期间只轮询状态，不重复 POST `/advance`。持续三次限流后明确报 `AI_RATE_LIMITED`，保留检查点；限流不计为结构错误。
 
-`planner_research` 的内部 cursor 依次为 query planning、search batch、page fetch batch、deterministic extraction、optional AI refinement、fact fusion 和 finalize。生产预算限制为每个查询最多取前三个 URL、每轮最多读取 12 个页面、最多精炼 24 条证据，避免复杂请求膨胀成数十个抓取批次。每个 operation 使用确定性 ID，先写独立 artifact 再推进 cursor；Worker 在两者之间中断时，下次 advance 发现 artifact 后直接复用，不重复搜索、证据累计或预算扣减。
+`planner_research` 的内部 cursor 依次为 query planning、search batch、page fetch batch、deterministic extraction、optional AI refinement、fact fusion 和 finalize。生产预算限制为每个查询最多取前三个 URL；首轮最多读取 12 个页面、精炼 24 条证据，后续轮最多 4 个查询、6 个页面、12 条精炼证据，避免复杂请求膨胀成数十个抓取批次。每个 operation 使用确定性 ID，先写独立 artifact 再推进 cursor；Worker 在两者之间中断时，下次 advance 发现 artifact 后直接复用，不重复搜索、证据累计或预算扣减。
 
 永久 404/鉴权失败可以直接走透明恢复；其他草案错误先做阶段重试。没有通过校验的结果不能伪装成功。当前限流队列不是严格 FIFO；保守节流会增加总耗时，不能保证跨部署共享账号的配额。
 
