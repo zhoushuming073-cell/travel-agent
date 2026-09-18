@@ -97,6 +97,13 @@ export function classifyAiFailure(error: unknown): AiFailureCode {
   return "UNKNOWN";
 }
 
+export function shouldTryAlternateModel(code: AiFailureCode): boolean {
+  return code === "MODEL_NOT_FOUND"
+    || code === "INVALID_JSON"
+    || code === "CONTENT_INVALID"
+    || code === "UNKNOWN";
+}
+
 export function circuitKey(endpoint: string, model: string) {
   return `${clean(endpoint)}|${clean(model)}`;
 }

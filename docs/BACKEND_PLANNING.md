@@ -34,6 +34,8 @@
 
 模型请求新增跨 Worker 的原子调用闸门：同 endpoint + API key 的所有用途共用间隔，数据库只存散列标识，不存明文 key。`AI_REQUEST_MIN_INTERVAL_MS` 默认 65000 毫秒，是保守设置，不是已测得的服务商 QPM。不同部署或本地与生产使用不同数据库时，闸门不互通，因此仍应错开测试。
 
+模型候选只用于模型特定错误。`MODEL_NOT_FOUND`、无效 JSON 或无效内容可以在后续持久化推进中尝试兼容模型；`TIMEOUT`、`NETWORK_ERROR`、`PROVIDER_UNAVAILABLE`、鉴权和限流属于同一服务商或账号级故障，不会为每个候选模型重复占用一次 65 秒调用窗口，而是立即进入当前阶段的重试或确定性降级。
+
 短等待可以在请求内完成；若 AI slot、429 冷却或退避超过 2 秒，Worker 不再循环休眠，而是持久化 `retryNotBefore` 并返回 `retryable=true`。浏览器在 WAITING 期间只轮询状态，不重复 POST `/advance`。持续三次限流后明确报 `AI_RATE_LIMITED`，保留检查点；限流不计为结构错误。
 
 `planner_research` 的内部 cursor 依次为 query planning、search batch、page fetch batch、deterministic extraction、optional AI refinement、fact fusion 和 finalize。生产预算限制为每个查询最多取前三个 URL、每轮最多读取 12 个页面、最多精炼 24 条证据，避免复杂请求膨胀成数十个抓取批次。每个 operation 使用确定性 ID，先写独立 artifact 再推进 cursor；Worker 在两者之间中断时，下次 advance 发现 artifact 后直接复用，不重复搜索、证据累计或预算扣减。

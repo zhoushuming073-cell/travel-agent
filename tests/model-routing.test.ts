@@ -7,6 +7,7 @@ import {
   aiEndpoint,
   aiModelCandidates,
   aiPrimaryModel,
+  shouldTryAlternateModel,
 } from "../worker/domain/model-routing.ts";
 
 test("defaults to the official DeepSeek endpoint and current planner model", () => {
@@ -36,4 +37,13 @@ test("strict routing never crosses the configured responsibility boundary", () =
 test("keeps legacy secret and model variable names compatible", () => {
   assert.equal(aiApiKey({ DEEPSEEK_API_KEY: "legacy-key" }), "legacy-key");
   assert.equal(aiPrimaryModel({ DEEPSEEK_PLANNER_MODEL: "custom-planner" }, "planner"), "custom-planner");
+});
+
+test("provider-wide failures do not multiply calls across models", () => {
+  for (const code of ["TIMEOUT", "NETWORK_ERROR", "PROVIDER_UNAVAILABLE", "UNAUTHORIZED", "RATE_LIMITED"] as const) {
+    assert.equal(shouldTryAlternateModel(code), false, code);
+  }
+  for (const code of ["MODEL_NOT_FOUND", "INVALID_JSON", "CONTENT_INVALID", "UNKNOWN"] as const) {
+    assert.equal(shouldTryAlternateModel(code), true, code);
+  }
 });

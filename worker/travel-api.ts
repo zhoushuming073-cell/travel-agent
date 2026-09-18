@@ -27,6 +27,7 @@ import {
   modelFamily,
   modelCircuitState,
   openModelCircuit,
+  shouldTryAlternateModel,
   type AiPurpose,
 } from "./domain/model-routing.ts";
 import {
@@ -1032,7 +1033,7 @@ async function aiRequest(env: any, options: {
       const classified = classifyAiFailure(error);
       openModelCircuit(endpoint, model, error);
       failures.push(`${model}: [${classified}] ${cleanText(error?.message, "请求失败")}`);
-      if (classified === "UNAUTHORIZED" || isAiRateLimited(error)) break;
+      if (!shouldTryAlternateModel(classified) || isAiRateLimited(error)) break;
     }
   }
   throw new Error(`${provider} 模型均不可用：${failures.join("；")}`);
