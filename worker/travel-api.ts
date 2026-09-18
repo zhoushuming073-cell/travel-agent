@@ -114,7 +114,7 @@ import {
   currentResearchMicroStep,
 } from "./workflow/research/research-runner.ts";
 import type { PlannerResearchState } from "./workflow/research/research-state.ts";
-import { runtimeStateForClient } from "./workflow/runtime-state.ts";
+import { leaseWaitSchedule, runtimeStateForClient } from "./workflow/runtime-state.ts";
 import {
   acquireTravelJobLease,
   addTravelJobEvent,
@@ -3349,7 +3349,20 @@ async function advancePlanningJob(jobId: string, env: any) {
   } catch (error: any) {
     const message = cleanText(error?.message, "阶段执行失败");
     if (/TASK_CANCELLED/.test(message)) return { status: "cancelled", currentStep: stage, retryable: false };
-    if (/租约暂不可用|LEASE_LOST/.test(message)) return { status: "working", retryable: true, retryAfterMs: 10_000, currentStep: stage };
+    if (/租约暂不可用|LEASE_LOST/.test(message)) {
+      const latestJob = await getTravelJob(jobId);
+      const wait = leaseWaitSchedule(latestJob?.leaseExpiresAt, Date.now());
+      const runtime: any = await getTravelJobArtifact(jobId, "runtime:v30");
+      await updateWorkflowRuntime(jobId, {
+        mode: "waiting", currentStage: stage, currentMicroStep: runtime?.currentMicroStep || stage,
+        retryNotBefore: wait.retryNotBefore, lastHeartbeatAt: Date.now(),
+        degradedReason: "前一工作单元仍持有租约，正在等待安全恢复",
+      });
+      return {
+        status: "working", executionState: "waiting", retryable: true,
+        retryAfterMs: wait.retryAfterMs, retryNotBefore: wait.retryNotBefore, currentStep: stage,
+      };
+    }
     if (isDurableAiWait(error) || isAdvanceBudgetExhausted(error)) {
       const retryAfterMs = isDurableAiWait(error) ? error.retryAfterMs : error.retryAfterMs;
       const retryNotBefore = Date.now() + Math.max(500, retryAfterMs);

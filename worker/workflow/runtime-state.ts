@@ -17,6 +17,26 @@ export interface WorkflowRuntimeState {
   degradedReason?: string;
 }
 
+export interface WorkflowWaitSchedule {
+  retryAfterMs: number;
+  retryNotBefore: number;
+}
+
+export function leaseWaitSchedule(
+  leaseExpiresAt: number | null | undefined,
+  now = Date.now(),
+  fallbackMs = 10_000,
+): WorkflowWaitSchedule {
+  const knownExpiry = Number(leaseExpiresAt || 0);
+  const retryNotBefore = knownExpiry > now
+    ? knownExpiry + 500
+    : now + Math.max(500, fallbackMs);
+  return {
+    retryAfterMs: Math.max(500, retryNotBefore - now),
+    retryNotBefore,
+  };
+}
+
 export function runtimeStateForClient(
   state: WorkflowRuntimeState | null,
   now = Date.now(),

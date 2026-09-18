@@ -87,7 +87,7 @@ The ordered `WORKFLOW_STAGES` contract is:
 
 ## V30 execution budget and micro-checkpoints
 
-The public workflow remains the same 17 stages. Internally, long work is constrained by a 40-second advance soft budget, a 30-second external-call ceiling, and a 6-second commit reserve. A model slot that is more than two seconds away becomes a durable WAITING state with `retryNotBefore`; the Worker does not sleep across that interval.
+The public workflow remains the same 17 stages. Internally, long work is constrained by a 40-second advance soft budget, a 30-second external-call ceiling, and a 6-second commit reserve. After an external timeout, another model candidate is started only when at least eight seconds of useful call time remain; this prevents a doomed fallback call from pushing the HTTP request into the platform disconnect boundary. A model slot that is more than two seconds away becomes a durable WAITING state with `retryNotBefore`; the Worker does not sleep across that interval. Lease contention is handled the same way, with the retry time aligned to the persisted lease expiry instead of a fixed client-side delay.
 
 `planner_research` persists `research:state:v30` plus bounded operation artifacts. Its cursor advances through `plan_queries`, query-sized `search_batch`, URL-sized `fetch_batch`, deterministic `extract_batch`, optional `refine_batch`, `fuse`, and `finalize`. Deterministic operation IDs make artifact-first/cursor-second crash recovery idempotent: an existing operation artifact is reused after lease expiry or process interruption.
 

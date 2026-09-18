@@ -5,6 +5,12 @@ import { createAdaptiveResearchBudget } from "../worker/domain/research-budget.t
 import type { ResearchGap, ResearchRequest } from "../worker/domain/research-types.ts";
 import { executeExternalCall, ExternalCallTimeoutError } from "../worker/workflow/model-execution.ts";
 import {
+  AdvanceBudgetExhaustedError,
+  createAdvanceExecutionBudget,
+  externalCallTimeoutMs,
+} from "../worker/workflow/advance-budget.ts";
+import { leaseWaitSchedule, runtimeStateForClient } from "../worker/workflow/runtime-state.ts";
+import {
   advancePlannerResearch,
   planResearchQueriesWithFallback,
   type ResearchArtifactStore,
@@ -188,4 +194,31 @@ test("V30 planner, critic and repair calls all obey the active timeout boundary"
     }), { timeoutMs: 15 }), ExternalCallTimeoutError);
     assert.ok(Date.now() - started < 500, `${purpose} exceeded test timeout boundary`);
   }
+});
+
+test("V30 does not start a fallback model without a useful execution window", () => {
+  const budget = createAdvanceExecutionBudget(1_000, 40_000);
+  assert.equal(externalCallTimeoutMs(budget, 30_000, 1_000), 30_000);
+  assert.throws(
+    () => externalCallTimeoutMs(budget, 30_000, 34_500),
+    AdvanceBudgetExhaustedError,
+  );
+  assert.equal(externalCallTimeoutMs(budget, 3_000, 32_000), 3_000);
+});
+
+test("V30 lease contention is exposed as a durable waiting window", () => {
+  const now = 100_000;
+  const wait = leaseWaitSchedule(now + 31_000, now);
+  assert.deepEqual(wait, { retryAfterMs: 31_500, retryNotBefore: 131_500 });
+  const runtime = runtimeStateForClient({
+    version: 30,
+    mode: "waiting",
+    currentStage: "planner_research",
+    currentMicroStep: "planner_research:round:0:plan_queries",
+    microStepStartedAt: now - 30_000,
+    lastHeartbeatAt: now,
+    retryNotBefore: wait.retryNotBefore,
+    attempt: 1,
+  }, now, now + 31_000);
+  assert.equal(runtime?.mode, "waiting");
 });

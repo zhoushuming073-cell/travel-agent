@@ -1,6 +1,7 @@
 export const ADVANCE_SOFT_BUDGET_MS = 40_000;
 export const ADVANCE_COMMIT_RESERVE_MS = 6_000;
 export const EXTERNAL_CALL_MAX_MS = 30_000;
+export const MIN_EXTERNAL_CALL_WINDOW_MS = 8_000;
 export const MAX_IN_REQUEST_THROTTLE_WAIT_MS = 2_000;
 
 export interface AdvanceExecutionBudget {
@@ -26,7 +27,8 @@ export function externalCallTimeoutMs(
   now = Date.now(),
 ): number {
   const available = remainingAdvanceMs(budget, now) - ADVANCE_COMMIT_RESERVE_MS;
-  if (available < 1_000) throw new AdvanceBudgetExhaustedError(Math.max(0, available));
+  const minimumUsefulWindow = Math.min(requestedMs, MIN_EXTERNAL_CALL_WINDOW_MS);
+  if (available < minimumUsefulWindow) throw new AdvanceBudgetExhaustedError(Math.max(0, available));
   return Math.max(1_000, Math.min(EXTERNAL_CALL_MAX_MS, requestedMs, available));
 }
 
